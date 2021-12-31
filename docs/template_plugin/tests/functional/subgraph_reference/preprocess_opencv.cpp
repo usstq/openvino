@@ -212,7 +212,7 @@ TEST_F(PreprocessOpenCVReferenceTest, resize_u8_large_picture_linear) {
     // Calculate reference expected values from OpenCV
     cv::Mat cvPic = cv::Mat(input_height, input_width, CV_8UC1, input_img.data());
     cv::Mat cvPicResized;
-    cv::resize(cvPic, cvPicResized, cv::Size(func_width, func_height), cv::INTER_LINEAR_EXACT);
+    cv::resize(cvPic, cvPicResized, cv::Size(func_width, func_height), cv::INTER_LINEAR);
     refOutData.emplace_back(param->get_element_type(), func_shape, cvPicResized.data);
     // Exec now
     Exec();
@@ -249,7 +249,7 @@ TEST_F(PreprocessOpenCVReferenceTest, resize_f32_large_picture_linear) {
     // Calculate reference expected values from OpenCV
     cv::Mat cvPic = cv::Mat(input_height, input_width, CV_32FC1, input_img.data());
     cv::Mat cvPicResized;
-    cv::resize(cvPic, cvPicResized, cv::Size(func_width, func_height), cv::INTER_LINEAR_EXACT);
+    cv::resize(cvPic, cvPicResized, cv::Size(func_width, func_height), cv::INTER_LINEAR);
     refOutData.emplace_back(param->get_element_type(), func_shape, cvPicResized.data);
     // Exec now
     Exec();

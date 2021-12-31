@@ -6,6 +6,7 @@
 
 #include <chrono>
 #include <ratio>
+#include <cstdlib>
 
 namespace MKLDNNPlugin {
 
@@ -38,17 +39,25 @@ private:
 
     friend class PerfHelper;
 };
-
 class PerfHelper {
     PerfCount &counter;
+    bool b_active;
 
 public:
-    explicit PerfHelper(PerfCount &count): counter(count) { counter.start_itr(); }
+    explicit PerfHelper(PerfCount& count, int mode) : counter(count) {
+        static int perf_mode = std::getenv("PERFM") ? std::atoi(std::getenv("PERFM")) : 0;
+        if (perf_mode == mode) {
+            b_active = true;
+            counter.start_itr();
+        } else {
+            b_active = false;
+        }
+    }
 
-    ~PerfHelper() { counter.finish_itr(); }
+    ~PerfHelper() { if (b_active) counter.finish_itr(); }
 };
 
 }  // namespace MKLDNNPlugin
 
-#define GET_PERF(_node) std::unique_ptr<PerfHelper>(new PerfHelper(_node->PerfCounter()))
-#define PERF(_node, _need) auto pc = _need ? GET_PERF(_node) : nullptr;
+#define GET_PERF(_node, mode) std::unique_ptr<PerfHelper>(new PerfHelper(_node->PerfCounter(), mode))
+#define PERF(_node, _need) auto pc = _need ? GET_PERF(_node, 0) : nullptr;

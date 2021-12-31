@@ -517,15 +517,26 @@ void MKLDNNNode::execute(mkldnn::stream strm) {
 
 void MKLDNNNode::executeDynamic(mkldnn::stream strm) {
     if (needShapeInfer()) {
-        redefineOutputMemory(shapeInfer());
+        std::vector<VectorDims> v;
+        {
+            auto pc = GET_PERF(this, 1);
+            v = shapeInfer();
+        }
+        redefineOutputMemory(v);
     }
     if (isExecutable()) {
-        if (needPrepareParams()) {
-            IE_ASSERT(inputShapesDefined()) << "Can't prepare params for " << getTypeStr() << " node with name: " << getName() <<
-                " since the input shapes are not defined.";
-            prepareParams();
+        {
+            auto pc = GET_PERF(this, 2);
+            if (needPrepareParams()) {
+                IE_ASSERT(inputShapesDefined()) << "Can't prepare params for " << getTypeStr() << " node with name: " << getName() <<
+                    " since the input shapes are not defined.";
+                prepareParams();
+            }
         }
-        executeDynamicImpl(strm);
+        {
+            auto pc = GET_PERF(this, 3);
+            executeDynamicImpl(strm);
+        }
     }
     updateLastInputDims();
 }
