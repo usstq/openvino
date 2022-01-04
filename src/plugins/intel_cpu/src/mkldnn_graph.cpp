@@ -860,7 +860,7 @@ void MKLDNNGraph::Infer(MKLDNNInferRequest* request, int batch) {
 
     for (const auto& node : executableGraphNodes) {
         VERBOSE(node, config.debugCaps.verbose);
-        PERF(node, config.collectPerfCounters);
+        //PERF(node, config.collectPerfCounters);
 
         if (request)
             request->ThrowIfCanceled();
