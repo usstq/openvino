@@ -212,6 +212,10 @@ std::shared_ptr<ngraph::Function> MKLDNNExecNetwork::GetExecGraphInfo() {
     if (_graphs.empty())
         IE_THROW() << "No graph was found";
 
+    int opt_linenum = atoi(std::getenv("OPT_LINENUM")?std::getenv("OPT_LINENUM"):"99999");
+    if (opt_linenum <= 0) {
+        return std::const_pointer_cast<ngraph::Function>(_network.getFunction());
+    }
     return GetGraph()._graph.dump();
 }
 

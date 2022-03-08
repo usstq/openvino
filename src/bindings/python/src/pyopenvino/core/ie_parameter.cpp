@@ -13,4 +13,10 @@ void regclass_Parameter(py::module m) {
 
     cls.def(py::init<const char*>());
     cls.def(py::init<std::string>());
+
+    cls.def("__str__", [](const InferenceEngine::Parameter& self) {
+        std::stringstream ss;
+        self.print(ss);
+        return ss.str();
+    });
 }

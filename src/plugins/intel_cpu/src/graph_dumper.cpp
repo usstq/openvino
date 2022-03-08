@@ -14,6 +14,8 @@
 #include <ngraph/pass/manager.hpp>
 #include <openvino/pass/serialize.hpp>
 
+#include "nodes/fake_quantize.h"
+
 #include <vector>
 #include <string>
 #include <memory>
@@ -29,12 +31,37 @@ void serializeToXML(const MKLDNNGraph &graph, const std::string& path);
 
 namespace {
 
+template<typename T, typename T2>
+static std::string memory2str(const void * p, size_t sz) {
+    std::stringstream ss;
+    auto cnt = sz/sizeof(T);
+    auto data = reinterpret_cast<const T *>(p);
+    for (int i = 0; i < 8; i++) {
+        ss << static_cast<T2>(data[i]);
+        if (i >= cnt-1) return ss.str();
+        ss << ",";
+    }
+    ss << "...";
+    return ss.str();
+}
+
 std::map<std::string, std::string> extract_node_metadata(const MKLDNNNodePtr &node) {
     std::map<std::string, std::string> serialization_info;
 
     if (node->getType() == Input && node->isConstant()) {
         // We need to separate Input and Const layers
         serialization_info[ExecGraphInfoSerialization::LAYER_TYPE] = "Const";
+        void * pdata = node->getChildEdgeAt(0)->getMemory().GetPtr();
+        size_t sz = node->getChildEdgeAt(0)->getMemory().GetSize();
+        auto precision = node->getChildEdgeAt(0)->getMemory().getDesc().getPrecision();
+        std::string value_str = "...";
+        if (precision == InferenceEngine::Precision::FP32)
+            value_str = memory2str<float, float>(pdata, sz);
+        if (precision == InferenceEngine::Precision::U8)
+            value_str = memory2str<uint8_t, uint32_t>(pdata, sz);
+        if (precision == InferenceEngine::Precision::I8)
+            value_str = memory2str<int8_t, int32_t>(pdata, sz);
+        serialization_info["Values"] = value_str;
     } else if (node->getType() == Generic) {
         // Path to print actual name for extension layers
         serialization_info[ExecGraphInfoSerialization::LAYER_TYPE] = node->getTypeStr();
