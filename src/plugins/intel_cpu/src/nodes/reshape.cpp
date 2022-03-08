@@ -39,6 +39,7 @@ MKLDNNReshapeNode::MKLDNNReshapeNode(const std::shared_ptr<ngraph::Node>& op, co
     }
 
     errorPrefix = std::string(op->get_type_name()) + " node with name '" + getName() + "'";
+    isOutputOfDynamicShape = false;
 
     if (isDynamicNode()) {
         auto checkSecondInput = [](const std::shared_ptr<ngraph::Node>& op, const std::string opType) {
@@ -122,6 +123,33 @@ void MKLDNNReshapeNode::initSupportedPrimitiveDescriptors() {
     config.outConfs[0].constant(false);
     config.outConfs[0].setMemDesc(creatorsMap.at(LayoutType::ncsp)->createSharedDesc(outPrec, getOutputShapeAtPort(0)));
     supportedPrimitiveDescriptors.emplace_back(config, impl_desc_type::unknown);
+
+    isOutputOfDynamicShape = getOutputShapeAtPort(0).isDynamic();
+}
+
+void MKLDNNReshapeNode::createPrimitive() {
+    // Workaround for dynamic output shape:
+    // Current implementation is not executable but only does
+    // memory reinterpretation, this only works when the output's
+    // in-place assumption is satisfied.
+    //
+    // when the second input (destination shape) comes from a non-const node and
+    // Reshape node produces output with dynamic shape at load/compilation
+    // stage, the generic in-place logic chooses to refuse the in-place config
+    // in reshape's output descriptor, because it cannot predict the exact size
+    // of the underlaying memory.
+    //
+    // This causes Reshape node to allocate separate output memory and breaks the
+    // in-place assumption.
+    //
+    // Guaranteed by reshape's semantics that output memory size is also the same
+    // as the input memory and in-place is always valid, so we force to establish in-place
+    // here to correct the execution result.
+    if (isOutputOfDynamicShape) {
+        auto input_edge = getParentEdgesAtPort(0)[0];
+        for (auto & edge : getChildEdgesAtPort(0))
+            edge->sharedMemFrom(input_edge);
+    }
 }
 
 void MKLDNNReshapeNode::executeDynamicImpl(mkldnn::stream strm) {
