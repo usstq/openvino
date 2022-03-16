@@ -13,9 +13,7 @@
 #include "ngraph/ngraph.hpp"
 #include <ngraph/pass/manager.hpp>
 #include <openvino/pass/serialize.hpp>
-
-#include "nodes/fake_quantize.h"
-
+#include "nodes/subgraph.h"
 #include <vector>
 #include <string>
 #include <memory>
@@ -31,37 +29,12 @@ void serializeToXML(const MKLDNNGraph &graph, const std::string& path);
 
 namespace {
 
-template<typename T, typename T2>
-static std::string memory2str(const void * p, size_t sz) {
-    std::stringstream ss;
-    auto cnt = sz/sizeof(T);
-    auto data = reinterpret_cast<const T *>(p);
-    for (int i = 0; i < 8; i++) {
-        ss << static_cast<T2>(data[i]);
-        if (i >= cnt-1) return ss.str();
-        ss << ",";
-    }
-    ss << "...";
-    return ss.str();
-}
-
 std::map<std::string, std::string> extract_node_metadata(const MKLDNNNodePtr &node) {
     std::map<std::string, std::string> serialization_info;
 
     if (node->getType() == Input && node->isConstant()) {
         // We need to separate Input and Const layers
         serialization_info[ExecGraphInfoSerialization::LAYER_TYPE] = "Const";
-        void * pdata = node->getChildEdgeAt(0)->getMemory().GetPtr();
-        size_t sz = node->getChildEdgeAt(0)->getMemory().GetSize();
-        auto precision = node->getChildEdgeAt(0)->getMemory().getDesc().getPrecision();
-        std::string value_str = "...";
-        if (precision == InferenceEngine::Precision::FP32)
-            value_str = memory2str<float, float>(pdata, sz);
-        if (precision == InferenceEngine::Precision::U8)
-            value_str = memory2str<uint8_t, uint32_t>(pdata, sz);
-        if (precision == InferenceEngine::Precision::I8)
-            value_str = memory2str<int8_t, int32_t>(pdata, sz);
-        serialization_info["Values"] = value_str;
     } else if (node->getType() == Generic) {
         // Path to print actual name for extension layers
         serialization_info[ExecGraphInfoSerialization::LAYER_TYPE] = node->getTypeStr();
@@ -199,6 +172,13 @@ std::shared_ptr<ngraph::Function> dump_graph_as_ie_ngraph_net(const MKLDNNGraph 
         } else if (is_output) {
             results.emplace_back(std::make_shared<ngraph::op::Result>(get_inputs(node).back()));
             return_node = results.back();
+        } else if (node->getType() == intel_cpu::Type::Input && node->isConstant()) {
+            auto & pmem = node->getChildEdgeAt(0)->getMemoryPtr();
+            void * data = pmem->GetData();
+            auto shape = pmem->getDesc().getShape().getDims();
+            auto type = details::convertPrecision(pmem->getDesc().getPrecision());
+            auto tensor = std::make_shared<ngraph::runtime::HostTensor>(type, shape, data);
+            return_node = std::make_shared<ngraph::op::Constant>(tensor);
         } else {
             return_node = std::make_shared<ExecGraphInfoSerialization::ExecutionNode>(
                 get_inputs(node), node->getSelectedPrimitiveDescriptor()->getConfig().outConfs.size());
@@ -206,6 +186,40 @@ std::shared_ptr<ngraph::Function> dump_graph_as_ie_ngraph_net(const MKLDNNGraph 
             for (size_t port = 0; port < return_node->get_output_size(); ++port) {
                 auto& desc = node->getChildEdgeAt(port)->getMemory().getDesc();
                 return_node->set_output_type(port, details::convertPrecision(desc.getPrecision()), desc.getShape().toPartialShape());
+            }
+            if (node->getType() == intel_cpu::Type::Subgraph) {
+                auto subgraph = std::dynamic_pointer_cast<MKLDNNSnippetNode>(node);
+                return_node->get_rt_info()["body"] = subgraph->getSnippet()->get_body();
+            }
+        }
+
+        for (size_t port = 0; port < return_node->get_output_size(); ++port) {
+            if (node->getChildEdges().size() == 0) continue;
+            auto& mem = node->getChildEdgeAt(port)->getMemory();
+            auto& desc = mem.getDesc();
+            // rt_info in each output descriptor encodes edditional
+            // edge/memory informations besides precision and shape
+            auto& rt_info = return_node->output(port).get_rt_info();
+            rt_info["Format"] = desc.serializeFormat();
+            rt_info["Precision"] = desc.getPrecision().name();
+            rt_info["Data"] = (int64_t)((uintptr_t) mem.GetData());
+            rt_info["Ptr"] = (int64_t)((uintptr_t) mem.GetPtr());
+            rt_info["MaxMemSize"] = (int64_t)desc.getMaxMemSize();
+
+            auto vecint = [](const VectorDims & vd) {
+                std::vector<int> ret;
+                for (auto& v : vd)
+                    ret.push_back(v);
+                return ret;
+            };
+
+            auto * pblkdesc = dynamic_cast<const BlockedMemoryDesc *>(&desc);
+            if (pblkdesc) {
+                rt_info["Strides"] = vecint(pblkdesc->getStrides());
+                rt_info["BlockDims"] = vecint(pblkdesc->getBlockDims());
+                rt_info["Order"] = vecint(pblkdesc->getOrder());
+                rt_info["OffsetPadding"] = (int64_t)pblkdesc->getOffsetPadding();
+                rt_info["OffsetPaddingToData"] = vecint(pblkdesc->getOffsetPaddingToData());
             }
         }
 

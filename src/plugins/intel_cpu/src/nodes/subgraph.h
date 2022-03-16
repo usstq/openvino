@@ -39,6 +39,10 @@ public:
     // if generator is set, it would execute generated code otherwise it would fallback to nGraph reference
     void execute(mkldnn::stream strm) override;
 
+    std::shared_ptr<ngraph::snippets::op::Subgraph> getSnippet() const {
+        return snippet;
+    }
+
 private:
     static const size_t rank6D {6};
 
