@@ -29,7 +29,6 @@ public:
     std::vector<VectorDims> shapeInfer() const override;
     bool needPrepareParams() const override { return false; }
     void executeDynamicImpl(mkldnn::stream strm) override;
-    void createPrimitive() override;
 
     static bool isSupportedOperation(const std::shared_ptr<const ngraph::Node>& op, std::string& errorMessage) noexcept;
 
@@ -37,7 +36,6 @@ private:
     mutable std::vector<int> lastSecondInputValues;
 
     std::string errorPrefix;
-    bool isOutputOfDynamicShape;
 };
 
 }   // namespace intel_cpu
