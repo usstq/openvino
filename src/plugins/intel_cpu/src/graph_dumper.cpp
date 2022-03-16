@@ -42,6 +42,8 @@ std::map<std::string, std::string> extract_node_metadata(const MKLDNNNodePtr &no
         serialization_info[ExecGraphInfoSerialization::LAYER_TYPE] = NameFromType(node->getType());
     }
 
+    serialization_info["isConstant"] = node->isConstant() ? "True" : "False";
+
     // Original layers
     serialization_info[ExecGraphInfoSerialization::ORIGINAL_NAMES] = node->getOriginalLayers();
 
