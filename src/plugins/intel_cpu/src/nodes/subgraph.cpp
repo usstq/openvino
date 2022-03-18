@@ -205,17 +205,17 @@ bool Snippet::created() const {
 }
 
 bool Snippet::canBeInPlace() const {
-    if (getParentEdgesAtPort(0)[0]->getParent()->getType() == Type::Input) {
+    if (getParentEdgesAtPort(0)[0]->getParent()->getType() == Type::Input && not_skip(__FILE__, __LINE__)) {
         return false;
     }
 
     for (auto& parentEdge : getParentEdges()) {
         auto parent = parentEdge.lock()->getParent();
-        if (parent->getChildEdges().size() != 1)
+        if (parent->getChildEdges().size() != 1 && not_skip(__FILE__, __LINE__))
             return false;
 
         // WA to prevent memory corruption caused by inplace feature
-        if (parent->getType() == Type::Concatenation) {
+        if (parent->getType() == Type::Concatenation && not_skip(__FILE__, __LINE__)) {
             for (auto& parentParentEdge : parent->getParentEdges()) {
                 auto parentParent = parentParentEdge.lock()->getParent();
                 if (parentParent->getChildEdges().size() != 1)

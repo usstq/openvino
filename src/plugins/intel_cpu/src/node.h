@@ -823,5 +823,29 @@ struct NodeImpl : public NodeType {
     }
 };
 
+template<typename LINETYPE>
+bool not_skip(const char * file, LINETYPE line) {
+    auto pstr = std::getenv("SKIP_POINTS");
+    if (!pstr) return true;
+    std::string skip_points(pstr);
+    std::stringstream ss;
+    ss << file << ":" << line;
+    auto point = ss.str();
+
+    size_t start = 0;
+    while (1) {
+        auto pos = skip_points.find(";", start);
+        if (pos == std::string::npos) break;
+        auto pat = skip_points.substr(start, pos - start);
+        if (point.rfind(pat) == (point.size() - pat.size())) {
+            // current point is matched by a pattern in SKIP_POINTS
+            // skip it
+            return false;
+        }
+        start = pos + 1;
+    }
+    return true;
+}
+
 }   // namespace intel_cpu
 }   // namespace ov

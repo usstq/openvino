@@ -190,7 +190,7 @@ std::shared_ptr<ngraph::Function> dump_graph_as_ie_ngraph_net(const Graph &graph
                 return_node->set_output_type(port, details::convertPrecision(desc.getPrecision()), desc.getShape().toPartialShape());
             }
             if (node->getType() == intel_cpu::Type::Subgraph) {
-                auto subgraph = std::dynamic_pointer_cast<MKLDNNSnippetNode>(node);
+                auto subgraph = std::dynamic_pointer_cast<node::Snippet>(node);
                 return_node->get_rt_info()["body"] = subgraph->getSnippet()->get_body();
             }
         }
