@@ -500,6 +500,15 @@ void regclass_graph_Model(py::module m) {
                     :return: String with a name of the function.
                     :rtype: str
                  )");
+    function.def("get_rt_info",
+              (ov::RTMap & (ov::Model::*)()) & ov::Model::get_rt_info,
+              py::return_value_policy::reference_internal,
+              R"(
+                Returns RTMap 
+
+                :return: A dictionary of user defined data.
+                :rtype: openvino.runtime.RTMap
+             )");
     function.def("get_friendly_name",
                  &ov::Model::get_friendly_name,
                  R"(

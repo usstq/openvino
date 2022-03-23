@@ -718,6 +718,8 @@ void Node::initDescriptor(const NodeConfig& config) {
     }
 
     selectedPD->setConfig(rightConfig);
+
+    RTLog(getTypeStr(), "(", getName(), ") :\n", toString(&selectedPD->getConfig()));
 }
 
 void Node::prepareMemory(mkldnn::primitive_desc_iterator& itpd) {

@@ -41,6 +41,36 @@ using NodePtr = std::shared_ptr<Node>;
 using NodeConstPtr = std::shared_ptr<const Node>;
 using NodeWeakPtr = std::weak_ptr<Node>;
 
+extern std::stringstream rtlog;
+
+template <class A>
+void _RTLog(A&& a) {
+    // last one
+    rtlog << std::forward<A>(a) << std::endl;
+}
+
+template <class A, class... Args>
+void _RTLog(A&& a, Args&&... args) {
+    rtlog << std::forward<A>(a);
+    _RTLog(std::forward<Args>(args)...);
+}
+
+int get_next_logid();
+
+template <class... Args>
+void innerRTLog(const char* func_name, int line_num, Args&&... args) {
+    auto logid = get_next_logid();
+    if (logid < 0) return;
+    rtlog << "RTLog#" << logid << " (" << func_name << ":" << line_num << ") ";
+    _RTLog(std::forward<Args>(args)...);
+}
+
+#define RTLog(...) innerRTLog(__FUNCTION__, __LINE__, __VA_ARGS__)
+
+std::string toString(const NodeConfig * p);
+std::string toString(const PortConfig * p);
+std::string toString(const MemoryDesc * p);
+
 class PortConfigurator {
 public:
     PortConfigurator(ov::intel_cpu::LayoutType blockedDescType, InferenceEngine::Precision prc, const Shape& shape,
@@ -311,10 +341,12 @@ public:
     std::shared_ptr<T> getOutputMemDescAtPort(size_t portNum) const;
 
     void selectPrimitiveDescriptorByIndex(int index) {
-        if (index < 0 || index >= supportedPrimitiveDescriptors.size())
+        if (index < 0 || index >= supportedPrimitiveDescriptors.size()) {
             selectedPrimitiveDescriptorIndex = -1;
-        else
+        } else {
             selectedPrimitiveDescriptorIndex = index;
+            RTLog(getTypeStr(), "(", getName(), ") ", index, "\n", toString(&getSelectedPrimitiveDescriptor()->getConfig()));
+        }
 
         // Each primitive descriptor has its own InPlace status. So after new primitive descriptor selection
         // we should reset InPlace type to definite new status for node using Node::isInPlace()

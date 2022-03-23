@@ -99,21 +99,27 @@ bool Edge::enforceReorder() {
     };
 
     const auto portChildEdges = parentNode->getChildEdgesAtPort(inNumber);
-    if (in_place && childCanChangeMem && portChildEdges.size() > 1 && detectInPlaceChildrenNum(portChildEdges) > 1)
+    if (in_place && childCanChangeMem && portChildEdges.size() > 1 && detectInPlaceChildrenNum(portChildEdges) > 1) {
         canBeInPlaceConflicts = true;
+        RTLog("canBeInPlaceConflicts=true");
+    }
     if (!canBeInPlaceConflicts && in_place && !parentNode->getChildEdges().empty()) {
         for (auto &p_edge_peer : portChildEdges) {
             if (p_edge_peer.get() == this)
                 continue;
-            if (p_edge_peer->getChild()->getType() != Type::Reorder && p_edge_peer->inPlace(LOOK_DOWN))
+            if (p_edge_peer->getChild()->getType() != Type::Reorder && p_edge_peer->inPlace(LOOK_DOWN)) {
                 canBeInPlaceConflicts = true;
+                RTLog("canBeInPlaceConflicts=true");
+            }
         }
     }
 
     if (in_place) {
         if (inNumber >= 0 && inNumber < parentSPD->getConfig().outConfs.size() && parentSPD->getConfig().outConfs[inNumber].inPlace() >= 0 &&
-            outNumber >= 0 && outNumber < childSPD->getConfig().inConfs.size() && childSPD->getConfig().inConfs[outNumber].inPlace() >= 0)
-            canBeInPlaceConflicts = true;
+            outNumber >= 0 && outNumber < childSPD->getConfig().inConfs.size() && childSPD->getConfig().inConfs[outNumber].inPlace() >= 0) {
+                canBeInPlaceConflicts = true;
+                RTLog("canBeInPlaceConflicts=true");
+            }
     }
 
     if (canBeInPlaceConflicts) {
@@ -130,6 +136,7 @@ bool Edge::enforceReorder() {
             auto rawMemPtr = pInputNode->getMemoryPtr()->GetData();
             bool isAligned = (reinterpret_cast<uintptr_t>(rawMemPtr) & 15) == 0;
             if (!isAligned) {
+                RTLog("canBeInPlaceConflicts=true");
                 return true;
             }
         }
@@ -227,16 +234,21 @@ Edge::ReorderStatus Edge::needReorder() {
         if (isPhycicalMemCompatible(*inputPortDesc->getMemDesc(), *outPortDesc->getMemDesc()) && !getParent()->isConstant()) {
             optimized = true;
         } else {
+            RTLog(name(), " needs reorder due to incompatible desc: \n\t",
+                          toString(inputPortDesc->getMemDesc().get()), " -> \n\t",
+                          toString(outPortDesc->getMemDesc().get()));
             return ReorderStatus::Regular;
         }
     }
 
     // put here as more costly than compatible check
     if (enforceReorder()) {
+        RTLog(name(), " needs reorder due to enforceReorder desc");
         return ReorderStatus::Regular;
     }
 
     if (optimized) {
+        RTLog(name(), " needs optimized reorder.");
         return ReorderStatus::Optimized;
     }
 

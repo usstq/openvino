@@ -116,6 +116,24 @@ std::map<std::string, std::string> extract_node_metadata(const NodePtr &node) {
 
 }  // namespace
 
+std::stringstream rtlog;
+
+int rtlogid = 0;
+
+int get_next_logid() {
+    rtlogid++;
+    auto ptr = std::getenv("RTLOG");
+    if (!ptr)
+        return -1;
+    auto brk = strtol(ptr, nullptr, 0);
+    if (errno)
+        brk = -1;
+    if (brk == rtlogid) {
+        std::cout << "Break at log # " << rtlogid << std::endl;
+    }
+    return rtlogid;
+}
+
 std::shared_ptr<ngraph::Function> dump_graph_as_ie_ngraph_net(const Graph &graph) {
     std::map<NodePtr, std::shared_ptr<ngraph::Node> > node2layer;
 
@@ -195,6 +213,18 @@ std::shared_ptr<ngraph::Function> dump_graph_as_ie_ngraph_net(const Graph &graph
             }
         }
 
+        auto& node_rt_info = return_node->get_rt_info();
+        node_rt_info["SPD"] = toString(&node->getSelectedPrimitiveDescriptor()->getConfig());
+        {
+            std::stringstream ss;
+            ss << node->getTypeStr();
+            for (auto & n : node->getFusedWith()) {
+                ss << "," << n->getTypeStr();
+            }
+            node_rt_info["fusedTypes"] = ss.str();
+        }
+
+
         for (size_t port = 0; port < return_node->get_output_size(); ++port) {
             if (node->getChildEdges().size() == 0) continue;
             auto& mem = node->getChildEdgeAt(port)->getMemory();
@@ -248,7 +278,79 @@ std::shared_ptr<ngraph::Function> dump_graph_as_ie_ngraph_net(const Graph &graph
         holder->add_control_dependency(node);
     }
 
-    return std::make_shared<ngraph::Function>(results, params, graph._name);
+    auto func = std::make_shared<ngraph::Function>(results, params, graph._name);
+    func->get_rt_info()["rtlog"] = rtlog.str();
+    // reset rtlog
+    rtlog.str("");
+    rtlogid = 0;
+    return func;
+}
+
+std::string toString(const MemoryDesc* p) {
+    std::stringstream ss;
+    ss << p->getShape().toString() << " ";
+    ss << p->getPrecision().name() << " ";
+    /*
+    if (p->getType() & MemoryDescType::Blocked) {
+        ss << "Blocked ";
+    }
+    if (p->getType() & MemoryDescType::Mkldnn) {
+        ss << "Mkldnn ";
+    }
+    */
+
+    auto pdesc = dynamic_cast<const BlockedMemoryDesc*>(p);
+    if (!pdesc)
+        return ss.str();
+    auto& xShape = pdesc->getShape();
+    auto& xBlockDims = pdesc->getBlockDims();
+    auto& xOffsetPaddingToData = pdesc->getOffsetPaddingToData();
+    auto& xStrides = pdesc->getStrides();
+
+    ss << pdesc->serializeFormat() << " ";
+
+    if (Shape(xBlockDims) != xShape)
+        ss << "BlockDims=" << MemoryDescUtils::dims2str(xBlockDims) << " ";
+
+    if (xStrides.size() != xBlockDims.size()) {
+        ss << "Strides=" << MemoryDescUtils::dims2str(pdesc->getStrides()) << " ";
+    } else {
+        size_t expected = 1;
+        for (int i = xStrides.size() - 1; i >= 0; i--) {
+            if (xStrides[i] != expected) {
+                ss << "Strides=" << MemoryDescUtils::dims2str(pdesc->getStrides()) << " ";
+                break;
+            }
+            expected *= xBlockDims[i];
+        }
+    }
+
+    if (!std::all_of(xOffsetPaddingToData.begin(), xOffsetPaddingToData.end(), [](size_t s) {
+            return s == 0;
+        }))
+        ss << "OffsetPaddingToData=" << MemoryDescUtils::dims2str(xOffsetPaddingToData) << " ";
+
+    if (pdesc->getOffsetPadding())
+        ss << "OffsetPadding=" << MemoryDescUtils::dim2str(pdesc->getOffsetPadding()) << " ";
+
+    return ss.str();
+}
+
+std::string toString(const PortConfig* p) {
+    std::stringstream ss;
+    ss << toString(p->getMemDesc().get()) << " constant=" << p->constant() << " inPlace=" << p->inPlace();
+    return ss.str();
+}
+
+std::string toString(const NodeConfig* p) {
+    std::stringstream ss;
+    ss << "  inConfs:" << std::endl;
+    for (auto c : p->inConfs)
+        ss << "    " << toString(&c) << std::endl;
+    ss << "  outConfs:" << std::endl;
+    for (auto c : p->outConfs)
+        ss << "    " << toString(&c) << std::endl;
+    return ss.str();
 }
 
 #ifdef CPU_DEBUG_CAPS
