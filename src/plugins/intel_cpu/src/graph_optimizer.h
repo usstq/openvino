@@ -43,6 +43,7 @@ private:
     void FuseClampAndFakeQuantize(Graph &graph);
     void MergeTransposeAndReorder(Graph &graph);
     void reshapeRnnSeq(Graph &graph);
+    void FixInplaceForReshape(Graph & graph);
 };
 
 }   // namespace intel_cpu

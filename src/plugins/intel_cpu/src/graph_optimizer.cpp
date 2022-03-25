@@ -193,6 +193,8 @@ void GraphOptimizer::ApplyImplSpecificGraphOptimizations(Graph &graph) {
     MergeTransposeAndReorder(graph);
     graph.RemoveDroppedNodes();
 
+    FixInplaceForReshape(graph);
+
     graph.RemoveDroppedEdges();
 }
 
@@ -1929,6 +1931,36 @@ void GraphOptimizer::FusePerformedAsScaleShiftAndFakeQuantize(Graph &graph) {
             }
 
             graph.DropNode(parent);
+        }
+    }
+}
+
+void GraphOptimizer::FixInplaceForReshape(Graph& graph) {
+    std::unordered_set<std::string> uniqueLayerNames;
+    int idx = 0;
+
+    auto insertReorder = [&](EdgePtr& edge, bool isOptimized) {
+        std::string layerName =
+            edge->getParent()->getName() + "_" + edge->getChild()->getName() + "_fixinplace" + std::to_string(idx++);
+        auto newReorder =
+            graph.InsertReorder(edge, layerName, edge->getInputDesc(), edge->getOutputDesc(), isOptimized);
+
+        // the reorder has to be NonConstant type even when its input is constant
+        std::dynamic_pointer_cast<node::Reorder>(newReorder)->setNonConstant();
+    };
+
+    auto& graphEdges = graph.GetEdges();
+    size_t numberOfEdges = graphEdges.size();
+    for (auto i = 0; i < numberOfEdges; i++) {
+        auto edge = graphEdges[i];
+        auto parent = edge->getParent();
+        auto child = edge->getChild();
+
+        if (child->getType() == Type::Reshape && parent->isConstant() && !child->isConstant()) {
+            insertReorder(edge, false);
+            graphEdges.erase(graphEdges.begin() + i);
+            i--;
+            numberOfEdges--;
         }
     }
 }

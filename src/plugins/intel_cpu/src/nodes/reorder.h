@@ -50,6 +50,10 @@ public:
         this->isOptimized = isOptimized;
     }
 
+    void setNonConstant() {
+        constant = ConstantType::NoConst;
+    }
+
     void setDynamicBatchLim(int lim) override;
 
     bool canBeInPlace() const override {

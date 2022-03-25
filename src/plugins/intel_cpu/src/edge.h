@@ -79,6 +79,11 @@ public:
         return getDesc().hasDefinedMaxSize();
     }
 
+    const MemoryDesc& getInputDesc() const;
+    const MemoryDesc& getOutputDesc() const;
+    PortDescBaseCPtr getInputPortDesc() const;
+    PortDescBaseCPtr getOutputPortDesc() const;
+
 private:
     std::string name() const;
 
@@ -91,11 +96,6 @@ private:
     EdgeWeakPtr memoryFromEdge;
     MemoryPtr memoryPtr;
     Status status = Status::Uninitialized;
-
-    const MemoryDesc& getInputDesc() const;
-    const MemoryDesc& getOutputDesc() const;
-    PortDescBaseCPtr getInputPortDesc() const;
-    PortDescBaseCPtr getOutputPortDesc() const;
 
     const MemoryDesc& getDesc() const;
     bool enforceReorder();
