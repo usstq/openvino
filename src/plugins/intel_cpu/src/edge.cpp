@@ -489,6 +489,7 @@ void Edge::init() {
         return;
     EdgePtr edgePtr = getBaseEdge();
     if (edgePtr.get() == this) {
+        RTLog("BaseEdge: ", name());
         changeStatus(Status::NeedAllocation);
     } else {
         if (edgePtr->getParent()->isConstant() && !edgePtr->getChild()->isConstant()) {
