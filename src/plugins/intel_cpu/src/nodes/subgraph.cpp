@@ -435,6 +435,15 @@ void Snippet::generate() {
         auto b = offsets_out[i].begin();
         std::copy(b, b + harness_num_dims, &jcp.data_offsets[(inputShapes.size() + i) * harness_num_dims]);
     }
+
+    auto& rt_info = snippet->get_body()->get_rt_info();
+
+    rt_info["jcp.output_dims"] = std::vector<int64_t>(std::begin(jcp.output_dims), std::end(jcp.output_dims));
+    rt_info["jcp.scheduler_dims"] = std::vector<int64_t>(std::begin(jcp.scheduler_dims), std::end(jcp.scheduler_dims));
+    rt_info["jcp.scheduler_offsets"] =
+        std::vector<int64_t>(std::begin(jcp.scheduler_offsets), std::end(jcp.scheduler_offsets));
+    rt_info["jcp.data_offsets"] = std::vector<int64_t>(std::begin(jcp.data_offsets), std::end(jcp.data_offsets));
+
     schedule = snippet->generate(reinterpret_cast<void*>(&jcp));
 }
 
