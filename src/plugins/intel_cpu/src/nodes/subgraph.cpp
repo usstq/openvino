@@ -427,22 +427,31 @@ void Snippet::generate() {
         canUseOptimizedImpl = false;
         harness_num_dims = SNIPPETS_MAX_HARNESS_DIMS;
     }
+    auto& rt_info = snippet->get_body()->get_rt_info();
+
+    rt_info["jcp.exec_domain"] = std::vector<int64_t>(std::begin(exec_domain), std::end(exec_domain));
+    rt_info["jcp.sch_dims"] = std::vector<int64_t>(std::begin(sch_dims), std::end(sch_dims));
+    rt_info["jcp.sch_offsets_in"] =
+        std::vector<int64_t>(std::begin(sch_offsets_in), std::end(sch_offsets_in));
+    rt_info["jcp.sch_offsets_out"] =
+        std::vector<int64_t>(std::begin(sch_offsets_out), std::end(sch_offsets_out));
+
     for (size_t i = 0; i < inputShapes.size(); i++) {
         auto b = offsets_in[i].begin();
         std::copy(b, b + harness_num_dims, &jcp.data_offsets[i * harness_num_dims]);
+
+        std::stringstream ss;
+        ss << "jcp.data_offsets.input[" << i << "]";
+        rt_info[ss.str()] = std::vector<int64_t>(b, b + harness_num_dims);
     }
     for (size_t i = 0; i < outputShapes.size(); i++) {
         auto b = offsets_out[i].begin();
         std::copy(b, b + harness_num_dims, &jcp.data_offsets[(inputShapes.size() + i) * harness_num_dims]);
+
+        std::stringstream ss;
+        ss << "jcp.data_offsets.output[" << i << "]";
+        rt_info[ss.str()] = std::vector<int64_t>(b, b + harness_num_dims);
     }
-
-    auto& rt_info = snippet->get_body()->get_rt_info();
-
-    rt_info["jcp.output_dims"] = std::vector<int64_t>(std::begin(jcp.output_dims), std::end(jcp.output_dims));
-    rt_info["jcp.scheduler_dims"] = std::vector<int64_t>(std::begin(jcp.scheduler_dims), std::end(jcp.scheduler_dims));
-    rt_info["jcp.scheduler_offsets"] =
-        std::vector<int64_t>(std::begin(jcp.scheduler_offsets), std::end(jcp.scheduler_offsets));
-    rt_info["jcp.data_offsets"] = std::vector<int64_t>(std::begin(jcp.data_offsets), std::end(jcp.data_offsets));
 
     schedule = snippet->generate(reinterpret_cast<void*>(&jcp));
 }
