@@ -13,12 +13,13 @@
 
 #include "Python.h"
 #include "openvino/runtime/properties.hpp"
+#include "openvino/core/model.hpp"
 
 namespace Common {
 namespace utils {
 
 py::object from_ov_any(const ov::Any& any) {
-        if (any.is<std::shared_ptr<ov::Model>>()) {
+    if (any.is<std::shared_ptr<ov::Model>>()) {
         return py::cast(any.as<std::shared_ptr<ov::Model>>());
     }
     // Check for py::object
