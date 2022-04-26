@@ -492,7 +492,11 @@ def test_infer_queue(compiled_model, num_request, num_infer, time_limit=60):
 
     all_input = {}
     for port, input in enumerate(compiled_model.inputs):
-        print("input[{}]  {:<10} {} {}".format(port, input.get_any_name(), input.get_element_type(), input.get_shape()))
+        try:
+            input_name = input.get_any_name()
+        except:
+            input_name = "**NO_NAME**"
+        print("input[{}]  {:<10} {} {}".format(port, input_name, input.get_element_type(), input.get_shape()))
         all_input[port] = fill_tensors_with_random(input)
 
     for i in range(num_request):
@@ -566,16 +570,18 @@ if __name__ == "__main__":
             #im.save("your_file_{}.png".format(a))
             sys.exit(0) 
     #test_infer()
-
     latency_list, prof_list, fps, wtime = test_infer_queue(compiled_model, 2, 20000, time_limit=5)
     cpu_times = []
-    for prof in prof_list[1:]:
+    for prof in prof_list[1:2]:
         total_secs = 0
-        for p in prof_list[-1]:
+        for p in prof:
+            print(f"{p.node_name[:29]:30}{str(p.status):16}{p.node_type:20}{p.real_time.total_seconds()*1e6:10.0f} {p.exec_type}")
             total_secs += p.cpu_time.total_seconds()
         cpu_times.append(total_secs)
     
+    print(cpu_times)
     print(f"latency cpu_time :{np.mean(cpu_times)*1000:.2f}ms")
+    print(f"FPS: {fps:.1f}")
 
     dest_file = filename="{}_{}_{}.html".format(model_path, device, OPT_LINENUM)
     print("saving {} ...".format(dest_file))
