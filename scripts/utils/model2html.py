@@ -123,11 +123,12 @@ def generate_graph(model, fontsize=12, graph_name="", detailed_label=False):
         gen_rand_color.color_hue = (gen_rand_color.color_hue + 5/8) % 1
         return "{:.3f} 1 0.7".format(gen_rand_color.color_hue)
 
-    def strings2label(strings, nlimit = 20, line_limit = 1):
+    def strings2label(values, nlimit = 20, line_limit = 1):
         r = ""
         line = 0
         prev_cnt = 0
-        for s in strings:
+        for v in values:
+            s = str(v)
             if len(r) + len(s) - prev_cnt > nlimit:
                 r += "\\n"
                 prev_cnt = len(r)
@@ -250,7 +251,7 @@ def generate_graph(model, fontsize=12, graph_name="", detailed_label=False):
         # originalLayersNames gives mapping between runtime nodes and orginal nodes
         fsize = fontsize
         if type_name == "Constant":
-            vstr = n.get_value_strings()
+            vstr = n.get_vector()
             label = strings2label(vstr)
             fsize = fontsize - 2
         elif "fusedTypes" in rt_info:
@@ -500,23 +501,26 @@ def test_infer_queue(compiled_model, num_request, num_infer, time_limit=60):
         all_input[port] = fill_tensors_with_random(input)
 
     for i in range(num_request):
+        print("start request {}...".format(i))
         infer_queue.start_async(all_input, userdata=i)
 
+    print("start request {}...".format(i))
     t0 = time.time()
+    w0 = t0
     for i in range(num_infer):
-        wtime = time.time() - t0
+        tcur = time.time()
+        wtime = tcur - t0
         if time_limit and (wtime > time_limit):
             break
+        if tcur - w0 > 1:
+            w0 = tcur
+            print("{}...".format(i))
         infer_queue.start_async(None, userdata=i)
     infer_queue.wait_all()
     fps = i/wtime
     return latency_list, prof_list, fps, wtime
 
 if __name__ == "__main__":
-
-    #test222()
-    #test_visualize()
-
     import openvino.runtime as ov
     import numpy as np
     import sys, os
@@ -526,6 +530,7 @@ if __name__ == "__main__":
     model = core.read_model(model_path)
     #model.visualize(filename="{}.dot".format(model_path))
     #model.print()
+
     if "OPT_LINENUM" in os.environ:
         OPT_LINENUM = os.environ["OPT_LINENUM"]
     else:
@@ -570,18 +575,22 @@ if __name__ == "__main__":
             #im.save("your_file_{}.png".format(a))
             sys.exit(0) 
     #test_infer()
-    latency_list, prof_list, fps, wtime = test_infer_queue(compiled_model, 2, 20000, time_limit=5)
-    cpu_times = []
-    for prof in prof_list[1:2]:
-        total_secs = 0
-        for p in prof:
-            print(f"{p.node_name[:29]:30}{str(p.status):16}{p.node_type:20}{p.real_time.total_seconds()*1e6:10.0f} {p.exec_type}")
-            total_secs += p.cpu_time.total_seconds()
-        cpu_times.append(total_secs)
-    
-    print(cpu_times)
-    print(f"latency cpu_time :{np.mean(cpu_times)*1000:.2f}ms")
-    print(f"FPS: {fps:.1f}")
+
+    do_infer = True
+
+    if (do_infer):
+        latency_list, prof_list, fps, wtime = test_infer_queue(compiled_model, 1, 20000, time_limit=5)
+        cpu_times = []
+        for prof in prof_list[1:2]:
+            total_secs = 0
+            for p in prof:
+                print(f"{p.node_name[:29]:30}{str(p.status):16}{p.node_type:20}{p.real_time.total_seconds()*1e6:10.0f} {p.exec_type}")
+                total_secs += p.cpu_time.total_seconds()
+            cpu_times.append(total_secs)
+        
+        print(cpu_times)
+        print(f"latency cpu_time :{np.mean(cpu_times)*1000:.2f}ms")
+        print(f"FPS: {fps:.1f}")
 
     dest_file = filename="{}_{}_{}.html".format(model_path, device, OPT_LINENUM)
     print("saving {} ...".format(dest_file))
