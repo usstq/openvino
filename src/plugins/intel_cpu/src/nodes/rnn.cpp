@@ -927,7 +927,19 @@ std::vector<VectorDims> RNN::shapeInfer() const {
 
     // Graph optimizer makes the same optimization. So this is required to make shapes compatible.
     if (getType() == Type::RNNSeq && originOutputShapes[0].size() == 4lu && originOutputShapes[0][1] == 1lu) {
-        originOutputShapes[0].erase(originOutputShapes[0].begin() + 1);
+        if (nativeOrder) {
+            // LSTMSequence: [N,1,T,C]
+            // RNN:          [T,N,C]
+            auto tmp = originOutputShapes[0];
+            originOutputShapes[0].resize(3);
+            originOutputShapes[0][0] = tmp[2];
+            originOutputShapes[0][1] = tmp[0];
+            originOutputShapes[0][2] = tmp[3];
+        } else {
+            // LSTMSequence: [N,1,T,C]
+            // RNN:          [N,T,C]
+            originOutputShapes[0].erase(originOutputShapes[0].begin() + 1);
+        }
     }
     return originOutputShapes;
 }

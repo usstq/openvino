@@ -2171,34 +2171,97 @@ void GraphOptimizer::reshapeRnnSeq(Graph &graph) {
             continue;
         }
 
-        auto childrenEdges = parentNode->getChildEdgesAtPort(0);
-        auto minDims = parentNode->getOutputShapeAtPort(0).getMinDims();
-        auto maxDims = parentNode->getOutputShapeAtPort(0).getMaxDims();
-        minDims.erase(minDims.begin() + 1);
-        maxDims.erase(maxDims.begin() + 1);
-        parentNode->outputShapes[0] = {minDims, maxDims};
+        // handle cases for:
+        //  LSTM/RNNSequence output layout [N, 1, T, C]
+        //      (!NativeOrder) or (DynamicNode)
+        //  
+        auto rnnNode = std::dynamic_pointer_cast<RNN>(parentNode);
+        if (parentNode->isDynamicNode() && rnnNode->hasNativeOrder()) {
+            //
+            //   RNN nodes output layput        [T, N, C]
+            //  
+            //  transpose + unsqueeze is required in general, but for N==1
+            //  reshape can handle it w/o introducing additional cost
+            //
+            auto childrenEdges = parentNode->getChildEdgesAtPort(0);
+            auto minDims = parentNode->getOutputShapeAtPort(0).getMinDims();
+            auto maxDims = parentNode->getOutputShapeAtPort(0).getMaxDims();
+            parentNode->outputShapes[0] = {VectorDims{minDims[2], minDims[0], minDims[3]},
+                                           VectorDims{maxDims[2], maxDims[0], maxDims[3]}};
 
-        for (size_t j = 0; j < childrenEdges.size(); j++) {
-            auto edge = childrenEdges[j];
-            auto childNode = edge->getChild();
+            auto outDims = rnnNode->outputShapes[0].getDims();
+            auto Nmin = minDims[0];
+            auto Nmax = maxDims[0];
+            auto Cmin = minDims[3];
+            auto Cmax = maxDims[3];
+            if (Nmin == 1 && Nmax == 1 && Cmin == Cmax) {
+                // add reshape to [1, 1, -1, C]
+                for (size_t j = 0; j < childrenEdges.size(); j++) {
+                    auto edge = childrenEdges[j];
+                    auto childNode = edge->getChild();
 
-            const auto secondInput = std::make_shared<ngraph::opset1::Constant>(ov::element::i32, ngraph::Shape{1}, std::vector<int>{1});
-            const auto unsqueeze = std::make_shared<ngraph::opset1::Unsqueeze>(
-                std::make_shared<ngraph::opset1::Parameter>(details::convertPrecision(parentNode->getOriginalOutputPrecisionAtPort(0)),
-                                                            parentNode->getOutputShapeAtPort(0).toPartialShape()), secondInput);
-            unsqueeze->set_friendly_name(parentNode->getName() + "_abc_a1bc_" + std::to_string(j));
+                    const auto secondInput = std::make_shared<ngraph::opset1::Constant>(ov::element::i32, 
+                                                                        ngraph::Shape{4},
+                                                                        std::vector<int>{1, 1, -1, (int)(Cmax)});
+                    const auto op = std::make_shared<ngraph::opset1::Reshape>(
+                        std::make_shared<ngraph::opset1::Parameter>(details::convertPrecision(parentNode->getOriginalOutputPrecisionAtPort(0)),
+                                                                    parentNode->getOutputShapeAtPort(0).toPartialShape()),
+                                                                    secondInput,
+                                                                    false);
+                    op->set_friendly_name(parentNode->getName() + "_tnc_n1tc_" + std::to_string(j));
 
-            const auto cpuUnsqueeze = std::make_shared<Reshape>(unsqueeze, graph.getEngine(), graph.weightsCache);
-            graph.InsertNode(parentNode, childNode, cpuUnsqueeze, edge->getInputNum(), edge->getOutputNum(), false);
+                    const auto cpuUnsqueeze = std::make_shared<Reshape>(op, graph.getEngine(), graph.weightsCache);
+                    graph.InsertNode(parentNode, childNode, cpuUnsqueeze, edge->getInputNum(), edge->getOutputNum(), false);
 
-            const auto cpuConstant = std::make_shared<node::Input>(secondInput, graph.getEngine(), graph.weightsCache);
-            EdgePtr newEdge(new Edge(cpuConstant, cpuUnsqueeze, 0, 1));
-            cpuUnsqueeze->addEdge(newEdge);
-            auto &graphEdges = graph.GetEdges();
-            graphEdges.push_back(newEdge);
-            graphNodes.push_back(cpuConstant);
+                    const auto cpuConstant = std::make_shared<node::Input>(secondInput, graph.getEngine(), graph.weightsCache);
+                    EdgePtr newEdge(new Edge(cpuConstant, cpuUnsqueeze, 0, 1));
+                    cpuUnsqueeze->addEdge(newEdge);
+                    auto &graphEdges = graph.GetEdges();
+                    graphEdges.push_back(newEdge);
+                    graphNodes.push_back(cpuConstant);
 
-            graph.RemoveEdge(edge);
+                    graph.RemoveEdge(edge);
+                }
+            } else {
+                // TODO, add transpose + unsqueeze
+                IE_THROW() << "Unsupported reshapeRnnSeq!";
+            }
+        } else {
+            // for output static shape with non native-Order(ntc) and (num_direction == 1):
+            //
+            // LSTM/RNNSequence output layout [N, 1, T, C]
+            // RNN nodes output layput        [N, T, C]
+            // 
+            // an unsqueeze is introduced to inserted 1 as num_dir (which only works when num_dir=1)
+            auto childrenEdges = parentNode->getChildEdgesAtPort(0);
+            auto minDims = parentNode->getOutputShapeAtPort(0).getMinDims();
+            auto maxDims = parentNode->getOutputShapeAtPort(0).getMaxDims();
+            minDims.erase(minDims.begin() + 1);
+            maxDims.erase(maxDims.begin() + 1);
+            parentNode->outputShapes[0] = {minDims, maxDims};
+
+            for (size_t j = 0; j < childrenEdges.size(); j++) {
+                auto edge = childrenEdges[j];
+                auto childNode = edge->getChild();
+
+                const auto secondInput = std::make_shared<ngraph::opset1::Constant>(ov::element::i32, ngraph::Shape{1}, std::vector<int>{1});
+                const auto unsqueeze = std::make_shared<ngraph::opset1::Unsqueeze>(
+                    std::make_shared<ngraph::opset1::Parameter>(details::convertPrecision(parentNode->getOriginalOutputPrecisionAtPort(0)),
+                                                                parentNode->getOutputShapeAtPort(0).toPartialShape()), secondInput);
+                unsqueeze->set_friendly_name(parentNode->getName() + "_abc_a1bc_" + std::to_string(j));
+
+                const auto cpuUnsqueeze = std::make_shared<Reshape>(unsqueeze, graph.getEngine(), graph.weightsCache);
+                graph.InsertNode(parentNode, childNode, cpuUnsqueeze, edge->getInputNum(), edge->getOutputNum(), false);
+
+                const auto cpuConstant = std::make_shared<node::Input>(secondInput, graph.getEngine(), graph.weightsCache);
+                EdgePtr newEdge(new Edge(cpuConstant, cpuUnsqueeze, 0, 1));
+                cpuUnsqueeze->addEdge(newEdge);
+                auto &graphEdges = graph.GetEdges();
+                graphEdges.push_back(newEdge);
+                graphNodes.push_back(cpuConstant);
+
+                graph.RemoveEdge(edge);
+            }
         }
     }
 }
