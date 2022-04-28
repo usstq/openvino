@@ -6,6 +6,7 @@ import ctypes
 from openvino.runtime.passes import Manager
 import openvino.runtime as ov
 
+
 # print Model in readable text
 def generate_str(model, show_rt_info = False):
     out2name = {}
@@ -114,7 +115,8 @@ def generate_graph(model, fontsize=12, graph_name="", detailed_label=False):
         "I8":ctypes.c_int8,
         "U8":ctypes.c_uint8,
         "I32": ctypes.c_int32,
-        "FP32":ctypes.c_float
+        "FP32":ctypes.c_float,
+        "BF16":ctypes.c_int16,
     }
 
     def gen_rand_color():
@@ -245,7 +247,10 @@ def generate_graph(model, fontsize=12, graph_name="", detailed_label=False):
             if k == "originalLayersNames":
                 v = "\n    " + str(v).replace(",","\n    ")
             return "{}={}".format(k, v)
-        rtinfo = [rtinfo2string(k, rt_info[k]) for k,v in rt_info.items()]
+        try:
+            rtinfo = [rtinfo2string(k, rt_info[k]) for k,v in rt_info.items()]
+        except:
+            rtinfo = [rtinfo2string(k, v) for k,v in rt_info.items()]
         #print(rtinfo)
         
         # originalLayersNames gives mapping between runtime nodes and orginal nodes
@@ -255,7 +260,10 @@ def generate_graph(model, fontsize=12, graph_name="", detailed_label=False):
             label = strings2label(vstr)
             fsize = fontsize - 2
         elif "fusedTypes" in rt_info:
-            label = "{" + rt_info['fusedTypes'].replace(",","|") +"}"
+            if type_name == rt_info['fusedTypes']:
+                label = "{" + rt_info['fusedTypes'].replace(",","|") +"}"
+            else:
+                label = "{" + type_name + "|" + rt_info['fusedTypes'].replace(",","|") +"}"
         else:
             label = "{}\\n({}{})".format(type_name, friendly_name[:20], "..." if len(friendly_name)>20 else "")
 
@@ -284,7 +292,7 @@ def generate_graph(model, fontsize=12, graph_name="", detailed_label=False):
               "style":'filled,rounded',
                "fillcolor":color,
                "fontsize":str(fsize),
-               "margin":"0,0","width":"0","height":"0",
+               "margin":"0.04,0","width":"0","height":"0",
                "tooltip":allinfo}
         g.node(name=friendly_name,
                label=label,
@@ -307,11 +315,14 @@ def generate_graph(model, fontsize=12, graph_name="", detailed_label=False):
                     data_color[Data] = gen_rand_color()
 
     max_act_sz = 0
-    for n in model.get_ordered_ops():
-        for i in n.inputs():
-            act_sz = np.prod(np.array(i.get_shape()))
-            if (max_act_sz < act_sz):
-                max_act_sz = act_sz
+    try:
+        for n in model.get_ordered_ops():
+            for i in n.inputs():
+                act_sz = np.prod(np.array(i.get_shape()))
+                if (max_act_sz < act_sz):
+                    max_act_sz = act_sz
+    except:
+        max_act_sz = -1
 
     for n in model.get_ordered_ops():
         for i in n.inputs():
@@ -328,8 +339,15 @@ def generate_graph(model, fontsize=12, graph_name="", detailed_label=False):
                 assert(found_ki)
                 tail_name += ".out{}.{}".format(src_out.get_index(), ki)
 
-            act_sz = np.prod(np.array(i.get_shape()))
-            str_shape = ",".join([str(s) for s in i.get_shape()])
+            try:
+                act_sz = np.prod(np.array(i.get_shape()))
+            except:
+                act_sz = 1
+            try:
+                str_shape = ",".join([str(s) for s in i.get_shape()])
+            except:
+                str_shape = ",".join([str(s) for s in i.get_partial_shape()])
+
             str_ele_type = i.get_element_type().get_type_name()
             src_rt_info = i.get_source_output().get_node().get_rt_info()
             mem_rt_info = i.get_source_output().get_rt_info()
@@ -365,25 +383,29 @@ def generate_graph(model, fontsize=12, graph_name="", detailed_label=False):
                     c_type = precision2ctype[mem_rt_info["Precision"]]
                     pf = ctypes.cast(p, ctypes.POINTER(c_type))
                     cnt = mem_rt_info["MaxMemSize"]//ctypes.sizeof(c_type)
-                    base_array = np.ctypeslib.as_array(pf, shape=(cnt,))
-                    part_array = base_array[mem_rt_info["OffsetPadding"]:]
+                    if cnt > 0:
+                        base_array = np.ctypeslib.as_array(pf, shape=(cnt,))
+                        part_array = base_array[mem_rt_info["OffsetPadding"]:]
                     BlockDims = mem_rt_info["BlockDims"]
                     OffsetPaddingToData = mem_rt_info["OffsetPaddingToData"]
                     Strides = mem_rt_info["Strides"]
 
-                    total_shape = np.array(BlockDims) + np.array(OffsetPaddingToData)
-                    total_cnt = np.prod(total_shape)
-                    new_array = part_array[:total_cnt].reshape(total_shape)
+                    if cnt > 0:
+                        total_shape = np.array(BlockDims) + np.array(OffsetPaddingToData)
+                        total_cnt = np.prod(total_shape)
+                        new_array = part_array[:total_cnt].reshape(total_shape)
 
-                    nd_strides = np.array(new_array.strides)//ctypes.sizeof(c_type)
-                    if (nd_strides != np.array(Strides)).any():
-                        # TODO new_array = part_array.reshape(np.array(Strides))
-                        label += "\n(strided)"
+                        nd_strides = np.array(new_array.strides)//ctypes.sizeof(c_type)
+                        if (nd_strides != np.array(Strides)).any():
+                            # TODO new_array = part_array.reshape(np.array(Strides))
+                            label += "\n(strided)"
 
+                        if not Data in data_map:
+                            data_map[Data] = []
+                        data_map[Data].append(new_array)
+                    
                     color = data_color[Data]
-                    if not Data in data_map:
-                        data_map[Data] = []
-                    data_map[Data].append(new_array)
+
                 except Exception as e:
                     print("edge '{}->{}' with Data but failed to parse:\n{}".format(
                         tail_name, head_name, e
@@ -397,7 +419,7 @@ def generate_graph(model, fontsize=12, graph_name="", detailed_label=False):
                 else:
                     value = str(mem_rt_info[k])
                 labeltooltip.append("{}={}".format(k, value))
-            penwidth = act_sz*4.5/max_act_sz + 0.5
+            penwidth = act_sz*4.5/max_act_sz + 0.5 if max_act_sz > 0 else 1
             g.edge(
                 tail_name,
                 head_name,
@@ -418,8 +440,8 @@ def visualize_model(model, fontsize=12, filename=None, detailed_label=False):
     if filename:
         svg = graph_src.pipe().decode('utf-8')
         if filename.endswith(".html"):
-            import dot_svg_html
-            output_src = dot_svg_html.dot_to_html(svg)
+            import openvino.dot_svg_html as d2h
+            output_src = d2h.dot_to_html(svg)
         else:
             output_src = svg
         htmlfile = open(filename,'w')
@@ -524,11 +546,18 @@ if __name__ == "__main__":
     import openvino.runtime as ov
     import numpy as np
     import sys, os
+    import argparse
+
+    parser = argparse.ArgumentParser(description='visualize openvino model as static html page.')
+    parser.add_argument('model_file', metavar='N', type=str, help='model file')
+    parser.add_argument('--profile', action='store_true',
+                        help='do profiling before visualize')
+
+    args = parser.parse_args()
 
     core = ov.Core()
-    model_path = sys.argv[1]
-    model = core.read_model(model_path)
-    #model.visualize(filename="{}.dot".format(model_path))
+    model = core.read_model(args.model_file)
+    #model.visualize(filename="{}.html".format(model_path))
     #model.print()
 
     if "OPT_LINENUM" in os.environ:
@@ -552,11 +581,10 @@ if __name__ == "__main__":
 
     core.set_property(device, dev_prop)
 
-    if False:
-        dest_file = filename="{}_org.html".format(model_path)
-        print("saving {} ...".format(dest_file))
-        model.visualize(filename=dest_file)
-        print("{} is saved!".format(dest_file))
+    dest_file = filename="{}_org.html".format(os.path.split(args.model_file)[1])
+    print("saving {} ...".format(dest_file))
+    model.visualize(filename=dest_file)
+    print("{} is saved!".format(dest_file))
 
     #model.reshape(ov.PartialShape([2,512]))
     compiled_model = core.compile_model(model, "CPU")
@@ -576,9 +604,7 @@ if __name__ == "__main__":
             sys.exit(0) 
     #test_infer()
 
-    do_infer = True
-
-    if (do_infer):
+    if (args.profile):
         latency_list, prof_list, fps, wtime = test_infer_queue(compiled_model, 1, 20000, time_limit=5)
         cpu_times = []
         for prof in prof_list[1:2]:
@@ -592,7 +618,7 @@ if __name__ == "__main__":
         print(f"latency cpu_time :{np.mean(cpu_times)*1000:.2f}ms")
         print(f"FPS: {fps:.1f}")
 
-    dest_file = filename="{}_{}_{}.html".format(model_path, device, OPT_LINENUM)
+    dest_file = filename="{}_{}_{}.html".format(os.path.split(args.model_file)[1], device, OPT_LINENUM)
     print("saving {} ...".format(dest_file))
     compiled_model.get_runtime_model().visualize(filename=dest_file)
     print("{} is saved!".format(dest_file))
