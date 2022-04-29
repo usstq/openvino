@@ -248,9 +248,10 @@ def generate_graph(model, fontsize=12, graph_name="", detailed_label=False):
                 v = "\n    " + str(v).replace(",","\n    ")
             return "{}={}".format(k, v)
         try:
-            rtinfo = [rtinfo2string(k, rt_info[k]) for k,v in rt_info.items()]
-        except:
             rtinfo = [rtinfo2string(k, v) for k,v in rt_info.items()]
+        except:
+            rtinfo = [rtinfo2string(k, rt_info[k]) for k,v in rt_info.items()]
+            
         #print(rtinfo)
         
         # originalLayersNames gives mapping between runtime nodes and orginal nodes
