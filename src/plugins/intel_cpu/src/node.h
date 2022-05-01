@@ -571,6 +571,9 @@ public:
         rtParamsCache = cache;
     }
 
+    std::stringstream slog;
+
+    void log_prim();
 protected:
     bool canFuseSimpleOperation(const NodePtr& node) const;
 
@@ -822,6 +825,8 @@ struct NodeImpl : public NodeType {
         NodeType::perfCounters().template buildClassCounters<NodeType>(NameFromType(NodeType::getType()));
     }
 };
+
+std::ostream & operator << (std::ostream &ss, const dnnl_memory_desc_t &md);
 
 }   // namespace intel_cpu
 }   // namespace ov

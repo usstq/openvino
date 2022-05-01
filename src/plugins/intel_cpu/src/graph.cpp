@@ -229,6 +229,7 @@ void Graph::Replicate(const CNNNetwork &network, const ExtensionManager::Ptr& ex
         func = network.getFunction();
     }
 
+    func_dump  = std::const_pointer_cast<ov::Model>(func);
     if (!func) {
         IE_THROW() << "Function pointer inside CNNNetwork is nullptr";
     }
@@ -538,7 +539,7 @@ void Graph::InitEdges() {
     auto insertReorder = [&](EdgePtr& edge, bool isOptimized) {
         std::string basicLayerName = edge->getParent()->getName() + "_" +
                                      node::Reorder::getReorderArgs(edge->getInputDesc(), edge->getOutputDesc()) + "_" +
-                                     edge->getChild()->getName();
+                                     edge->getChild()->getName() + "_cause" + std::to_string(edge->reorder_cause);
         std::string layerName = basicLayerName;
         int idx = 0;
         while (uniqueLayerNames.find(layerName) != uniqueLayerNames.end()) {
@@ -966,7 +967,7 @@ void Graph::Infer(InferRequestBase* request) {
 
         if (request)
             request->ThrowIfCanceled();
-        ExecuteNode(node, stream);
+            ExecuteNode(node, stream);
     }
 
     if (infer_count != -1) infer_count++;
@@ -1385,6 +1386,9 @@ void Graph::EnforceBF16() {
 }
 
 std::shared_ptr<ngraph::Function> Graph::dump() const {
+    auto graph_id = atoi(std::getenv("GRAPH_ID")?:"0");
+    if (graph_id == 0)
+        return func_dump;
     return dump_graph_as_ie_ngraph_net(*this);
 }
 

@@ -232,10 +232,87 @@ bool Node::isEdgesEmpty(const std::vector<EdgeWeakPtr>& edges) const {
     return true;
 }
 
+std::ostream & operator << (std::ostream &ss, const dnnl_memory_desc_t &md) {
+    ss << "{";
+    if (md.ndims > 0) {
+        ss << md.dims[0];
+        for(int i=1;i<md.ndims; i++) ss << "," << md.dims[i];
+    }
+    ss << "}";
+
+    switch (md.format_kind)
+    {
+    case dnnl_format_kind_undef:
+        ss << " undef(" << md.format_kind << ")";
+        break;
+    case dnnl_format_kind_any:
+        ss << " any(" << md.format_kind << ")";
+        break;
+    case dnnl_blocked:
+        ss << " blocked(" << md.format_kind << ")";
+        ss << " strides(";
+        for(int k=0;k<md.ndims;k++)
+            ss << md.format_desc.blocking.strides[k] << ",";
+        ss << ")";
+        if (md.format_desc.blocking.inner_nblks) {
+            ss << " inner_blks(";
+            for(int k=0;k<md.format_desc.blocking.inner_nblks;k++)
+                ss << md.format_desc.blocking.inner_blks[k] << ",";
+            ss << ")";
+
+            ss << " inner_idxs(";
+            for(int k=0;k<md.format_desc.blocking.inner_nblks;k++)
+                ss << md.format_desc.blocking.inner_idxs[k] << ",";
+            ss << ")";
+        }
+        break;
+    case dnnl_format_kind_wino:
+        ss << " wino(" << md.format_kind << ")";
+        break;
+    case dnnl_format_kind_rnn_packed:
+        ss << " rnn_packed(" << md.format_kind << ")";
+        break;
+    default:
+        ss << " ???(" << md.format_kind << ")";
+        break;
+    }
+
+
+    return ss;
+}
+
+void Node::log_prim() {
+    if (prim) {
+        auto split = [](std::string str, char delim) -> std::vector<std::string> {
+            std::vector<std::string> r;
+            size_t pos0 = 0;
+            auto pos1 = str.find(delim, pos0);
+            while (pos1 != std::string::npos) {
+                r.push_back(str.substr(pos0, pos1-pos0));
+                pos0 = pos1 + 1;
+                pos1 = str.find(delim, pos0);
+            }
+            r.push_back(str.substr(pos0));
+            return r;
+        };
+        slog << "[prim]: " << std::endl;
+        auto pd = (*prim).get_primitive_desc();
+        std::string info(pd->info());
+        for(auto & s : split(info, ',')) {
+            if (s.find(' ') != std::string::npos)
+                for(auto & d : split(s, ' '))
+                    slog << "\t\t" << d << std::endl;
+            else
+                slog << "\t" << s << std::endl;
+        }
+    }
+}
+
 void Node::createPrimitive() {
     if (inputShapesDefined() && isExecutable()) {
         if (needPrepareParams()) {
             prepareParams();
+            log_prim();
         }
         updateLastInputDims();
     }
@@ -517,13 +594,20 @@ void Node::execute(mkldnn::stream strm) {
 
 void Node::executeDynamic(mkldnn::stream strm) {
     if (needShapeInfer()) {
-        redefineOutputMemory(shapeInfer());
+        try {
+            redefineOutputMemory(shapeInfer());
+        }
+        catch(...) {
+            std::cout << "Node::executeDynamic redefineOutputMemory failed for "  << name << "(" << getTypeStr() << ")" << std::endl;
+            std::rethrow_exception(std::current_exception());
+        }
     }
     if (isExecutable()) {
         if (needPrepareParams()) {
             IE_ASSERT(inputShapesDefined()) << "Can't prepare params for " << getTypeStr() << " node with name: " << getName() <<
                 " since the input shapes are not defined.";
             prepareParams();
+            log_prim();
         }
         executeDynamicImpl(strm);
     }

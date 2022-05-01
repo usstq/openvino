@@ -266,6 +266,7 @@ std::shared_ptr<ngraph::Function> dump_graph_as_ie_ngraph_net(const Graph &graph
         }
 
         auto& node_rt_info = return_node->get_rt_info();
+        node_rt_info["slog"] = node->slog.str();
         node_rt_info["SPD"] = toString(&node->getSelectedPrimitiveDescriptor()->getConfig());
         {
             std::stringstream ss;

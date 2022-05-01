@@ -193,6 +193,7 @@ public:
         return graphHasDynamicInput;
     }
 
+    int streamID;
 protected:
     void VisitNode(NodePtr node, std::vector<NodePtr>& sortedNodes);
 
@@ -259,6 +260,7 @@ private:
     std::vector<NodePtr> executableGraphNodes;
 
     MultiCachePtr rtParamsCache;
+    std::shared_ptr<ov::Model> func_dump;
 
     void EnforceBF16();
 };
