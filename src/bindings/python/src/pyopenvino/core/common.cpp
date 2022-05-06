@@ -294,6 +294,9 @@ void set_request_tensors(ov::InferRequest& request, const py::dict& inputs) {
 }
 
 PyAny from_ov_any(const ov::Any& any) {
+    if (any.is<std::shared_ptr<ov::Model>>()) {
+        return py::cast(any.as<std::shared_ptr<ov::Model>>());
+    }
     // Check for py::object
     if (any.is<py::object>()) {
         return any.as<py::object>();

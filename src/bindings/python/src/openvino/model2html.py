@@ -18,8 +18,8 @@ def generate_str(model, show_rt_info = False):
         return {k:str(v) for k,v in n.get_rt_info().items()}
     result.append("model({}):".format(",".join(ilist)))
 
-    for k, v in model.get_rt_info().items():
-        result.append("  {}={}".format(k,v))
+    #for k, v in model.get_rt_info().items():
+    #    result.append("  {}={}".format(k,v))
     for n in model.get_ordered_ops():
         # collect output and also allocate output names
         rt_info = get_rt_info(n)
@@ -282,7 +282,12 @@ def generate_graph(model, fontsize=12, graph_name="", detailed_label=False):
 
         color = op2color[type_name] if type_name in op2color else "cyan"
         if type_name == "Subgraph":
-            submodel = rt_info["body"]
+            try:
+                submodel = rt_info["body"]
+            except Exception as e:
+                print(f"Subgraph {friendly_name} has no body!")
+                print(rt_info)
+                print(e)
             allinfo += "\n----model-----\n{}".format(generate_str(submodel))
             data_map[friendly_name] = submodel
 
@@ -551,8 +556,10 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description='visualize openvino model as static html page.')
     parser.add_argument('model_file', metavar='N', type=str, help='model file')
-    parser.add_argument('--profile', action='store_true',
+    parser.add_argument('-p', '--profile', action='store_true',
                         help='do profiling before visualize')
+    parser.add_argument('-e', '--inplace', action='store_true',
+                        help='save to same folder as model')
 
     args = parser.parse_args()
 
@@ -582,7 +589,10 @@ if __name__ == "__main__":
 
     core.set_property(device, dev_prop)
 
-    dest_file = filename="{}_org.html".format(os.path.split(args.model_file)[1])
+    if args.inplace:
+        dest_file = filename="{}_org.html".format(args.model_file)
+    else:
+        dest_file = filename="{}_org.html".format(os.path.split(args.model_file)[1])
     print("saving {} ...".format(dest_file))
     model.visualize(filename=dest_file)
     print("{} is saved!".format(dest_file))
@@ -619,7 +629,10 @@ if __name__ == "__main__":
         print(f"latency cpu_time :{np.mean(cpu_times)*1000:.2f}ms")
         print(f"FPS: {fps:.1f}")
 
-    dest_file = filename="{}_{}_{}.html".format(os.path.split(args.model_file)[1], device, OPT_LINENUM)
+    if args.inplace:
+        dest_file = filename="{}_{}_{}.html".format(args.model_file, device, OPT_LINENUM)
+    else:
+        dest_file = filename="{}_{}_{}.html".format(os.path.split(args.model_file)[1], device, OPT_LINENUM)
     print("saving {} ...".format(dest_file))
     compiled_model.get_runtime_model().visualize(filename=dest_file)
     print("{} is saved!".format(dest_file))
