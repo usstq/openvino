@@ -71,6 +71,7 @@
 #include "nodes/non_max_suppression.h"
 #include "nodes/convert.h"
 #include "nodes/rnn.h"
+#include "nodes/rnn2.h"
 #include "nodes/experimental_detectron_topkrois.h"
 #include "nodes/cum_sum.h"
 #include "nodes/depth_to_space.h"
@@ -138,6 +139,7 @@ ov::intel_cpu::Node::NodesFactory::NodesFactory()
     INTEL_CPU_NODE(PSROIPooling, Type::PSROIPooling);
     INTEL_CPU_NODE(RNN, Type::RNNCell);
     INTEL_CPU_NODE(RNN, Type::RNNSeq);
+    INTEL_CPU_NODE(RNN2, Type::RNN2);
     INTEL_CPU_NODE(CTCLoss, Type::CTCLoss);
     INTEL_CPU_NODE(Split, Type::Split);
     INTEL_CPU_NODE(DetectionOutput, Type::DetectionOutput);

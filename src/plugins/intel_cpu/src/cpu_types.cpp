@@ -56,6 +56,7 @@ const InferenceEngine::details::caseless_unordered_map<std::string, Type> type_t
         { "Clamp", Type::Eltwise },
         { "Exp", Type::Eltwise },
         { "SwishCPU", Type::Eltwise },
+        { "RNNPrim", Type::RNN2 },
         { "HSwish", Type::Eltwise },
         { "Mish", Type::Eltwise },
         { "HSigmoid", Type::Eltwise },

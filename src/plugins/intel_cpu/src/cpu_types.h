@@ -51,6 +51,7 @@ enum class Type {
     MemoryInput,
     RNNCell,
     RNNSeq,
+    RNN2,
     FakeQuantize,
     BinaryConvolution,
     DeformableConvolution,
