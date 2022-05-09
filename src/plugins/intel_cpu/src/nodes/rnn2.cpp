@@ -152,13 +152,10 @@ RNN2::RNN2(const std::shared_ptr<ov::Node>& op, const mkldnn::engine& eng, Weigh
     else
         IE_THROW(NotImplemented) << "unknown cell_type:" << m_op->cell_type;
 
-    // nativeOrder
-    batch_first = m_op->input_batch_first;
-
     // input port
     wIdx = 3;   // weight
     rIdx = 4;   // weight_iter
-    bIdx = 7;   // bias
+    bIdx = 5;   // bias
 
     internalBlobDesc.emplace_back([&](primitive_desc_iterator& primitive_desc_it, size_t idx) -> DnnlMemoryDescPtr {
         return DnnlExtensionUtils::makeDescriptor(primitive_desc_it.weights_desc(0));
@@ -176,6 +173,16 @@ RNN2::RNN2(const std::shared_ptr<ov::Node>& op, const mkldnn::engine& eng, Weigh
     L = m_op->m_num_layers;
     SC = m_op->m_hidden_size;
     DC = m_op->m_input_size;
+
+    slog << "======" << std::endl;
+    slog << "cell_type:" << m_op->cell_type << "  dir:" << m_op->dir << std::endl;
+    slog << "input_batch_first: " << m_op->input_batch_first << std::endl;
+    slog << "output_batch_first: " << m_op->output_batch_first << std::endl;
+    slog << "L(num_layers)=" << L << std::endl;
+    slog << "G(gates)=" << G << std::endl;
+    slog << "Gb(gates in bias)=" << Gb << std::endl;
+    slog << "SC(hidden_size)=" << SC << std::endl;
+    slog << "DC(input_size)=" << DC << std::endl;
 
     // src/dst:
     //   batch_first:  dnnl_ntc:   (batch, seq_length, input channels)
@@ -238,7 +245,6 @@ void RNN2::getSupportedDescriptors() {
         // B:      {L*D, 4*H} ab  ===  {L, D, 4, H},abcd=ldgo
         add_src(getInputShapeAtPort(5), memory::format_tag::ab);
 
-
         if (m_op->output_batch_first) {
             // Y:      {N, D, T, C} ===   {T, N, D*C} bac=ntc(optimal layoutA)
             //           abcd if D=1
@@ -262,6 +268,7 @@ void RNN2::getSupportedDescriptors() {
     createDescriptor(inCandidate, outCandidate);
 }
 
+#if 0
 bool RNN2::verifyWeightsPrecision(const Precision &layerPrec, const Precision &weightsPrec) {
     if (!weightsByLayerPrec.count(layerPrec))
         THROW_ERROR << "has unsupported layer precision " << layerPrec;
@@ -359,26 +366,62 @@ void RNN2::fillBiases(const int *gate_map) {
                 Prec,
                 elementsCount);
 
-    for (int g = 0; g < Gb; g++) {
-        dataType *l_b_ptr = b_ptr + gate_map[g] * SC;
-        const dataType *l_ie_b_ptr = &ie_b_vec[g * SC];
-        cpu_memcpy(l_b_ptr, l_ie_b_ptr, SC * sizeof(typename PrecisionTrait<Prec>::value_type));
+    // re-arrange gates order
+    const dataType *src_ptr = &ie_b_vec[0];
+    dataType * dst_ptr = b_ptr;
+    for (int i = 0; i < L*D; i++) {
+        for (int g = 0; g < Gb; g++) {
+            cpu_memcpy(dst_ptr + gate_map[g] * SC,
+                       src_ptr + g * SC,
+                       SC * sizeof(dataType));
+        }
+        dst_ptr += Gb * SC;
+        src_ptr += Gb * SC;
     }
     internalBlobs.push_back(w_bias_data_mem);
+}
+#endif
+template <Precision::ePrecision Prec>
+Blob::Ptr RNN2::CreateBlob(int port, VectorDims dims, const int* gate_map)
+{
+    using T = typename PrecisionTrait<Prec>::value_type;
+    Blob::Ptr blob = make_shared_blob<T>(TensorDesc(Prec, dims, getWeightsLayoutByDims(dims, false)));
+    blob->allocate();
+    auto b_ptr = static_cast<T*>(blob->buffer());
+    if (b_ptr == nullptr)
+        IE_THROW(NotAllocated) << "Internal blob was not allocated for node " << getName() << ".";
+
+    auto *constInputNode = dynamic_cast<Input *>(getParentEdgeAt(port)->getParent().get());
+    auto constBlob = constInputNode->getMemoryPtr();
+    auto const elementsCount = constBlob->GetSize() / constBlob->getDesc().getPrecision().size();
+
+    // convert const into target precision
+    std::vector<T> temp(elementsCount);
+    cpu_convert(constBlob->GetPtr(),
+                &temp[0],
+                DnnlExtensionUtils::DataTypeToIEPrecision(constBlob->GetDataType()),
+                Prec,
+                elementsCount);
+
+    // re-arrange gates order
+    const T *src_ptr = &temp[0];
+    T * dst_ptr = b_ptr;
+
+    auto n = dims.size();
+    auto g_cnt = dims[n-2];
+    auto sc_cnt = dims[n-1];
+    for (size_t i = 0; i < elementsCount; i += g_cnt * sc_cnt) {
+        for (int g = 0; g < g_cnt; g++) {
+            cpu_memcpy(dst_ptr + i + gate_map[g] * sc_cnt,
+                       src_ptr + i + g * sc_cnt,
+                       sc_cnt * sizeof(T));
+        }
+    }
+    return blob;
 }
 
 void RNN2::copyWeightsData() {
     /* Copy Weight data
-     * IE format:
-     *   W - [gates, out_state_size, in_data_size]
-     *   R - [gates, out_state_size, in_state_size]
-     *   B - [gates, out_state_size]
-     *
-     * DNNL format:
-     *   W - [1, 1, in_date_size,  gates, out_state_size]
-     *   R - [1, 1, in_state_size, gates, out_state_size]
-     *   B - [gates, out_state_size]
-     *
      *   Gate order
      *   ====== LSTM ======
      *   Caffe - IFOC, ONNX   - IOFC
@@ -423,15 +466,23 @@ void RNN2::copyWeightsData() {
 
     const auto& dataPrecision = getOriginalInputPrecisionAtPort(0);
     if (dataPrecision == Precision::BF16) {
-        fillWeights<uint16_t>(gate_map, wIdx, rIdx);
+        //fillWeights<uint16_t>(gate_map, wIdx, rIdx);
+        auto w_blob =  CreateBlob<Precision::BF16>(wIdx, VectorDims{ L, D, DC, G, SC }, gate_map);
+        auto r_blob =  CreateBlob<Precision::BF16>(rIdx, VectorDims{ L, D, DC, G, SC }, gate_map);
+        auto b_blob =  CreateBlob<Precision::FP32>(bIdx, VectorDims{L, D, Gb, SC}, gate_map);
+        internalBlobs.push_back(w_blob);
+        internalBlobs.push_back(r_blob);
+        internalBlobs.push_back(b_blob);
     } else if (dataPrecision == Precision::FP32) {
-        fillWeights<float>(gate_map, wIdx, rIdx);
+        auto w_blob =  CreateBlob<Precision::FP32>(wIdx, VectorDims{ L, D, DC, G, SC }, gate_map);
+        auto r_blob =  CreateBlob<Precision::FP32>(rIdx, VectorDims{ L, D, DC, G, SC }, gate_map);
+        auto b_blob =  CreateBlob<Precision::FP32>(bIdx, VectorDims{L, D, Gb, SC}, gate_map);
+        internalBlobs.push_back(w_blob);
+        internalBlobs.push_back(r_blob);
+        internalBlobs.push_back(b_blob);
     } else {// TODO FP16 and INT8 support
         THROW_ERROR << "has unsupported data type: " << dataPrecision;
     }
-
-    if (dataPrecision == Precision::BF16 || dataPrecision == Precision::FP32)
-        fillBiases<Precision::FP32>(gate_map);
 }
 
 namespace {

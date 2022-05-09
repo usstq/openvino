@@ -32,10 +32,6 @@ public:
 
     void execute(mkldnn::stream strm) override;
 
-    inline bool hasNativeOrder() const {
-        return batch_first;
-    }
-
     void cleanup() override;
 
 protected:
@@ -47,9 +43,7 @@ private:
 
     std::shared_ptr<RNNPrim> m_op;
 
-    void initCell();
-    void fillCellDesc();
-    void fillSequenceDesc();
+    /*
     bool verifyWeightsPrecision(const InferenceEngine::Precision& layerPrec,
                                 const InferenceEngine::Precision& weightsPrec);
 
@@ -57,14 +51,15 @@ private:
     void fillWeights(const int* gate_map, const size_t wIdx, const size_t rIdx);
     template <InferenceEngine::Precision::ePrecision Prec>
     void fillBiases(const int* gate_map);
+    */
+
+    template <InferenceEngine::Precision::ePrecision Prec>
+    InferenceEngine::Blob::Ptr CreateBlob(int port, VectorDims dims, const int* gate_map);
 
     void copyWeightsData();
 
     /** Specify mode Cell or Seq. true - Cell, false - Seq */
     bool is_cell = false;
-
-    /** Native order if [batch, seq, data], other case is [seq, batch, data] */
-    bool batch_first = true;
 
     /** Direction of iteration through sequence dimension */
     mkldnn::rnn_direction direction = mkldnn::rnn_direction::unidirectional;
