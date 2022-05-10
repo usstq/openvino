@@ -81,7 +81,7 @@ void ov::intel_cpu::RNNPrim::validate_and_infer_types() {
         const auto dim_H = Hi[2];
 
         ov::PartialShape state_shape{dim_N, dim_LD, dim_H};
-        NODE_VALIDATION_CHECK(this, (Hi == state_shape));
+        NODE_VALIDATION_CHECK(this, (Hi == state_shape), "shape_Hi=", Hi, " expect=", state_shape);
         NODE_VALIDATION_CHECK(this, (Ci == state_shape));
 
         NODE_VALIDATION_CHECK(this, (W == ov::PartialShape{dim_LD, dim_H*4, dim_C}), "W:", W, " expect:",
@@ -119,8 +119,8 @@ void ov::intel_cpu::RNNPrim::validate_and_infer_types() {
         set_output_type(1, output_type, state_shape);
         set_output_type(2, output_type, state_shape);
 
-        for(int i=0;i<get_output_size();i++)
-            std::cout << "out[" << i << "]" << get_output_partial_shape(i) << std::endl;
+        //for(int i=0;i<get_output_size();i++)
+        //   std::cout << "out[" << i << "]" << get_output_partial_shape(i) << std::endl;
 
     }else{
         NODE_VALIDATION_CHECK(this, false, "Unsurpported cell_type: ", cell_type);

@@ -1386,7 +1386,7 @@ void Graph::EnforceBF16() {
 }
 
 std::shared_ptr<ngraph::Function> Graph::dump() const {
-    auto graph_id = atoi(std::getenv("GRAPH_ID")?:"0");
+    auto graph_id = atoi(std::getenv("GRAPH_ID")?:"9");
     if (graph_id == 0)
         return func_dump;
     return dump_graph_as_ie_ngraph_net(*this);

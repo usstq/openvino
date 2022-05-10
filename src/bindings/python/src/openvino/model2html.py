@@ -525,7 +525,7 @@ def test_infer_queue(compiled_model, num_request, num_infer, time_limit=60):
             input_name = input.get_any_name()
         except:
             input_name = "**NO_NAME**"
-        print("input[{}]  {:<10} {} {}".format(port, input_name, input.get_element_type(), input.get_shape()))
+        print("input[{}]  {:<10} {} {}".format(port, input_name, input.get_element_type(), input.get_partial_shape()))
         all_input[port] = fill_tensors_with_random(input)
 
     for i in range(num_request):
@@ -560,11 +560,20 @@ if __name__ == "__main__":
                         help='do profiling before visualize')
     parser.add_argument('-e', '--inplace', action='store_true',
                         help='save to same folder as model')
+    parser.add_argument('--bf16', action='store_true',
+                        help='use bf16')
+    
+    parser.add_argument('--pshape', type=str, default="", help="dynamic reshape model before infer: [[-1,1,240],[1]]")
+    parser.add_argument('--shape', type=str, default="", help="dynamic reshape model before infer: [[128,1,240],[1]]")
 
     args = parser.parse_args()
 
     core = ov.Core()
     model = core.read_model(args.model_file)
+
+    if len(args.pshape):
+        model.reshape(eval(args.pshape))
+
     #model.visualize(filename="{}.html".format(model_path))
     #model.print()
 
@@ -581,7 +590,7 @@ if __name__ == "__main__":
                 "AFFINITY": "CORE",
                 "PERFORMANCE_HINT_NUM_REQUESTS":0,
                 "PERFORMANCE_HINT":"THROUGHPUT",
-                "INFERENCE_PRECISION_HINT":"f32"}
+                "INFERENCE_PRECISION_HINT": "bf16" if args.bf16 else "f32"}
     if (NUM_STREAMS):
         dev_prop["NUM_STREAMS"] = NUM_STREAMS
     if (INFERENCE_NUM_THREADS):

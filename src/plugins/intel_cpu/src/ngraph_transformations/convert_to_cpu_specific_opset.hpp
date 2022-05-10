@@ -4,6 +4,7 @@
 
 #include <ngraph/pass/constant_folding.hpp>
 #include "fc_bias_fusion.hpp"
+#include "rnn_sequences_fusion.hpp"
 #include "ngraph/op/fake_quantize.hpp"
 #include "ngraph/pass/manager.hpp"
 #include "reshape_fc_fusion.hpp"
@@ -33,6 +34,7 @@ inline void ConvertToCPUSpecificOpset(std::shared_ptr<ngraph::Function> &nGraphF
     manager.register_pass<ConvertToLeakyRelu>();
     manager.register_pass<ConvertToSwishCPU>();
     manager.register_pass<OptimizeSequenceTransposes>();
+    manager.register_pass<MultilayerSequenceFusion>();
     if (!ngraph::op::util::has_op_with_type<ngraph::op::FakeQuantize>(nGraphFunc)) {
         manager.register_pass<ReshapeFullyConnectedFusion>();
     }

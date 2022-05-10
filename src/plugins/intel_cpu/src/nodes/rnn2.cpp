@@ -739,6 +739,7 @@ void RNN2::execute(mkldnn::stream strm) {
         copyWeightsData();
         prepareMemory(itpd);
         wasMemoryPrepared = true;
+        wFormatWasChanged = false;
     }
 
     const auto src_data_mem = getParentEdgeAt(0)->getMemoryPtr();
