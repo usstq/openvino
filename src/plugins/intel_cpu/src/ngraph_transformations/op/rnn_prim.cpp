@@ -9,18 +9,20 @@ ov::intel_cpu::RNNPrim::RNNPrim(const std::string cell_type,
                                   const std::string dir,
                                   const bool input_batch_first,
                                   const bool output_batch_first,
+                                  const bool extra_direction_dim,
                                   const ngraph::OutputVector& args)
     : Op(args),
     cell_type(cell_type),
     dir(dir),
     input_batch_first(input_batch_first),
-    output_batch_first(output_batch_first) {
+    output_batch_first(output_batch_first),
+    extra_direction_dim(extra_direction_dim) {
     validate_and_infer_types();
 }
 
 std::shared_ptr<ngraph::Node> ov::intel_cpu::RNNPrim::clone_with_new_inputs(const ngraph::OutputVector& new_args) const {
     check_new_args_count(this, new_args);
-    return std::make_shared<ov::intel_cpu::RNNPrim>(cell_type, dir, input_batch_first, output_batch_first, new_args);
+    return std::make_shared<ov::intel_cpu::RNNPrim>(cell_type, dir, input_batch_first, output_batch_first, extra_direction_dim, new_args);
 }
 
 void ov::intel_cpu::RNNPrim::validate_and_infer_types() {
@@ -66,6 +68,10 @@ void ov::intel_cpu::RNNPrim::validate_and_infer_types() {
         const auto R = get_input_partial_shape(4);
         const auto B = get_input_partial_shape(5);
 
+        //std::cout << this->get_friendly_name() << std::endl;
+        //for(int i=0;i<get_input_size();i++)
+        //    std::cout << "input[" << i << "]" << get_input_partial_shape(i) << std::endl;
+
         const auto dim_LD = W[0];
         NODE_VALIDATION_CHECK(this, R[0] == dim_LD && B[0] == dim_LD);
 
@@ -78,7 +84,8 @@ void ov::intel_cpu::RNNPrim::validate_and_infer_types() {
         NODE_VALIDATION_CHECK(this, (Hi == state_shape));
         NODE_VALIDATION_CHECK(this, (Ci == state_shape));
 
-        NODE_VALIDATION_CHECK(this, (W == ov::PartialShape{dim_LD, dim_H*4, dim_C}));
+        NODE_VALIDATION_CHECK(this, (W == ov::PartialShape{dim_LD, dim_H*4, dim_C}), "W:", W, " expect:",
+                    ov::PartialShape{dim_LD, dim_H*4, dim_C});
         NODE_VALIDATION_CHECK(this, (R == ov::PartialShape{dim_LD, dim_H*4, dim_H}));
         NODE_VALIDATION_CHECK(this, (B == ov::PartialShape{dim_LD, dim_H*4}));
         
@@ -91,16 +98,30 @@ void ov::intel_cpu::RNNPrim::validate_and_infer_types() {
         set_output_size(3);
         auto output_type = get_input_element_type(0);
         
-        if (output_batch_first) {
-            set_output_type(0, output_type,
-                            ov::PartialShape{dim_N, m_num_directions, dim_T, dim_H});
+        if (extra_direction_dim) {
+            if (output_batch_first) {
+                set_output_type(0, output_type,
+                                ov::PartialShape{dim_N, m_num_directions, dim_T, dim_H});
+            } else {
+                set_output_type(0, output_type,
+                                ov::PartialShape{dim_T, m_num_directions, dim_N, dim_H});
+            }
         } else {
-            set_output_type(0, output_type,
-                            ov::PartialShape{dim_T, m_num_directions, dim_N, dim_H});
+            if (output_batch_first) {
+                set_output_type(0, output_type,
+                                ov::PartialShape{dim_N, dim_T, ov::Dimension(m_num_directions) * dim_H});
+            } else {
+                set_output_type(0, output_type,
+                                ov::PartialShape{dim_T, dim_N, ov::Dimension(m_num_directions) * dim_H});
+            }
         }
-        
+
         set_output_type(1, output_type, state_shape);
-        set_output_type(0, output_type, state_shape);
+        set_output_type(2, output_type, state_shape);
+
+        for(int i=0;i<get_output_size();i++)
+            std::cout << "out[" << i << "]" << get_output_partial_shape(i) << std::endl;
+
     }else{
         NODE_VALIDATION_CHECK(this, false, "Unsurpported cell_type: ", cell_type);
     }
@@ -111,5 +132,6 @@ bool ov::intel_cpu::RNNPrim::visit_attributes(ngraph::AttributeVisitor &visitor)
     visitor.on_attribute("direction", dir);
     visitor.on_attribute("input_batch_first", input_batch_first);
     visitor.on_attribute("output_batch_first", output_batch_first);
+    visitor.on_attribute("extra_direction_dim", extra_direction_dim);
     return true;
 }

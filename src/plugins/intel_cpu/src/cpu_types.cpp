@@ -377,6 +377,8 @@ std::string NameFromType(const Type type) {
             return "Reference";
         case Type::Subgraph:
             return "Subgraph";
+        case Type::RNN2:
+            return "RNN2";
         default:
             return "Unknown";
     }

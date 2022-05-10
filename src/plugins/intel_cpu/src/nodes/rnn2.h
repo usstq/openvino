@@ -100,7 +100,10 @@ private:
     static constexpr size_t optimalBatchSize = 16lu;
     static constexpr size_t batchDimDummyValue = 64lu;
 
+    bool wFormatWasChanged = false;
     bool wasMemoryPrepared = false;
+
+    DnnlDesriptor * op_desc;
 };
 
 }   // namespace node

@@ -117,6 +117,20 @@
  *                                                                abcd if D=1
  *                                                                acbd otherwise (reorder will be inserted)
  * 
+ * to further remove the subgraph converting 4D output to 3D inputs to next RNN node, RNNPrim have to also support
+ * 3D output
+ * 
+ * output with 3D output: extra_direction_dim = false
+ *  out  [T, N, D*H]      [T, N, D*H]                           {T, N, D*H}        {T, N, D*H} abc=tnc(optimal layoutA)
+ *                        batch_first=false,
+ *                        extra_direction_dim=false               abc
+ *
+ *  out  [N, T, D*H]      [N, T, D*H]                           {N, T, D*H}        {T, N, D*H} abc=ntc(optimal layoutB)
+ *                        batch_first=true
+ *                        extra_direction_dim=false               abc
+ * 
+ * output with post-shape-convert from 4D to 3D
+ * 
  * weight and bias (W & R)
  *   - acb layout at CPU plugin level ensure a reorder node will be inserted automatically
  *   - gates order needs to be re-arranged (at some level)
@@ -143,6 +157,7 @@ public:
             const std::string dir,
             const bool input_batch_first,
             const bool output_batch_first,
+            const bool extra_direction_dim,
             const ngraph::OutputVector& args);
 
     bool visit_attributes(ngraph::AttributeVisitor &visitor) override;
@@ -159,6 +174,7 @@ public:
     std::string dir;
     bool input_batch_first;
     bool output_batch_first;
+    bool extra_direction_dim;
 
     int64_t m_num_layers;
     int64_t m_batch;            // -1 when dynamic

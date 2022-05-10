@@ -10,6 +10,7 @@
 #include <ngraph/pattern/op/wrap_type.hpp>
 #include <transformations/utils/utils.hpp>
 #include <ngraph/variant.hpp>
+#include "op/rnn_prim.hpp"
 
 namespace {
     int64_t getSeqAxis(const std::shared_ptr<ngraph::Node>& sequenceOp) {
@@ -79,6 +80,127 @@ namespace {
 
         return true;
     }
+
+    std::shared_ptr<ngraph::Node> get_squeeze(const std::shared_ptr<ngraph::Node>& srcOP, std::vector<int64_t> axes_ref) {
+        const auto& target_inputs = srcOP->get_output_target_inputs(0);
+        if (target_inputs.size() == 1) {
+            const auto squeeze_after = ngraph::as_type_ptr<ngraph::opset1::Squeeze>(target_inputs.begin()->get_node()->shared_from_this());
+            if (squeeze_after) {
+                auto axes = ngraph::as_type_ptr<ngraph::opset1::Constant>(squeeze_after->get_input_node_shared_ptr(1));
+                if (axes) {
+                    auto axes_values = axes->cast_vector<int64_t>();
+                    if (axes_values == axes_ref) {
+                        return squeeze_after;
+                    }
+                }
+            }
+        }
+        return nullptr;
+    }
+    
+    bool transform_RNNPrim(const std::shared_ptr<ngraph::Node>& sequenceOp) {
+        if (std::getenv("RNNP_SKIP"))
+            return false;
+        auto parse_info = [](const std::shared_ptr<ngraph::Node>& node, std::string & cell_type, std::string & dir_name) -> bool {
+            ov::op::RecurrentSequenceDirection dir;
+            if (auto lstm5 = ngraph::as_type_ptr<ngraph::opset5::LSTMSequence>(node)) {
+                dir = lstm5->get_direction();
+                cell_type = "lstm";
+            } else if (auto lstm1 = ngraph::as_type_ptr<ngraph::opset1::LSTMSequence>(node)) {
+                dir = lstm1->get_direction();
+                cell_type = "lstm";
+            } else {
+                return false;
+            }
+
+            if (dir == ov::op::RecurrentSequenceDirection::FORWARD) {
+                dir_name = "left2right";
+            } else if (dir == ov::op::RecurrentSequenceDirection::REVERSE) {
+                dir_name = "right2left";
+            } else if (dir == ov::op::RecurrentSequenceDirection::BIDIRECTIONAL) {
+                dir_name = "bidirectional_concat";
+            } else {
+                return false;
+            }
+
+            return true;
+        };
+
+        std::string cell_type, dir_name;
+        if (!parse_info(sequenceOp, cell_type, dir_name)) {
+            return false;
+        }
+
+        // Detect pattern: Transpose_before -> Seq -> Transpose_after
+        auto seqAxis = getSeqAxis(sequenceOp);
+        std::cout << sequenceOp->get_friendly_name() << "=====" << seqAxis << std::endl;
+        if (seqAxis == 0) {
+            // batch_first = False
+            // create RNNPrim directly from input to pre-transpose,
+            // replace post-transpose with RNNPrim (so children of post-transpose not become RNNPrim's)
+            auto raw_value = sequenceOp->get_input_node_shared_ptr(0)->input_value(0);
+            if (raw_value.get_partial_shape().rank().get_min_length() != 3)
+                return false;
+
+            const auto &seqTargetInputs = sequenceOp->get_output_target_inputs(0);
+            if (seqTargetInputs.empty())
+                return false;
+            auto transposeAfter = seqTargetInputs.begin()->get_node()->shared_from_this();
+
+            auto squeeze = get_squeeze(transposeAfter, {1});
+
+            auto rnn_prim = std::make_shared<ov::intel_cpu::RNNPrim>(
+                                                    cell_type,
+                                                    dir_name,
+                                                    false,
+                                                    false,
+                                                    squeeze ? false : true, // squeeze removes extra direction dimension
+                                                    ngraph::OutputVector{
+                                                        raw_value,
+                                                        sequenceOp->input_value(1),
+                                                        sequenceOp->input_value(2),
+                                                        sequenceOp->input_value(4),
+                                                        sequenceOp->input_value(5),
+                                                        sequenceOp->input_value(6)
+                                                    });
+            
+
+            rnn_prim->set_friendly_name(sequenceOp->get_friendly_name());
+            ngraph::copy_runtime_info(sequenceOp, rnn_prim);
+            ngraph::replace_node(sequenceOp, rnn_prim);
+            ngraph::replace_node(squeeze ? squeeze : transposeAfter, ngraph::OutputVector{rnn_prim->output(0)});
+        } else {
+            // batch_first = True
+            // create RNNPrim directly from LSTMSequence's input
+            // replace LSTMSequence with RNNPrim
+            if (sequenceOp->input_value(0).get_partial_shape().rank().get_min_length() != 3)
+                return false;
+            auto squeeze = get_squeeze(sequenceOp, {1});
+            auto rnn_prim = std::make_shared<ov::intel_cpu::RNNPrim>(
+                                                    cell_type,
+                                                    dir_name,
+                                                    true,
+                                                    true,
+                                                    squeeze ? false : true, // squeeze removes extra direction dimension
+                                                    ngraph::OutputVector{
+                                                        sequenceOp->input_value(0),
+                                                        sequenceOp->input_value(1),
+                                                        sequenceOp->input_value(2),
+                                                        sequenceOp->input_value(4),
+                                                        sequenceOp->input_value(5),
+                                                        sequenceOp->input_value(6),
+                                                    });
+            rnn_prim->set_friendly_name(sequenceOp->get_friendly_name());
+            ngraph::copy_runtime_info(sequenceOp, rnn_prim);
+            ngraph::replace_node(sequenceOp, rnn_prim);
+            if (squeeze) {
+                ngraph::replace_node(squeeze, ngraph::OutputVector{rnn_prim->output(0)});
+            }
+        }
+
+        return true;
+    }
+
 } // namespace
 
 ov::intel_cpu::OptimizeGRUSequenceTransposes::OptimizeGRUSequenceTransposes() {
@@ -134,7 +256,7 @@ ov::intel_cpu::OptimizeLSTMSequenceTransposes::OptimizeLSTMSequenceTransposes() 
         };
 
         std::shared_ptr<ngraph::Node> lstmSequence = m.get_match_root();
-        return checkSequence(lstmSequence) ? transform(lstmSequence) : false;
+        return checkSequence(lstmSequence) ? transform_RNNPrim(lstmSequence) : false;
     };
 
     auto m = std::make_shared<ngraph::pattern::Matcher>(lstmSequenceNgraph, "OptimizeLSTMSequenceTransposes");

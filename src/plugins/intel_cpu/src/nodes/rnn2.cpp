@@ -183,7 +183,7 @@ RNN2::RNN2(const std::shared_ptr<ov::Node>& op, const mkldnn::engine& eng, Weigh
     slog << "Gb(gates in bias)=" << Gb << std::endl;
     slog << "SC(hidden_size)=" << SC << std::endl;
     slog << "DC(input_size)=" << DC << std::endl;
-
+    /*
     // src/dst:
     //   batch_first:  dnnl_ntc:   (batch, seq_length, input channels)
     //  !batch_first:  dnnl_tnc:   (seq_length, batch, input channels)
@@ -194,7 +194,7 @@ RNN2::RNN2(const std::shared_ptr<ov::Node>& op, const mkldnn::engine& eng, Weigh
         THROW_ERROR << "has incorrect input/output shapes. Input data shape: " << inDataShape.toString() <<
                 " Output shape: " << outDataShape.toString();
 
-    /*
+
     if (!one_of(getOriginalInputsNumber(), 6, 7))
         THROW_ERROR << "has incorrect number of input ports: " << getOriginalInputsNumber();
     if (!one_of(getOriginalOutputsNumber(), 2, 3))
@@ -215,7 +215,6 @@ bool RNN2::created() const {
 
 void RNN2::getSupportedDescriptors() {
     const auto dataType = DnnlExtensionUtils::IEPrecisionToDataType(getOriginalInputPrecisionAtPort(0));
-    copyWeightsData();
 
     std::vector<MemoryDescPtr> inCandidate;
     std::vector<MemoryDescPtr> outCandidate;
@@ -245,19 +244,34 @@ void RNN2::getSupportedDescriptors() {
         // B:      {L*D, 4*H} ab  ===  {L, D, 4, H},abcd=ldgo
         add_src(getInputShapeAtPort(5), memory::format_tag::ab);
 
-        if (m_op->output_batch_first) {
-            // Y:      {N, D, T, C} ===   {T, N, D*C} bac=ntc(optimal layoutA)
-            //           abcd if D=1
-            //       acbd otherwise (reorder will be inserted)
-            add_dst(getOutputShapeAtPort(0), m_op->m_num_directions == 1 ? memory::format_tag::abcd:memory::format_tag::acbd);    // dst
+        if (m_op->extra_direction_dim) {
+            // 4D output compatible with LSTMSequence output
+            if (m_op->output_batch_first) {
+                // Y:      {N, D, T, C} ===   {T, N, D*C} bac=ntc(optimal layoutA)
+                //           abcd if D=1
+                //       acbd otherwise (reorder will be inserted)
+                add_dst(getOutputShapeAtPort(0), m_op->m_num_directions == 1 ? memory::format_tag::abcd:memory::format_tag::acbd);    // dst
+            } else {
+                // Y with post-transpose(out is from the post-transpose node)
+                // out     {T, D, N, C}        {T, N, D*C} abc=tnc(optimal layoutB)
+                //         abcd if D=1
+                //         acbd otherwise (reorder will be inserted)
+                add_dst(getOutputShapeAtPort(0), m_op->m_num_directions == 1 ? memory::format_tag::abcd:memory::format_tag::acbd);    // dst
+            }
         } else {
-            // Y with post-transpose(out is from the post-transpose node)
-            // out     {T, D, N, C}        {T, N, D*C} abc=tnc(optimal layoutB)
-            //         abcd if D=1
-            //         acbd otherwise (reorder will be inserted)
-            add_dst(getOutputShapeAtPort(0), m_op->m_num_directions == 1 ? memory::format_tag::abcd:memory::format_tag::acbd);    // dst
+            // 3D output compatible with LSTMSequence input
+            if (m_op->output_batch_first) {
+                // Y:      {N, T, D*C} ===   {T, N, D*C} bac=ntc(optimal layoutA)
+                //           abc
+                add_dst(getOutputShapeAtPort(0), memory::format_tag::abc);    // dst
+            } else {
+                // Y with post-transpose(out is from the post-transpose node)
+                // out     {T, N, D*C}       {T, N, D*C} abc=tnc(optimal layoutB)
+                //           abc
+                add_dst(getOutputShapeAtPort(0), memory::format_tag::abc);    // dst
+            }
         }
-        
+
         // Ho,Co:  {N, L*D, H} bac  ===   {L, D, N, H} abcd
         add_dst(getOutputShapeAtPort(1), m_op->m_batch == 1 ? memory::format_tag::abc : memory::format_tag::bac);    // dst_iter
         add_dst(getOutputShapeAtPort(2), m_op->m_batch == 1 ? memory::format_tag::abc : memory::format_tag::bac);    // dst_iter_c
@@ -391,8 +405,7 @@ Blob::Ptr RNN2::CreateBlob(int port, VectorDims dims, const int* gate_map)
     if (b_ptr == nullptr)
         IE_THROW(NotAllocated) << "Internal blob was not allocated for node " << getName() << ".";
 
-    auto *constInputNode = dynamic_cast<Input *>(getParentEdgeAt(port)->getParent().get());
-    auto constBlob = constInputNode->getMemoryPtr();
+    auto constBlob = getParentEdgeAt(port)->getMemoryPtr();
     auto const elementsCount = constBlob->GetSize() / constBlob->getDesc().getPrecision().size();
 
     // convert const into target precision
@@ -402,7 +415,8 @@ Blob::Ptr RNN2::CreateBlob(int port, VectorDims dims, const int* gate_map)
                 DnnlExtensionUtils::DataTypeToIEPrecision(constBlob->GetDataType()),
                 Prec,
                 elementsCount);
-
+    //std::cout << m_op->get_friendly_name() << std::endl;
+    //std::cout << temp.size() << "-----------" << port << "," << dims << "," << constBlob->getDesc().getShape().toString() << std::endl;
     // re-arrange gates order
     const T *src_ptr = &temp[0];
     T * dst_ptr = b_ptr;
@@ -468,15 +482,17 @@ void RNN2::copyWeightsData() {
     if (dataPrecision == Precision::BF16) {
         //fillWeights<uint16_t>(gate_map, wIdx, rIdx);
         auto w_blob =  CreateBlob<Precision::BF16>(wIdx, VectorDims{ L, D, DC, G, SC }, gate_map);
-        auto r_blob =  CreateBlob<Precision::BF16>(rIdx, VectorDims{ L, D, DC, G, SC }, gate_map);
+        auto r_blob =  CreateBlob<Precision::BF16>(rIdx, VectorDims{ L, D, SC, G, SC }, gate_map);
         auto b_blob =  CreateBlob<Precision::FP32>(bIdx, VectorDims{L, D, Gb, SC}, gate_map);
+        internalBlobs.clear();
         internalBlobs.push_back(w_blob);
         internalBlobs.push_back(r_blob);
         internalBlobs.push_back(b_blob);
     } else if (dataPrecision == Precision::FP32) {
         auto w_blob =  CreateBlob<Precision::FP32>(wIdx, VectorDims{ L, D, DC, G, SC }, gate_map);
-        auto r_blob =  CreateBlob<Precision::FP32>(rIdx, VectorDims{ L, D, DC, G, SC }, gate_map);
+        auto r_blob =  CreateBlob<Precision::FP32>(rIdx, VectorDims{ L, D, SC, G, SC }, gate_map);
         auto b_blob =  CreateBlob<Precision::FP32>(bIdx, VectorDims{L, D, Gb, SC}, gate_map);
+        internalBlobs.clear();
         internalBlobs.push_back(w_blob);
         internalBlobs.push_back(r_blob);
         internalBlobs.push_back(b_blob);
@@ -632,8 +648,11 @@ void RNN2::prepareParams() {
     // {N, L*D, H}         {L, D, N, H} ldnc(optimal layout)
     const Shape state_shape {L, D, N, H};
     inDataDescs[1] = std::make_shared<DnnlBlockedMemoryDesc>(state_shape, dataType, memory::format_tag::ldnc);
-    if (haveCellState(cell_type))
+    outDataDescs[1] = std::make_shared<DnnlBlockedMemoryDesc>(state_shape, dataType, memory::format_tag::ldnc);
+    if (haveCellState(cell_type)) {
         inDataDescs[2] = std::make_shared<DnnlBlockedMemoryDesc>(state_shape, memory::data_type::f32, memory::format_tag::ldnc);
+        outDataDescs[2] = std::make_shared<DnnlBlockedMemoryDesc>(state_shape, memory::data_type::f32, memory::format_tag::ldnc);
+    }
 
 /*
     const size_t B = dataMemPtr->GetShape().getStaticDims()[0];
@@ -651,7 +670,7 @@ void RNN2::prepareParams() {
         outDataDescs[2] = std::make_shared<DnnlBlockedMemoryDesc>(shapeS_4D, memory::data_type::f32, memory::format_tag::ldnc);
     }
 */
-    bool wFormatWasChanged = false;
+    wFormatWasChanged = false;
     // WA To avoid different weights layer and iter formats in FP32 case.
     if ((T > 1 || N < optimalBatchSize) && false) {
         if (wFormat != mkldnn::memory::format_tag::ldigo) {
@@ -700,11 +719,7 @@ void RNN2::prepareParams() {
     }
 
     prim = result.first->prim;
-    if (!wasMemoryPrepared || wFormatWasChanged) {
-        auto itpd = result.first->desc.createPrimitiveDescriptorIterator(getEngine(), mkldnn::primitive_attr());
-        prepareMemory(itpd);
-        wasMemoryPrepared = true;
-    }
+    op_desc = &result.first->desc;
 }
 
 std::shared_ptr<MemoryDesc> RNN2::getSrcMemDesc(mkldnn::primitive_desc_iterator& primitive_desc_it, size_t idx) {
@@ -718,6 +733,13 @@ std::shared_ptr<MemoryDesc> RNN2::getDstMemDesc(mkldnn::primitive_desc_iterator&
 void RNN2::execute(mkldnn::stream strm) {
     if (!prim)
         THROW_ERROR << "does not have initialized primitive to execute.";
+
+    if (!wasMemoryPrepared || wFormatWasChanged) {
+        auto itpd = op_desc->createPrimitiveDescriptorIterator(getEngine(), mkldnn::primitive_attr());
+        copyWeightsData();
+        prepareMemory(itpd);
+        wasMemoryPrepared = true;
+    }
 
     const auto src_data_mem = getParentEdgeAt(0)->getMemoryPtr();
     const auto dst_data_mem = getChildEdgeAt(0)->getMemoryPtr();
@@ -770,12 +792,22 @@ std::vector<VectorDims> RNN2::shapeInfer() const {
     const size_t L = m_op->m_num_layers;
     const size_t H = m_op->m_hidden_size;
 
-    if (m_op->output_batch_first) {
-        // [N, D, T, H]
-        ret.emplace_back(VectorDims{N, D, T, H});
+    if (m_op->extra_direction_dim) {
+        if (m_op->output_batch_first) {
+            // [N, D, T, H]
+            ret.emplace_back(VectorDims{N, D, T, H});
+        } else {
+            ret.emplace_back(VectorDims{T, D, N, H});
+        }
     } else {
-        ret.emplace_back(VectorDims{T, D, N, H});
+        if (m_op->output_batch_first) {
+            // [N, T, D*H]
+            ret.emplace_back(VectorDims{N, T, D*H});
+        } else {
+            ret.emplace_back(VectorDims{T, N, D*H});
+        }
     }
+
     // [N, L*D, H] 
     ret.emplace_back(VectorDims{N, L*D, H});
     ret.emplace_back(VectorDims{N, L*D, H});
