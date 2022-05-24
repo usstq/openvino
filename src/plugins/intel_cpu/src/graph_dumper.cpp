@@ -209,8 +209,85 @@ std::shared_ptr<ngraph::Function> dump_graph_as_ie_ngraph_net(const Graph &graph
 }
 
 #ifdef CPU_DEBUG_CAPS
-void serialize(const Graph &graph) {
+
+static void summary_perf(const Graph &graph) {
+    std::map<std::string, double> perf_by_type;
+    std::map<NodePtr, double> perf_by_node;
+    double total_avg = 0;
+    uint64_t total = 0;
+    for (auto &node : graph.GetNodes()) {  // important: graph.graphNodes are in topological order
+        double avg = node->PerfCounter().avg();
+        auto type = node->getTypeStr() + "_" + node->getPrimitiveDescriptorType();
+        auto name = node->getName();
+
+        total += node->PerfCounter().count() * avg;
+        total_avg += avg;
+
+        if (perf_by_type.count(type))
+            perf_by_type[type] += avg;
+        else
+            perf_by_type[type] = avg;
+
+        if (perf_by_node.count(node))
+            perf_by_node[node] += avg;
+        else
+            perf_by_node[node] = avg;
+    }
+    
+    if (total_avg < 1) return;
+
+    std::cout << "Summary of " << graph.GetName() << " " << reinterpret_cast<uintptr_t>(&graph) << std::endl;
+    std::cout << "     Total(us): " << (uint64_t)(total) << std::endl;
+    std::cout << " Total_avg(us): " << (uint64_t)(total_avg) << std::endl;
+    {
+        std::cout << " perf_by_type:" << std::endl;
+        std::vector<std::pair<std::string, double> > A;
+        for (auto& it : perf_by_type)
+            A.push_back(it);
+            sort(A.begin(), A.end(),
+                [](std::pair<std::string, double>& a,
+                   std::pair<std::string, double>& b){
+                return a.second > b.second;
+            });
+        
+        for (auto& it : A) {
+            std::stringstream ss;
+            int percentage = (int)(it.second*100/total_avg);
+            if (percentage == 0) break;
+            ss << std::setw(10) << std::right << percentage << " % :" << it.first << std::endl;
+            std::cout << ss.str();
+        }
+    }
+    {
+        std::cout << " perf_by_node:" << std::endl;
+        std::vector<std::pair<NodePtr, double> > A;
+        for (auto& it : perf_by_node)
+            A.push_back(it);
+        sort(A.begin(), A.end(),
+            [](std::pair<NodePtr, double>& a,
+                std::pair<NodePtr, double>& b){
+            return a.second > b.second;
+        });
+        
+        for (auto& it : A) {
+            std::stringstream ss;
+            auto percentage = it.second*100/total_avg;
+            auto node = it.first;
+            if (node->PerfCounter().count() == 0) continue;
+            if (node->PerfCounter().avg() < 1) continue;
+            ss << std::setw(10) << std::right << std::fixed << std::setprecision(2) << percentage << " %  " 
+               << std::setw(8) << std::right  << node->PerfCounter().avg() << "(us)x" << node->PerfCounter().count()
+               << " " << node->getName()
+               << " " << node->getTypeStr() + "_" + node->getPrimitiveDescriptorType() << std::endl;
+            std::cout << ss.str();
+        }
+    }
+}
+
+void serialize(const Graph &graph, std::string annotation) {
     const std::string& path = graph.getConfig().execGraphPath;
+    const std::string& summary = graph.getConfig().summary;
+    auto graph_id = std::to_string( reinterpret_cast<uintptr_t>(&graph));
 
     if (path.empty())
         return;
@@ -218,9 +295,13 @@ void serialize(const Graph &graph) {
     if (path == "cout")
         serializeToCout(graph);
     else if (!path.compare(path.size() - 4, 4, ".xml"))
-        serializeToXML(graph, path);
+        serializeToXML(graph, path.substr(0, path.size() - 4) + annotation + graph_id + path.substr(path.size() - 4));
     else
         IE_THROW() << "Unknown serialize format. Should be either 'cout' or '*.xml'. Got " << path;
+
+    if (!summary.empty()) {
+        summary_perf(graph);
+    }
 }
 
 void serializeToXML(const Graph &graph, const std::string& path) {
@@ -233,27 +314,36 @@ void serializeToXML(const Graph &graph, const std::string& path) {
                                                binPath,
                                                ov::pass::Serialize::Version::IR_V10);
     manager.run_passes(graph.dump());
+    std::cout << "Graph " << graph.GetName() << " is serialized to " << path << std::endl;
+}
+
+std::ostream & operator<<(std::ostream & os, const Graph &graph) {
+    auto node_id = [](const NodePtr & node) {
+        return node->getName();
+    };
+    auto input_nodes = const_cast<Graph&>(graph).GetInputNodesMap();
+    auto output_nodes = const_cast<Graph&>(graph).GetOutputNodesMap();
+
+    const char *comma = "";
+    for (auto it = output_nodes.begin(); it != output_nodes.end(); ++it) {
+        os << comma << it->first << "(" << node_id(it->second) << ")";
+        comma = ",";
+    }
+    os << " " << graph.GetName() << "(" << std::endl;
+    for (auto it = input_nodes.begin(); it != input_nodes.end(); ++it) {
+        os << "\t" << it->first << "(" << node_id(it->second) << ")," << std::endl;
+    }
+    os << ") {" << std::endl;
+
+    for (const auto& node : graph.GetNodes()) {
+        os << *node << std::endl;
+    }
+    os << "}" << std::endl;
+    return os;
 }
 
 void serializeToCout(const Graph &graph) {
-    for (const auto& node : graph.GetNodes()) {
-        std::cout << "name: " << node->getName() << " [ ";
-        auto nodeDesc = node->getSelectedPrimitiveDescriptor();
-        if (nodeDesc) {
-            auto& inConfs = nodeDesc->getConfig().inConfs;
-            if (!inConfs.empty()) {
-                std::cout << "in: " << inConfs.front().getMemDesc()->getPrecision().name()
-                          << "/l=" << inConfs.front().getMemDesc()->serializeFormat()
-                          << "; ";
-            }
-            auto& outConfs = nodeDesc->getConfig().outConfs;
-            if (!outConfs.empty()) {
-                std::cout << "out: " << outConfs.front().getMemDesc()->getPrecision().name()
-                          << "/l=" << outConfs.front().getMemDesc()->serializeFormat();
-            }
-        }
-        std::cout << " ]"  << std::endl;
-    }
+    std::cout << graph;
 }
 #endif
 }   // namespace intel_cpu

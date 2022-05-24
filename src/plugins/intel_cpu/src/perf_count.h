@@ -25,7 +25,7 @@ public:
     }
 
     uint64_t avg() const { return (num == 0) ? 0 : total_duration / num; }
-
+    uint64_t count() const { return num; }
 private:
     void start_itr() {
         __start = std::chrono::high_resolution_clock::now();

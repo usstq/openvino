@@ -59,6 +59,7 @@ struct Config {
         TEXT,
     };
 
+    std::string summary;
     std::string execGraphPath;
     std::string verbose;
     std::string blobDumpDir = "cpu_dump";

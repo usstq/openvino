@@ -13,6 +13,7 @@
 #include <limits>
 #include <cstdint>
 #include <unordered_map>
+#include <iomanip>
 
 #include "nodes/concat.h"
 #include "nodes/conv.h"
@@ -1566,6 +1567,189 @@ bool Node::canFuseSimpleOperation(const NodePtr& node) const {
 
 void Node::addFusedNode(const NodePtr &fusingNode) {
     fusedWith.push_back(fusingNode);
+}
+
+
+std::ostream & operator<<(std::ostream & os, const Node &c_node) {
+    Node & node = const_cast<Node &>(c_node);
+    const int align_col = 50;
+    const char * comma = "";
+    auto node_id = [](Node & node) {
+        auto id = node.getName();
+        if (id.size() > 20)
+            return node.getTypeStr() + "_" + std::to_string(node.getExecIndex());
+        return id;
+    };
+    auto is_single_output_port = [](Node & node) {
+        for(auto & e : node.getChildEdges()) {
+            auto edge = e.lock();
+            if (!edge) continue;
+            if (edge->getInputNum() != 0)
+                return false;
+        }
+        return true;
+    };
+    auto replace_all = [](std::string& inout, std::string what, std::string with) {
+        std::size_t count{};
+        for (std::string::size_type pos{};
+            inout.npos != (pos = inout.find(what.data(), pos, what.length()));
+            pos += with.length(), ++count) {
+            inout.replace(pos, what.length(), with.data(), with.length());
+        }
+        return count;
+    };
+    auto nodeDesc = node.getSelectedPrimitiveDescriptor();
+    std::stringstream leftside;
+    
+    if (node.outputShapes.size()) {
+        if (node.outputShapes.size() > 1) leftside << "(";
+        comma = "";
+        for (int i = 0; i < node.outputShapes.size(); i++) {
+            auto edge = node.getChildEdgeAt(i);
+            if (edge->getStatus() != Edge::Status::NotAllocated) {
+                auto ptr = edge->getMemoryPtr();
+                auto desc = &(ptr->getDesc());
+                auto shape_str = desc->getShape().toString();
+                leftside << comma << desc->getPrecision().name()
+                            << "_" << desc->serializeFormat()
+                            << "_" << shape_str;
+            } else if (nodeDesc && i < nodeDesc->getConfig().outConfs.size()) {
+                auto desc = nodeDesc->getConfig().outConfs[i].getMemDesc();
+                auto shape_str = desc->getShape().toString();
+                replace_all(shape_str, "0 - ?", "?");
+                leftside << comma << desc->getPrecision().name()
+                            << "_" << desc->serializeFormat()
+                            << "_" << shape_str;
+            } else {
+                leftside << comma << "???";
+            }
+            comma = ",";
+        }
+        if (node.outputShapes.size() > 1) leftside << ")";
+    } else if (nodeDesc) {
+        // output Desc is enough since input is always in consistent
+        // with output.
+        /*
+        auto& inConfs = nodeDesc->getConfig().inConfs;
+        if (!inConfs.empty()) {
+            os << " in:[";
+            for (auto& c : inConfs) {
+                os << c.getMemDesc()->getPrecision().name()
+                        << c.getMemDesc()->
+                        << "/" << c.getMemDesc()->serializeFormat()
+                        << "; ";
+            }
+            os << "]";
+        }*/
+
+        auto& outConfs = nodeDesc->getConfig().outConfs;
+        if (!outConfs.empty()) {
+            if (outConfs.size() > 1) leftside << "(";
+            comma = "";
+            for (auto& c : outConfs) {
+                auto shape_str = c.getMemDesc()->getShape().toString();
+                replace_all(shape_str, "0 - ?", "?");
+                leftside << comma << c.getMemDesc()->getPrecision().name()
+                            << "_" << c.getMemDesc()->serializeFormat()
+                            << "_" << shape_str;
+                comma = ",";
+            }
+            if (outConfs.size() > 1) leftside << ")";
+        }
+    } else {
+        // no SPD yet, use orginal shapes
+        comma = "";
+        for (int i = 0; i < node.outputShapes.size(); i++) {
+            auto shape = node.outputShapes[i];
+            std::string prec_name = "Undef";
+            if (i < node.originalOutputPrecisions.size())
+                prec_name = node.originalOutputPrecisions[i].name();
+            auto shape_str = shape.toString();
+            replace_all(shape_str, "0 - ?", "?");
+            leftside << comma << prec_name
+                        << "_" << shape_str;
+            comma = ",";
+        }
+    }
+    leftside << "  " << node_id(node) <<  " = ";
+    os << node.getExecIndex() << ":" << std::right << std::setw(align_col) << leftside.str();
+    os << std::left << node.getTypeStr();
+    if (node.getAlgorithm() != Algorithm::Default)
+        os << "." << algToString(node.getAlgorithm());
+    os << " (";
+    
+    comma = "";
+    for (int port = 0; port < node.getParentEdges().size(); ++port) {
+        // find the Parent edge connecting to port
+        for (const auto & e : node.getParentEdges()) {
+            auto edge = e.lock();
+            if (!edge) continue;
+            if (edge->getOutputNum() != port) continue;
+            auto n = edge->getParent();
+            os << comma;
+            os << node_id(*edge->getParent());
+            if (!is_single_output_port(*n))
+                os << "[" << edge->getInputNum() << "]";
+            comma = ",";
+            break;
+        }
+    }
+
+    if (node.getType() == intel_cpu::Type::Input && node.isConstant()) {
+        if (auto input_node = reinterpret_cast<intel_cpu::node::Input *>(&node)) {
+            auto pmem = input_node->getMemoryPtr();
+            void * data = pmem->GetData();
+            auto shape = pmem->getDesc().getShape().getDims();
+
+            if (shape_size(shape) <= 8) {
+                auto type = details::convertPrecision(pmem->getDesc().getPrecision());
+                auto tensor = std::make_shared<ngraph::runtime::HostTensor>(type, shape, data);
+                auto constop = std::make_shared<ngraph::op::Constant>(tensor);
+                comma = "";
+                for (auto & v : constop->get_value_strings()){
+                    os << comma << v;
+                    comma = ",";
+                }
+            } else {
+                os << "...";
+            }
+        } else {
+            os << "?";
+        }
+    }
+
+    // additional properties
+    if (node.getType() == intel_cpu::Type::Eltwise) {
+        auto eltwise_node = reinterpret_cast<intel_cpu::node::Eltwise *>(&node);
+        os << " | Alpha=" << eltwise_node->getAlpha()
+        << ", Beta=" << eltwise_node->getBeta()
+        << ", Gamma=" << eltwise_node->getGamma();
+    }
+
+    os << ")  ";
+    os << " " << node.getPrimitiveDescriptorType();
+
+    // last line(s): fused layers
+    os << " " << node.getOriginalLayers();
+
+    os << " latency:" << node.PerfCounter().avg() << "(us) x" << node.PerfCounter().count();
+    
+    // primArgs
+    /*
+    if (node.primArgs.size()) {
+        comma = "";
+        os << " primArgs={";
+        for (auto & it : node.primArgs) {
+            void * ptr = it.second.map_data();
+            it.second.unmap_data(ptr);
+            auto arg_id = it.first;
+            os << comma << arg_id << ":" << ptr;
+            comma = ",";
+        }
+        os << "}";
+    }*/
+
+    return os;
 }
 
 }   // namespace intel_cpu

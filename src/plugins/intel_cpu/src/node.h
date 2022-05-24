@@ -794,7 +794,10 @@ private:
 #ifdef CPU_DEBUG_CAPS
     friend class Verbose;
 #endif
+    friend std::ostream & operator<<(std::ostream & os, const Node &node);
 };
+
+std::ostream & operator<<(std::ostream & os, const Node &node);
 
 constexpr uint64_t PortMask(int n) {
     return static_cast<uint64_t>(1) << n;
