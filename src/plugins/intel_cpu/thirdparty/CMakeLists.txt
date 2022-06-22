@@ -32,7 +32,7 @@ function(ie_add_onednn)
     if (ENABLE_CPU_DEBUG_CAPS)
         set(DNNL_VERBOSE "ON" CACHE STRING "" FORCE)
     else()
-        set(DNNL_VERBOSE "OFF" CACHE STRING "" FORCE)
+        set(DNNL_VERBOSE "ON" CACHE STRING "" FORCE)
     endif()
     set(SDL_cmake_included ON)  ## to skip internal SDL flags. SDL flags are already set on IE level
     if (ANDROID OR ((CMAKE_CXX_COMPILER_ID STREQUAL "MSVC") AND NOT (THREADING STREQUAL "OMP")))

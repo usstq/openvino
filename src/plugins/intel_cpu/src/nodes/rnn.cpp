@@ -17,6 +17,8 @@
 #include <string>
 #include <utility>
 
+#include "graph.h"
+
 #define THROW_ERROR IE_THROW() << getTypeStr() << " node with name '" << getName() << "' "
 
 using namespace dnnl;
@@ -156,8 +158,8 @@ bool RNNKey::operator==(const RNNKey& rhs) const {
             return false;
     }
     for (size_t i = 0lu; i < outDataDescs.size(); i++) {
-        if (outDataDescs[i] != rhs.outDataDescs[i] && (outDataDescs[i] == nullptr || rhs.outDataDescs[i] ||
-                outDataDescs[i]->getDnnlDesc() == rhs.outDataDescs[i]->getDnnlDesc()))
+        if (outDataDescs[i] != rhs.outDataDescs[i] && (outDataDescs[i] == nullptr || rhs.outDataDescs[i] == nullptr ||
+                outDataDescs[i]->getDnnlDesc() != rhs.outDataDescs[i]->getDnnlDesc()))
             return false;
     }
     for (size_t i = 0lu; i < wDescs.size(); i++) {
@@ -830,34 +832,48 @@ void RNN::prepareParams() {
 
     RNNKey key = { inDataDescs, outDataDescs, wDescs, cell_type };
 
-    auto builder = [this](const RNNKey& key) -> std::shared_ptr<dnnl::primitive> {
-        fillDescs();
+    scratchpad_mode = dnnl::scratchpad_mode::library; //dnnl::scratchpad_mode::user
+    
+    if (auto str_mode = std::getenv("scratchpad_mode")) {
+        if (std::string(str_mode) == "user")
+            scratchpad_mode = dnnl::scratchpad_mode::user;
+    }
 
+    auto builder = [this](const RNNKey& key) -> std::pair<std::shared_ptr<dnnl::primitive>, dnnl::memory::desc> {
+        fillDescs();
+        dnnl::primitive_attr attr;
+        attr.set_scratchpad_mode(scratchpad_mode);
         if (key.cellType == dnnl::algorithm::vanilla_rnn) {
             std::shared_ptr<vanilla_rnn_forward::desc> desc = descs[0];
-            return std::make_shared<vanilla_rnn_forward>(vanilla_rnn_forward::primitive_desc(*desc, getEngine()));
+            vanilla_rnn_forward::primitive_desc pd(*desc, attr, getEngine());
+            return std::make_pair(std::make_shared<vanilla_rnn_forward>(pd), pd.scratchpad_desc());
         } else if (key.cellType == dnnl::algorithm::vanilla_gru) {
             std::shared_ptr<gru_forward::desc> desc = descs[0];
-            return std::make_shared<gru_forward>(gru_forward::primitive_desc(*desc, getEngine()));
+            gru_forward::primitive_desc pd(*desc, attr, getEngine());
+            return std::make_pair(std::make_shared<gru_forward>(pd), pd.scratchpad_desc());
         } else if (key.cellType == dnnl::algorithm::lbr_gru) {
             std::shared_ptr<lbr_gru_forward::desc> desc = descs[0];
-            return std::make_shared<lbr_gru_forward>(lbr_gru_forward::primitive_desc(*desc, getEngine()));
+            lbr_gru_forward::primitive_desc pd(*desc, attr, getEngine());
+            return std::make_pair(std::make_shared<lbr_gru_forward>(pd), pd.scratchpad_desc());
         } else if (key.cellType == dnnl::algorithm::vanilla_lstm) {
             std::shared_ptr<lstm_forward::desc> desc = descs[0];
-            return std::make_shared<lstm_forward>(lstm_forward::primitive_desc(*desc, getEngine()));
+            lstm_forward::primitive_desc pd(*desc, attr, getEngine());
+            return std::make_pair(std::make_shared<lstm_forward>(pd), pd.scratchpad_desc());
         } else {
-            return nullptr;
+            return std::make_pair(nullptr, dnnl::memory::desc());
         }
     };
 
     auto cache = getRuntimeCache();
     auto result = cache->getOrCreate(key, builder);
 
-    if (!result.first) {
+    if (!result.first.first) {
         IE_THROW() << "Primitive descriptor was not found for node " << getName() << ".";
     }
 
-    prim = result.first;
+    prim = result.first.first;
+ 
+    scratchpad_md = result.first.second;
 
     if (!wasMemoryPrepared || wFormatWasChanged) {
         auto itpd = descs[0].createPrimitiveDescriptorIterator(getEngine(), dnnl::primitive_attr());
@@ -880,18 +896,29 @@ void RNN::execute(dnnl::stream strm) {
 
     const auto src_data_mem = getParentEdgeAt(0)->getMemoryPtr();
     const auto dst_data_mem = getChildEdgeAt(0)->getMemoryPtr();
-
     const auto &wgh_data_mem = internalBlobMemory[0];
     const auto &wgh_stat_mem = internalBlobMemory[1];
     const auto &wgh_bias_mem = internalBlobMemory[2];
+    
+    std::shared_ptr<void> cur_scratchpad_mem;
+    dnnl::memory scratchpad;
+
+    if (scratchpad_mode == dnnl::scratchpad_mode::user) {
+        cur_scratchpad_mem = graph->ensureScratchpadSize(scratchpad_md.get_size());
+        scratchpad = dnnl::memory(scratchpad_md, getEngine(), cur_scratchpad_mem.get());
+    }
 
     std::unordered_map<int, memory> args {
         {DNNL_ARG_SRC_LAYER,     src_data_mem->GetPrimitive()},
         {DNNL_ARG_WEIGHTS_LAYER, wgh_data_mem->GetPrimitive()},
         {DNNL_ARG_WEIGHTS_ITER,  wgh_stat_mem->GetPrimitive()},
         {DNNL_ARG_BIAS,          wgh_bias_mem->GetPrimitive()},
-        {DNNL_ARG_DST_LAYER,     dst_data_mem->GetPrimitive()},
+        {DNNL_ARG_DST_LAYER,     dst_data_mem->GetPrimitive()}
     };
+
+    if (cur_scratchpad_mem) {
+        args[DNNL_ARG_SCRATCHPAD] = scratchpad;
+    }
 
     int state_i_tags[] {DNNL_ARG_SRC_ITER, DNNL_ARG_SRC_ITER_C};
     int state_o_tags[] {DNNL_ARG_DST_ITER, DNNL_ARG_DST_ITER_C};
