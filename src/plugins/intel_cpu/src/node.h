@@ -94,6 +94,8 @@ private:
     impl_desc_type implementationType;
 };
 
+class Graph;
+
 class Node {
 public:
     Node(const Node &) = delete;
@@ -102,6 +104,7 @@ public:
     using AttrPtr = std::shared_ptr<dnnl::primitive_attr>;
 
 public:
+    Graph * graph;
     template<typename T, int N>
     struct Tag {};
 

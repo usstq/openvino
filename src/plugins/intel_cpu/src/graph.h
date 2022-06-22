@@ -193,6 +193,8 @@ public:
         return graphHasDynamicInput;
     }
 
+    std::shared_ptr<void> ensureScratchpadSize(size_t sz);
+
 protected:
     void VisitNode(NodePtr node, std::vector<NodePtr>& sortedNodes);
 
@@ -261,6 +263,9 @@ private:
     MultiCachePtr rtParamsCache;
 
     void EnforceBF16();
+
+    size_t cur_scratchpad_size = 0;
+    std::shared_ptr<void> cur_scratchpad_mem = nullptr;
 };
 
 }   // namespace intel_cpu

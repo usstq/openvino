@@ -50,6 +50,9 @@
 #include <low_precision/low_precision.hpp>
 #include "memory_desc/dnnl_blocked_memory_desc.h"
 
+#include <dnnl_types.h>
+#include <common/memory_desc_wrapper.hpp>
+
 using namespace dnnl;
 using namespace InferenceEngine;
 using namespace InferenceEngine::details;
@@ -149,6 +152,7 @@ void Graph::Replicate(const std::shared_ptr<const ov::Model> &subgraph, const Ex
         if (isQuantized()) {
             node->setQuantizedGraphFlag(true);
         }
+        node->graph = this;
         node->setRuntimeCache(rtParamsCache);
 
         graphNodes.push_back(node);
@@ -261,6 +265,7 @@ void Graph::Replicate(const CNNNetwork &network, const ExtensionManager::Ptr& ex
         if (isQuantized()) {
             node->setQuantizedGraphFlag(true);
         }
+        node->graph = this;
         node->setRuntimeCache(rtParamsCache);
         graphNodes.push_back(node);
 
@@ -1301,6 +1306,7 @@ bool Graph::InsertNode(NodePtr parent, NodePtr child, NodePtr node, int parentPo
     if (isQuantized()) {
         node->setQuantizedGraphFlag(true);
     }
+    node->graph = this;
     node->setRuntimeCache(rtParamsCache);
 
     if (initNode) {
@@ -1386,6 +1392,21 @@ void Graph::EnforceBF16() {
 
 std::shared_ptr<ngraph::Function> Graph::dump() const {
     return dump_graph_as_ie_ngraph_net(*this);
+}
+
+std::shared_ptr<void> Graph::ensureScratchpadSize(size_t sz) {
+    if (cur_scratchpad_size < sz) {
+        void * ptr = dnnl::impl::malloc(sz, 4096);
+        if (!ptr)
+            IE_THROW() << "dnnl::impl::malloc failed for scratchpad size " << sz;
+
+        std::cout << "Scratchpad size increased from " << cur_scratchpad_size << " to " << sz << std::endl;
+
+        cur_scratchpad_mem = std::shared_ptr<void>(ptr, [](void * p){ dnnl::impl::free(p); });
+        cur_scratchpad_size = sz;
+    }
+
+    return cur_scratchpad_mem;
 }
 
 }   // namespace intel_cpu
