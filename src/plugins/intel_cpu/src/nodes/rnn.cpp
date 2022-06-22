@@ -392,7 +392,7 @@ void RNN::fillCellDesc() {
     if (one_of(cell_type, dnnl::algorithm::vanilla_rnn, dnnl::algorithm::vanilla_gru, dnnl::algorithm::lbr_gru, dnnl::algorithm::vanilla_lstm)) {
         inCandidate.emplace_back(std::make_shared<DnnlBlockedMemoryDesc>(WShape, memory::data_type::f32, memory::format_tag::nc));
         inCandidate.emplace_back(std::make_shared<DnnlBlockedMemoryDesc>(RShape, memory::data_type::f32, memory::format_tag::nc));
-        inCandidate.emplace_back(std::make_shared<DnnlBlockedMemoryDesc>(BShape, memory::data_type::f32, memory::format_tag::x));
+        inCandidate.emplace_back(std::make_shared<DnnlBlockedMemoryDesc>(BShape, dataType, memory::format_tag::x));
     }
 
     createDescriptor(inCandidate, outCandidate);
@@ -475,7 +475,7 @@ void RNN::fillSequenceDesc() {
             memory::data_type::s32, memory::format_tag::x)); // sequence lengths
     inCandidate.emplace_back(std::make_shared<DnnlBlockedMemoryDesc>(Shape{D, G * SC, DC}, memory::data_type::f32, memory::format_tag::ntc)); // W
     inCandidate.emplace_back(std::make_shared<DnnlBlockedMemoryDesc>(Shape{D, G * SC, SC}, memory::data_type::f32, memory::format_tag::ntc)); // R
-    inCandidate.emplace_back(std::make_shared<DnnlBlockedMemoryDesc>(Shape{D, Gb * SC}, memory::data_type::f32, memory::format_tag::nc)); // B
+    inCandidate.emplace_back(std::make_shared<DnnlBlockedMemoryDesc>(Shape{D, Gb * SC}, dataType, memory::format_tag::nc)); // B
 
     std::vector<MemoryDescPtr> outCandidate;
     outCandidate.reserve(3);
@@ -579,7 +579,8 @@ template <Precision::ePrecision Prec>
 void RNN::fillBiases(const int *gate_map) {
     using dataType = typename PrecisionTrait<Prec>::value_type;
 
-    if (getOriginalInputPrecisionAtPort(bIdx) != Precision::FP32) {
+    if (getOriginalInputPrecisionAtPort(bIdx) != Precision::FP32 && 
+        getOriginalInputPrecisionAtPort(bIdx) != Precision::BF16) {
         THROW_ERROR << "doesn't support bias precision: " << getOriginalInputPrecisionAtPort(bIdx);
     }
 
@@ -676,8 +677,11 @@ void RNN::copyWeightsData() {
         THROW_ERROR << "has unsupported data type: " << dataPrecision;
     }
 
-    if (dataPrecision == Precision::BF16 || dataPrecision == Precision::FP32)
+    if (dataPrecision == Precision::FP32)
         fillBiases<Precision::FP32>(gate_map);
+    
+    if (dataPrecision == Precision::BF16)
+        fillBiases<Precision::BF16>(gate_map);
 }
 
 void RNN::fillDescs() {
@@ -755,7 +759,7 @@ void RNN::createDescriptor(const std::vector<MemoryDescPtr> &inputDesc,
         auto statesDims = DnnlExtensionUtils::convertToDnnlDims(VectorDims{ L, D, SC, G, SC });
         wDescs[1] = dnnl::memory::desc(statesDims, dataType, wFormat);
         auto biasDims = DnnlExtensionUtils::convertToDnnlDims(VectorDims{ L, D, Gb, SC });
-        wDescs[2] = dnnl::memory::desc(biasDims, memory::data_type::f32, memory::format_tag::ldgo);
+        wDescs[2] = dnnl::memory::desc(biasDims, dataType, memory::format_tag::ldgo);
 
         fillDescs();
     }
