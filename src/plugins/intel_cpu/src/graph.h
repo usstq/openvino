@@ -33,7 +33,7 @@ public:
         Ready = 1,
     };
 
-    Graph() = default;
+    Graph();
 
     Status GetStatus() {
         return status;
@@ -193,7 +193,22 @@ public:
         return graphHasDynamicInput;
     }
 
-    std::shared_ptr<void> ensureScratchpadSize(size_t sz);
+    dnnl::scratchpad_mode getScratchpadMode() {
+        return scratchpad_mode;
+    }
+
+    void setScratchPad(std::unordered_map<int, dnnl::memory> & args, const dnnl::memory::desc & md) {
+        if (scratchpad_mode == dnnl::scratchpad_mode::user) {
+            auto sz = md.get_size();
+            if (cur_scratchpad_size < sz) {
+                resizeScratchpad(sz);
+            }
+            args[DNNL_ARG_SCRATCHPAD] =
+                dnnl::memory(md, getEngine(), cur_scratchpad_mem.get());
+        }
+    }
+
+    void resizeScratchpad(size_t sz);
 
 protected:
     void VisitNode(NodePtr node, std::vector<NodePtr>& sortedNodes);
@@ -264,6 +279,7 @@ private:
 
     void EnforceBF16();
 
+    dnnl::scratchpad_mode scratchpad_mode;
     size_t cur_scratchpad_size = 0;
     std::shared_ptr<void> cur_scratchpad_mem = nullptr;
 };

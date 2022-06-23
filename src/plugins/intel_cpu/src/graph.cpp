@@ -1421,25 +1421,31 @@ std::shared_ptr<ngraph::Function> Graph::dump() const {
     return dump_graph_as_ie_ngraph_net(*this);
 }
 
-std::shared_ptr<void> Graph::ensureScratchpadSize(size_t sz) {
-    if (cur_scratchpad_size < sz) {
-        // free old one before allocate new
-        cur_scratchpad_mem.reset();
 
-        void * ptr = dnnl::impl::malloc(sz, 4096);
+static std::string get_env(const char * name) {
+    auto env = std::getenv(name);
+    if (env)
+        return std::string(env);
+    return "";
+}
 
-        if (ptr == nullptr)
-            IE_THROW() << "dnnl::impl::malloc failed for scratchpad size " << sz;
+Graph::Graph() {
+    scratchpad_mode = get_env("scratchpad_mode") == "user" ?
+                        dnnl::scratchpad_mode::user : dnnl::scratchpad_mode::library;
+}
 
-        //std::cout << "Scratchpad size increased from " << cur_scratchpad_size << " to " << sz << std::endl;
+void Graph::resizeScratchpad(size_t sz) {
+    cur_scratchpad_mem.reset();
+    void * ptr = dnnl::impl::malloc(sz, 4096);
+    if (ptr == nullptr)
+        IE_THROW() << "dnnl::impl::malloc failed for scratchpad size " << sz;
 
-        cur_scratchpad_mem = std::shared_ptr<void>(ptr, [sz](void * p){
-                dnnl::impl::free(p);
-        });
-        cur_scratchpad_size = sz;
-    }
+    //std::cout << "Scratchpad size increased from " << cur_scratchpad_size << " to " << sz << std::endl;
 
-    return cur_scratchpad_mem;
+    cur_scratchpad_mem = std::shared_ptr<void>(ptr, [sz](void * p){
+            dnnl::impl::free(p);
+    });
+    cur_scratchpad_size = sz;
 }
 
 }   // namespace intel_cpu

@@ -1264,6 +1264,7 @@ void Convolution::prepareParams() {
 
     auto initPrimitiveAttr = [&]() {
         dnnl::primitive_attr attr;
+        attr.set_scratchpad_mode(graph->getScratchpadMode());
         addZeroPoints(attr);
         setPostOps(attr, outMemoryDesc->getShape().getStaticDims(), true);
 
@@ -1416,6 +1417,8 @@ Convolution::ConvolutionExecutor::ConvolutionExecutor(const dnnl::convolution_fo
                                                                 const dnnl::memory::desc& weightMemDesc,
                                                                 const dnnl::memory::desc& outMemDesc,
                                                                 const dnnl::engine& engine) {
+    md_scratch_pad = pd.scratchpad_desc();
+
     execPrim.reset(new dnnl::convolution_forward(pd));
 
     if (inMemDesc != pd.src_desc()) {
@@ -1435,6 +1438,9 @@ void Convolution::execute(dnnl::stream strm) {
     if (!execPtr) {
         IE_THROW() << "Can't execute Convolution node with name: " << getName() << ", because executor is not compiled";
     }
+
+    graph->setScratchPad(primArgs, execPtr->md_scratch_pad);
+
     execPtr->exec(primArgs, strm);
 }
 
