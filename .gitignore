@@ -13,8 +13,8 @@ cmake-build-*
 .DS_Store
 **/tags
 compile_commands.json
-bin/
-build/
+bin*/
+build*/
 .local_vimrc
 .gdb_history
 .vimspector.json
