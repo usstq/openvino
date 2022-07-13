@@ -835,7 +835,7 @@ void RNN::prepareParams() {
     auto builder = [this](const RNNKey& key) -> std::pair<std::shared_ptr<dnnl::primitive>, dnnl::memory::desc> {
         fillDescs();
         dnnl::primitive_attr attr;
-        attr.set_scratchpad_mode(graph->getScratchpadMode());
+        attr.set_scratchpad_mode(dnnl::scratchpad_mode::user);
         if (key.cellType == dnnl::algorithm::vanilla_rnn) {
             std::shared_ptr<vanilla_rnn_forward::desc> desc = descs[0];
             vanilla_rnn_forward::primitive_desc pd(*desc, attr, getEngine());
@@ -865,7 +865,7 @@ void RNN::prepareParams() {
     }
 
     prim = result.first.first;
- 
+
     scratchpad_md = result.first.second;
 
     if (!wasMemoryPrepared || wFormatWasChanged) {
@@ -892,7 +892,7 @@ void RNN::execute(dnnl::stream strm) {
     const auto &wgh_data_mem = internalBlobMemory[0];
     const auto &wgh_stat_mem = internalBlobMemory[1];
     const auto &wgh_bias_mem = internalBlobMemory[2];
-    
+
     std::unordered_map<int, memory> args {
         {DNNL_ARG_SRC_LAYER,     src_data_mem->GetPrimitive()},
         {DNNL_ARG_WEIGHTS_LAYER, wgh_data_mem->GetPrimitive()},

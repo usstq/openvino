@@ -121,7 +121,6 @@ private:
 
     bool wasMemoryPrepared = false;
 
-    dnnl::scratchpad_mode scratchpad_mode;
     dnnl::memory::desc scratchpad_md;
 };
 
