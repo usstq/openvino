@@ -35,11 +35,13 @@ public:
     std::shared_ptr<ov::Node> clone_with_new_inputs(const ov::OutputVector& new_args) const override;
     bool visit_attributes(ov::AttributeVisitor& visitor) override;
 
-    template<typename T>
+    template<typename T, typename V>
     bool evaluate_T(ov::TensorVector& outputs, const ov::TensorVector& inputs) const;
     
     bool evaluate(ov::TensorVector& outputs, const ov::TensorVector& inputs) const override;
     bool has_evaluate() const override;
+
+    bool bf16 = false;
 };
 //! [op:header]
 
