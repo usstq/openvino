@@ -24,6 +24,23 @@ public:
     bool evaluate(ov::TensorVector& outputs, const ov::TensorVector& inputs) const override;
     bool has_evaluate() const override;
 };
+
+
+class RnntUpdate : public ov::op::Op {
+public:
+    OPENVINO_OP("RnntUpdate");
+
+    RnntUpdate() = default;
+    void validate_and_infer_types() override;
+    std::shared_ptr<ov::Node> clone_with_new_inputs(const ov::OutputVector& new_args) const override;
+    bool visit_attributes(ov::AttributeVisitor& visitor) override;
+
+    template<typename T>
+    bool evaluate_T(ov::TensorVector& outputs, const ov::TensorVector& inputs) const;
+    
+    bool evaluate(ov::TensorVector& outputs, const ov::TensorVector& inputs) const override;
+    bool has_evaluate() const override;
+};
 //! [op:header]
 
 }  // namespace TemplateExtension

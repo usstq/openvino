@@ -13,6 +13,15 @@ set(SRC identity.cpp ov_extension.cpp)
 
 add_library(${TARGET_NAME} MODULE ${SRC})
 
+
+find_package(TBB QUIET COMPONENTS tbb tbbmalloc)
+
+if(TBB_FOUND)
+    target_link_libraries(${TARGET_NAME} PUBLIC ${TBB_IMPORTED_TARGETS})
+else()
+message(=========================no TBB)
+endif()
+
 target_compile_definitions(${TARGET_NAME} PRIVATE IMPLEMENT_OPENVINO_EXTENSION_API)
 target_link_libraries(${TARGET_NAME} PRIVATE openvino::runtime)
 # [cmake:extension]
