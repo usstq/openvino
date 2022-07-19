@@ -108,6 +108,10 @@ public:
 
     void setExtManager(const ExtensionManager::Ptr& extMgr) { ext_mng = extMgr; }
 
+    const Graph & getSubGraph() const {
+        return sub_graph;
+    }
+
 protected:
     //  needShapeInfer() should return false
     //  because we cannot resolve the output dimensions before the inference is completed

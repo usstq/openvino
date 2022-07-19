@@ -134,13 +134,13 @@ void RnntUpdate::validate_and_infer_types() {
     NGRAPH_CHECK(get_input_element_type(logits) == ov::element::Type_t::f32);
     NGRAPH_CHECK(get_input_partial_shape(logits) == ov::PartialShape({N, ov::Dimension(29)}));
 
-    NGRAPH_CHECK(get_input_element_type(Ho1) == ov::element::Type_t::f32);
+    NGRAPH_CHECK(get_input_element_type(Ho1) == (bf16 ? ov::element::Type_t::bf16 : ov::element::Type_t::f32));
     NGRAPH_CHECK(get_input_partial_shape(Ho1) == ov::PartialShape({N, ov::Dimension(320)}));
 
     NGRAPH_CHECK(get_input_element_type(Co1) == ov::element::Type_t::f32);
     NGRAPH_CHECK(get_input_partial_shape(Co1) == ov::PartialShape({N, ov::Dimension(320)}));
 
-    NGRAPH_CHECK(get_input_element_type(Ho2) == ov::element::Type_t::f32);
+    NGRAPH_CHECK(get_input_element_type(Ho2) == (bf16 ? ov::element::Type_t::bf16 : ov::element::Type_t::f32));
     NGRAPH_CHECK(get_input_partial_shape(Ho2) == ov::PartialShape({N, ov::Dimension(320)}));
 
     NGRAPH_CHECK(get_input_element_type(Co2) == ov::element::Type_t::f32);
@@ -157,10 +157,10 @@ void RnntUpdate::validate_and_infer_types() {
     set_output_type(i++, get_input_element_type(6), get_input_partial_shape(6));
 
     set_output_type(i++, ov::element::Type_t::i32, {N});
-    set_output_type(i++, ov::element::Type_t::u32, {N});
+    set_output_type(i++, ov::element::Type_t::i32, {N});
 
     set_output_type(i++, ov::element::Type_t::u8, {N, 1024});
-    set_output_type(i++, ov::element::Type_t::i32, {N});    
+    set_output_type(i++, ov::element::Type_t::i32, {N});
 }
 
 std::shared_ptr<ov::Node> RnntUpdate::clone_with_new_inputs(const ov::OutputVector& new_args) const {
@@ -182,6 +182,7 @@ public:
         shape = tensor.get_shape();
         strides = tensor.get_strides();
         ptr = reinterpret_cast<uint8_t*>(tensor.data());
+        elesize = tensor.get_element_type().size();
     }
 
     T& at(int i0) {
@@ -191,6 +192,7 @@ public:
         return *reinterpret_cast<T*>(ptr + i0 * strides[0] + i1 * strides[1]);
     }
 
+    size_t elesize;
     uint8_t * ptr;
     ov::Shape shape;
     ov::Strides strides;
@@ -198,12 +200,12 @@ public:
 
 bool RnntUpdate::evaluate(ov::TensorVector& outputs, const ov::TensorVector& inputs) const {
     if (bf16)
-        return evaluate_T<float, float>(outputs, inputs);
+        return evaluate_T<int16_t, float>(outputs, inputs);
     return evaluate_T<float, float>(outputs, inputs);
 }
 
 // https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html
-bool all_ge_avx512f(BTensor<uint32_t> v, uint32_t t) {
+bool all_ge_avx512f(BTensor<int32_t> v, uint32_t t) {
     auto thr = _mm512_set1_epi32(t);
     int N = v.shape[0];
     int i;
@@ -222,33 +224,38 @@ bool all_ge_avx512f(BTensor<uint32_t> v, uint32_t t) {
     return true;
 }
 
-template<typename T, typename V>
+// M : type for which only data movement is performed
+// V:  type for which arithematic is performed
+template<typename M, typename V>
 bool RnntUpdate::evaluate_T(ov::TensorVector& outputs, const ov::TensorVector& inputs) const {
     int idx = 0;
     BTensor<int32_t> current_iter(inputs[idx++]);   // [1]
-    BTensor<T> all_f(inputs[idx++]);                // N,T,1024
-    BTensor<V> logits(inputs[idx++]);
-    BTensor<T> o_hs1(inputs[idx++]);
-    BTensor<T> o_cs1(inputs[idx++]);
-    BTensor<T> o_hs2(inputs[idx++]);
-    BTensor<T> o_cs2(inputs[idx++]);
+    BTensor<float> all_f(inputs[idx++]);                // N,T,1024
+    BTensor<float> logits(inputs[idx++]);
+    BTensor<M> o_hs1(inputs[idx++]);
+    BTensor<float> o_cs1(inputs[idx++]);
+    BTensor<M> o_hs2(inputs[idx++]);
+    BTensor<float> o_cs2(inputs[idx++]);
 
     // memory has been allocated and data is there, just need to update according 
     idx = 0; 
     BTensor<uint8_t> next_cond(outputs[idx++]);   // [1]
-    BTensor<T>       f(outputs[idx++]);           // N,1024
+    BTensor<float>   f(outputs[idx++]);           // N,1024
     BTensor<int32_t> last_symbol(outputs[idx++]); // 
-    BTensor<T> hs1(outputs[idx++]);
-    BTensor<T> cs1(outputs[idx++]);
-    BTensor<T> hs2(outputs[idx++]);
-    BTensor<T> cs2(outputs[idx++]);
+    BTensor<M> hs1(outputs[idx++]);
+    BTensor<float> cs1(outputs[idx++]);
+    BTensor<M> hs2(outputs[idx++]);
+    BTensor<float> cs2(outputs[idx++]);
     BTensor<int32_t> num_symbols_generated(outputs[idx++]);
-    BTensor<uint32_t> time_idxs(outputs[idx++]);
+    BTensor<int32_t> time_idxs(outputs[idx++]);
     BTensor<uint8_t> all_predictions(outputs[idx++]);
     BTensor<int32_t> all_length(outputs[idx++]);
 
     int N = logits.shape[0];
     int C = logits.shape[1];
+    int T = all_f.shape[1];
+
+    //std::cout << "RnntUpdate::evaluate_T current_iter=" << current_iter.at(0) << std::endl;
 
 #define BLANK 28
 
@@ -277,17 +284,17 @@ bool RnntUpdate::evaluate_T(ov::TensorVector& outputs, const ov::TensorVector& i
         if (current_iter.at(0) == 0) {
             // initialize states
             for(int i = i_start; i < i_end; i++) {
-                memset(&hs1.at(i, 0), 0, hs1.shape[1]*sizeof(T));
-                memset(&cs1.at(i, 0), 0, cs1.shape[1]*sizeof(T));
-                memset(&hs2.at(i, 0), 0, hs2.shape[1]*sizeof(T));
-                memset(&cs2.at(i, 0), 0, cs2.shape[1]*sizeof(T));
+                memset(&hs1.at(i, 0), 0, hs1.shape[1]*hs1.elesize);
+                memset(&cs1.at(i, 0), 0, cs1.shape[1]*cs1.elesize);
+                memset(&hs2.at(i, 0), 0, hs2.shape[1]*hs2.elesize);
+                memset(&cs2.at(i, 0), 0, cs2.shape[1]*cs2.elesize);
                 
                 num_symbols_generated.at(i) = 0;
                 last_symbol.at(i) = BLANK;
                 time_idxs.at(i) = 0;
 
                 // f only update partially, initialize is needed
-                memcpy(&f.at(i), &all_f.at(i, 0), f.shape[1]*sizeof(T));
+                memcpy(&f.at(i), &all_f.at(i, 0), f.shape[1]*f.elesize);
 
                 all_length.at(i) = 0;
             }
@@ -317,17 +324,17 @@ bool RnntUpdate::evaluate_T(ov::TensorVector& outputs, const ov::TensorVector& i
                 
                 num ++;
                 last_symbol.at(i) = k;
-                memcpy(&hs1.at(i, 0), &o_hs1.at(i, 0), hs1.shape[1]*sizeof(T));
-                memcpy(&cs1.at(i, 0), &o_cs1.at(i, 0), cs1.shape[1]*sizeof(T));
-                memcpy(&hs2.at(i, 0), &o_hs2.at(i, 0), hs2.shape[1]*sizeof(T));
-                memcpy(&cs2.at(i, 0), &o_cs2.at(i, 0), cs2.shape[1]*sizeof(T));
+                memcpy(&hs1.at(i, 0), &o_hs1.at(i, 0), hs1.shape[1]*hs1.elesize);
+                memcpy(&cs1.at(i, 0), &o_cs1.at(i, 0), cs1.shape[1]*cs1.elesize);
+                memcpy(&hs2.at(i, 0), &o_hs2.at(i, 0), hs2.shape[1]*hs2.elesize);
+                memcpy(&cs2.at(i, 0), &o_cs2.at(i, 0), cs2.shape[1]*cs2.elesize);
             } else {
                 auto & t = time_idxs.at(i);
                 num = 0;
                 t ++;
-                if (t < all_f.shape[1]) {
+                if (t < T) {
                     // update i'th item in feature batch given new time_idx
-                    memcpy(&f.at(i), &all_f.at(i, t), f.shape[1]*sizeof(T));
+                    memcpy(&f.at(i), &all_f.at(i, t), f.shape[1]*f.elesize);
                 }
             }
         }
@@ -336,11 +343,13 @@ bool RnntUpdate::evaluate_T(ov::TensorVector& outputs, const ov::TensorVector& i
     //std::cout << "RnntUpdate: logits:" << logits.shape << ", "<< logits.strides << std::endl;
     //std::cout << "RnntUpdate: k:" << k.shape << ", "<< k.strides << std::endl;
 
-#if 0
+#if 1
+    next_cond.at(0) = 0;
     for(int i = 0; i < N; i++) {
-        if (time_idxs.at(i) < all_f.shape[1])
-            // continue execute next time
-            return true;
+        if (time_idxs.at(i) < T) {
+            next_cond.at(0) = 1;
+            break;
+        }
     }
 #else
     if (all_ge_avx512f(time_idxs, all_f.shape[1]))

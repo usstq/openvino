@@ -204,6 +204,9 @@ void Graph::Replicate(const std::shared_ptr<const ov::Model> &subgraph, const Ex
         graphEdges.push_back(edge);
         graphNodes.push_back(outNode);
     }
+
+    if (config.enforceBF16)
+        EnforceBF16();
 }
 
 void Graph::Replicate(const CNNNetwork &network, const ExtensionManager::Ptr& extMgr) {
