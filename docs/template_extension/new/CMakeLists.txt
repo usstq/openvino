@@ -22,6 +22,8 @@ else()
 message(=========================no TBB)
 endif()
 
+target_compile_options(${TARGET_NAME} PRIVATE "-mavx512f")
+
 target_compile_definitions(${TARGET_NAME} PRIVATE IMPLEMENT_OPENVINO_EXTENSION_API)
 target_link_libraries(${TARGET_NAME} PRIVATE openvino::runtime)
 # [cmake:extension]

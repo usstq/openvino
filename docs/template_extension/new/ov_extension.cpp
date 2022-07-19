@@ -17,7 +17,10 @@ OPENVINO_CREATE_EXTENSIONS(
         std::make_shared<ov::OpExtension<TemplateExtension::Identity>>(),
 
         // Register operaton mapping, required when converted from framework model format
-        std::make_shared<ov::frontend::OpExtension<TemplateExtension::Identity>>()
+        std::make_shared<ov::frontend::OpExtension<TemplateExtension::Identity>>(),
+
+        std::make_shared<ov::OpExtension<TemplateExtension::RnntUpdate>>(),
+        std::make_shared<ov::frontend::OpExtension<TemplateExtension::RnntUpdate>>(),
     }));
 //! [ov_extension:entry_point]
 // clang-format on

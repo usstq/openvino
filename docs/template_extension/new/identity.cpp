@@ -12,6 +12,8 @@
 //#include"omp.h"
 #include "tbb/parallel_for.h"
 
+#include <immintrin.h>
+
 std::string get_version() {
     return"0.1";
 }
@@ -19,8 +21,13 @@ std::string get_version() {
 class Initor {
 public:
     Initor() {
-        auto &ops = const_cast<ov::OpSet&>(ov::get_opset8());
-        ops.insert<TemplateExtension::RnntUpdate>();
+        const char * p_add_to_opset = std::getenv("add_RnntUpdate_opset8");
+        if (!p_add_to_opset)
+            p_add_to_opset = "0";
+        if (atoi(p_add_to_opset) > 0) {
+            auto &ops = const_cast<ov::OpSet&>(ov::get_opset8());
+            ops.insert<TemplateExtension::RnntUpdate>();
+        }
     }
 };
 
@@ -69,16 +76,102 @@ bool Identity::has_evaluate() const {
 }
 //! [op:evaluate]
 
+/*
+
+self.rnnt_update =  opset.ops._get_node_factory_opset8().create("RnntUpdate",
+                        [
+                            current_iter,
+                            features,
+                            logits,
+                            Ho1,
+                            Co1,
+                            Ho2,
+                            Co2
+                        ],
+                        attributes)
+
+self.next_condition = self.rnnt_update.output(0)
+self.next_f = self.rnnt_update.output(1)
+self.next_last_symbols = self.rnnt_update.output(2)
+self.next_Hi1 = self.rnnt_update.output(3)
+self.next_Ci1 = self.rnnt_update.output(4)
+self.next_Hi2 = self.rnnt_update.output(5)
+self.next_Ci2 = self.rnnt_update.output(6)
+self.num_symbols_generated = self.rnnt_update.output(7)
+self.state_time_idx = self.rnnt_update.output(8)
+self.all_predictions = self.rnnt_update.output(9)
+self.all_length = self.rnnt_update.output(10)
+*/
+RnntUpdate::RnntUpdate(const ov::OutputVector& arguments, bool eager_mode) : Op(arguments), eager_mode(eager_mode) {
+    constructor_validate_and_infer_types();
+}
 
 void RnntUpdate::validate_and_infer_types() {
+    if (eager_mode)
+        return;
+
+    // features: N,T,1024
+    ov::Dimension N = get_input_partial_shape(1)[0];
+    ov::Dimension C = get_input_partial_shape(1)[2];
+
+    // current_iter
+    enum InputNames {
+        current_iter = 0,
+        features,
+        logits,
+        Ho1,
+        Co1,
+        Ho2,
+        Co2
+    };
+
+    NGRAPH_CHECK(get_input_element_type(current_iter) == ov::element::Type_t::i32);
+    NGRAPH_CHECK(get_input_partial_shape(current_iter) == ov::PartialShape({1}));
+
+    NGRAPH_CHECK(get_input_element_type(features) == ov::element::Type_t::f32);
+    NGRAPH_CHECK(get_input_partial_shape(features)[2] == 1024);
+
+    NGRAPH_CHECK(get_input_element_type(logits) == ov::element::Type_t::f32);
+    NGRAPH_CHECK(get_input_partial_shape(logits) == ov::PartialShape({N, ov::Dimension(29)}));
+
+    NGRAPH_CHECK(get_input_element_type(Ho1) == ov::element::Type_t::f32);
+    NGRAPH_CHECK(get_input_partial_shape(Ho1) == ov::PartialShape({N, ov::Dimension(320)}));
+
+    NGRAPH_CHECK(get_input_element_type(Co1) == ov::element::Type_t::f32);
+    NGRAPH_CHECK(get_input_partial_shape(Co1) == ov::PartialShape({N, ov::Dimension(320)}));
+
+    NGRAPH_CHECK(get_input_element_type(Ho2) == ov::element::Type_t::f32);
+    NGRAPH_CHECK(get_input_partial_shape(Ho2) == ov::PartialShape({N, ov::Dimension(320)}));
+
+    NGRAPH_CHECK(get_input_element_type(Co2) == ov::element::Type_t::f32);
+    NGRAPH_CHECK(get_input_partial_shape(Co2) == ov::PartialShape({N, ov::Dimension(320)}));
+
+    int i = 0;
+    set_output_type(i++, ov::element::Type_t::u8, {1});
+    set_output_type(i++, get_input_element_type(1), {N, C});
+    set_output_type(i++, ov::element::Type_t::i32, {N});
+
+    set_output_type(i++, get_input_element_type(3), get_input_partial_shape(3));
+    set_output_type(i++, get_input_element_type(4), get_input_partial_shape(4));
+    set_output_type(i++, get_input_element_type(5), get_input_partial_shape(5));
+    set_output_type(i++, get_input_element_type(6), get_input_partial_shape(6));
+
+    set_output_type(i++, ov::element::Type_t::i32, {N});
+    set_output_type(i++, ov::element::Type_t::u32, {N});
+
+    set_output_type(i++, ov::element::Type_t::u8, {N, 1024});
+    set_output_type(i++, ov::element::Type_t::i32, {N});    
 }
 
 std::shared_ptr<ov::Node> RnntUpdate::clone_with_new_inputs(const ov::OutputVector& new_args) const {
-    return std::make_shared<RnntUpdate>();
+    auto ret = std::make_shared<RnntUpdate>(new_args, eager_mode);
+    ret->bf16 = bf16;
+    return ret;
 }
 
 bool RnntUpdate::visit_attributes(ov::AttributeVisitor& visitor) {
     visitor.on_attribute("bf16", bf16);
+    visitor.on_attribute("eager_mode", eager_mode);
     return true;
 }
 
@@ -109,37 +202,55 @@ bool RnntUpdate::evaluate(ov::TensorVector& outputs, const ov::TensorVector& inp
     return evaluate_T<float, float>(outputs, inputs);
 }
 
-
+// https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html
+bool all_ge_avx512f(BTensor<uint32_t> v, uint32_t t) {
+    auto thr = _mm512_set1_epi32(t);
+    int N = v.shape[0];
+    int i;
+    auto * p = &v.at(0);
+    for(i = 0; i+16 < N; i += 16) {
+        auto a = _mm512_loadu_si512(p + i);
+        auto k = _mm512_cmp_epi32_mask(a, thr, _MM_CMPINT_LT);
+        if (k)
+            return false;
+    }
+    // last compare only contains (N-i) valid mask bits (potentially read overflow)
+    auto a = _mm512_loadu_si512(p + i);
+    auto k = _mm512_cmp_epi32_mask(a, thr, _MM_CMPINT_LT);
+    if (k & ((1<<(N - i)) - 1))
+        return false;
+    return true;
+}
 
 template<typename T, typename V>
 bool RnntUpdate::evaluate_T(ov::TensorVector& outputs, const ov::TensorVector& inputs) const {
-    BTensor<V> logits(inputs[0]);
-    BTensor<T> o_hs1(inputs[1]);
-    BTensor<T> o_cs1(inputs[2]);
-    BTensor<T> o_hs2(inputs[3]);
-    BTensor<T> o_cs2(inputs[4]);
-    BTensor<T> all_f(inputs[5]);    // N,T,1024
+    int idx = 0;
+    BTensor<int32_t> current_iter(inputs[idx++]);   // [1]
+    BTensor<T> all_f(inputs[idx++]);                // N,T,1024
+    BTensor<V> logits(inputs[idx++]);
+    BTensor<T> o_hs1(inputs[idx++]);
+    BTensor<T> o_cs1(inputs[idx++]);
+    BTensor<T> o_hs2(inputs[idx++]);
+    BTensor<T> o_cs2(inputs[idx++]);
 
     // memory has been allocated and data is there, just need to update according 
-    BTensor<int32_t> kargmax(outputs[0]);             // argmax(logits axis=1)
-    BTensor<int32_t> last_symbol(outputs[1]);   // 
-    BTensor<T> hs1(outputs[2]);
-    BTensor<T> cs1(outputs[3]);
-    BTensor<T> hs2(outputs[4]);
-    BTensor<T> cs2(outputs[5]);
-    BTensor<int32_t> num_symbols_generated(outputs[6]);
-    BTensor<T> f(outputs[7]);           // N,1024
-    BTensor<uint32_t> time_idxs(outputs[8]);
-    BTensor<uint8_t> all_predictions(outputs[9]);
-    BTensor<int32_t> all_length(outputs[10]);
-    
-    //argmax_2D_axis1(logits, kargmax);
+    idx = 0; 
+    BTensor<uint8_t> next_cond(outputs[idx++]);   // [1]
+    BTensor<T>       f(outputs[idx++]);           // N,1024
+    BTensor<int32_t> last_symbol(outputs[idx++]); // 
+    BTensor<T> hs1(outputs[idx++]);
+    BTensor<T> cs1(outputs[idx++]);
+    BTensor<T> hs2(outputs[idx++]);
+    BTensor<T> cs2(outputs[idx++]);
+    BTensor<int32_t> num_symbols_generated(outputs[idx++]);
+    BTensor<uint32_t> time_idxs(outputs[idx++]);
+    BTensor<uint8_t> all_predictions(outputs[idx++]);
+    BTensor<int32_t> all_length(outputs[idx++]);
 
-    int N = kargmax.shape[0];
+    int N = logits.shape[0];
     int C = logits.shape[1];
 
 #define BLANK 28
-
 
     int nthreads = tbb::this_task_arena::max_concurrency();
     tbb::parallel_for(0, nthreads, [&](int th_id) {
@@ -163,11 +274,30 @@ bool RnntUpdate::evaluate_T(ov::TensorVector& outputs, const ov::TensorVector& i
         //ss << "========= th_id " << th_id << "/" << nthreads << "        " << i_start << "+" << n;
         //std::cout << ss.str() << std::endl;
 
+        if (current_iter.at(0) == 0) {
+            // initialize states
+            for(int i = i_start; i < i_end; i++) {
+                memset(&hs1.at(i, 0), 0, hs1.shape[1]*sizeof(T));
+                memset(&cs1.at(i, 0), 0, cs1.shape[1]*sizeof(T));
+                memset(&hs2.at(i, 0), 0, hs2.shape[1]*sizeof(T));
+                memset(&cs2.at(i, 0), 0, cs2.shape[1]*sizeof(T));
+                
+                num_symbols_generated.at(i) = 0;
+                last_symbol.at(i) = BLANK;
+                time_idxs.at(i) = 0;
+
+                // f only update partially, initialize is needed
+                memcpy(&f.at(i), &all_f.at(i, 0), f.shape[1]*sizeof(T));
+
+                all_length.at(i) = 0;
+            }
+        }
+
         for(int i = i_start; i < i_end; i++) {
-            auto& k = kargmax.at(i);
+            //auto& k = kargmax.at(i);
 
             auto * p_logits = &logits.at(i);
-            k = C-1;
+            int k = C-1;
             auto max = p_logits[k];
             for (int c = 0; c < C-1; c++) {
                 if (max < p_logits[c]) {
@@ -205,14 +335,21 @@ bool RnntUpdate::evaluate_T(ov::TensorVector& outputs, const ov::TensorVector& i
 
     //std::cout << "RnntUpdate: logits:" << logits.shape << ", "<< logits.strides << std::endl;
     //std::cout << "RnntUpdate: k:" << k.shape << ", "<< k.strides << std::endl;
-    
+
+#if 0
     for(int i = 0; i < N; i++) {
         if (time_idxs.at(i) < all_f.shape[1])
             // continue execute next time
             return true;
     }
+#else
+    if (all_ge_avx512f(time_idxs, all_f.shape[1]))
+        next_cond.at(0) = 0;
+    else
+        next_cond.at(0) = 1;
+#endif
 
-    return false;
+    return true;
 }
 
 bool RnntUpdate::has_evaluate() const {
