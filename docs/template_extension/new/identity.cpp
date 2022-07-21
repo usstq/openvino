@@ -156,8 +156,8 @@ void RnntUpdate::validate_and_infer_types() {
     set_output_type(i++, get_input_element_type(5), get_input_partial_shape(5));
     set_output_type(i++, get_input_element_type(6), get_input_partial_shape(6));
 
-    set_output_type(i++, ov::element::Type_t::i32, {N});
-    set_output_type(i++, ov::element::Type_t::i32, {N});
+    set_output_type(i++, ov::element::Type_t::u8, {N});    // num_symbols_generated
+    set_output_type(i++, ov::element::Type_t::i32, {N});    // time_idxs
 
     set_output_type(i++, ov::element::Type_t::u8, {N, 1024});
     set_output_type(i++, ov::element::Type_t::i32, {N});
@@ -246,7 +246,7 @@ bool RnntUpdate::evaluate_T(ov::TensorVector& outputs, const ov::TensorVector& i
     BTensor<float> cs1(outputs[idx++]);
     BTensor<M> hs2(outputs[idx++]);
     BTensor<float> cs2(outputs[idx++]);
-    BTensor<int32_t> num_symbols_generated(outputs[idx++]);
+    BTensor<uint8_t> num_symbols_generated(outputs[idx++]);
     BTensor<int32_t> time_idxs(outputs[idx++]);
     BTensor<uint8_t> all_predictions(outputs[idx++]);
     BTensor<int32_t> all_length(outputs[idx++]);
@@ -302,7 +302,6 @@ bool RnntUpdate::evaluate_T(ov::TensorVector& outputs, const ov::TensorVector& i
 
         for(int i = i_start; i < i_end; i++) {
             //auto& k = kargmax.at(i);
-
             auto * p_logits = &logits.at(i);
             int k = C-1;
             auto max = p_logits[k];
@@ -343,7 +342,7 @@ bool RnntUpdate::evaluate_T(ov::TensorVector& outputs, const ov::TensorVector& i
     //std::cout << "RnntUpdate: logits:" << logits.shape << ", "<< logits.strides << std::endl;
     //std::cout << "RnntUpdate: k:" << k.shape << ", "<< k.strides << std::endl;
 
-#if 1
+#if 0
     next_cond.at(0) = 0;
     for(int i = 0; i < N; i++) {
         if (time_idxs.at(i) < T) {
