@@ -19,6 +19,7 @@
 #include "common/cpu_memcpy.h"
 #include "common/cpu_convert.h"
 #include "utils/cpu_utils.hpp"
+#include "utils/denormals.hpp"
 #include <cpu/x64/jit_generator.hpp>
 #include "memory_desc/dnnl_blocked_memory_desc.h"
 
@@ -350,10 +351,19 @@ void Input::cloneBlobIfRequired() {
                 + "_" + ptr;
     };
 
+
+    bool needFlushDenormalsToZero;
+    if (is_denormals_as_zero_set()) {
+        // CPU flag DAZ has been set, no need to flush denormals to zero
+        needFlushDenormalsToZero = false;
+    } else {
+        needFlushDenormalsToZero = hasSubnormals();
+    }
+
     if (weightCache) {
         MemoryPtr ptr = *weightCache->findOrCreate(blobKey(), cloneBlob);
         memoryPtr = std::const_pointer_cast<const Memory>(ptr);
-    } else if (isBlobAligned() && !hasSubnormals() && !isWA()) {
+    } else if (isBlobAligned() && !needFlushDenormalsToZero && !isWA()) {
         auto ptr = new Memory(getEngine());
         ptr->Create(memDesc, constOp->get_data_ptr());
         memoryPtr = MemoryCPtr(ptr);
