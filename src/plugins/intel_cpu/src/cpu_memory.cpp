@@ -135,7 +135,7 @@ DnnlMemoryDescPtr Memory::GetDescWithType<DnnlMemoryDesc, 0, 0>() const {
     return MemoryDescUtils::convertToDnnlMemoryDesc(pMemDesc);
 }
 
-void Memory::setDataHandle(void *data) {
+void Memory::setDataHandle(void *data, size_t size) {
     if (!mgrHandle->hasExtBuffer()) {
         mgrHandle = DnnlMemMngrHandle(
             std::make_shared<DnnlMemoryMngr>(std::unique_ptr<MemoryMngrWithReuse>(new MemoryMngrWithReuse())),
@@ -143,7 +143,7 @@ void Memory::setDataHandle(void *data) {
     }
 
     size_t maxMemSize = pMemDesc->hasDefinedMaxSize() ?  pMemDesc->getMaxMemSize() : 0;
-    mgrHandle->setExtBuff(data, maxMemSize);
+    mgrHandle->setExtBuff(data, size ? size : maxMemSize);
     prim->set_data_handle(mgrHandle->getRawPtr()); // for pads zeroing, to preserve dnnl::memory::set_data_handle behaviour
 }
 

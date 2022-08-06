@@ -200,6 +200,59 @@ static inline void changeEdgePtr(const EdgePtr &edge, void *newPtr) {
     edge->getMemoryPtr()->setDataHandle(newPtr);
 }
 
+// we collected some memory that can be replaced with input ptr:
+// they are :
+//    - readonly input memory to non-inplace consumer node
+//    - input memory to readonly inplace consumers and there
+//      readonly inplace descendants
+// so far there is no generic way to tell whether a inplace consumer
+// would write to the memory or not, we just rely on priori knowledge
+// of the node type, for example, so far we can only say reshape is
+// readonly inplace.
+static bool collect_readonly_edges(const NodePtr node,
+                                    int port,
+                                    std::vector<EdgePtr> & all_edges) {
+    for (auto& e : node->getChildEdgesAtPort(port)) {
+        auto child = e->getChild();
+
+        // traveling along consecutive readonly inplace chain
+        NodeDesc * child_spd = child->getSelectedPrimitiveDescriptor();
+        if (!child_spd)
+            IE_THROW() << "Node " << child->getName() << " has no Selected Primitive Descriptor";
+
+        // some inplace consumer(child) does not qualified
+        if (child->isConstant())
+            return false;
+
+        if (child->getType() == Type::Concatenation) {
+            auto concat = dynamic_cast<node::Concat*>(child.get());
+            if (concat && concat->isOptimized())
+                return false;
+        }
+
+        if (child->getType() == Type::Split) {
+            return false;
+        }
+
+        if (child->isInPlace() && child->getType() != Type::Reshape) {
+            return false;
+        }
+
+        all_edges.push_back(e);
+
+        const NodeConfig & config = child_spd->getConfig();
+        for (int child_oport = 0; child_oport < config.outConfs.size(); child_oport ++) {
+            if (config.outConfs[child_oport].inPlace() == e->getOutputNum()) {
+                // all edge from this output port must be followed
+                if (!collect_readonly_edges(child, child_oport, all_edges))
+                    return false;
+            }
+        }
+    }
+
+    return true;
+}
+
 void InferRequestBase::changeDefaultPtr() {
     for (auto& it : externalPtr) {
         const auto& inputNodesMap = graph->GetInputNodesMap();
@@ -208,65 +261,15 @@ void InferRequestBase::changeDefaultPtr() {
             NodePtr inputNodePtr = input->second;
             if (inputNodePtr->getChildEdgeAt(0)->getMemory().GetData() == it.second)
                 continue;
-            auto& childEdges = inputNodePtr->getChildEdges();
-            // Input cannot be in-place with other primitives
-            bool canBeInPlace = true;
-            for (auto& childEdge : childEdges) {
-                auto ce = childEdge.lock();
-                if (!ce)
-                    IE_THROW() << "Node " << inputNodePtr->getName() << " contains empty child edge";
 
-                auto& child = ce->getChild();
-
-                if (child->isConstant()) {
-                    canBeInPlace = false;
-                    break;
-                }
-
-                if (child->getType() == Type::Concatenation) {
-                    auto concat = dynamic_cast<node::Concat*>(child.get());
-                    if (concat && concat->isOptimized()) {
-                        canBeInPlace = false;
-                        break;
-                    }
-                }
-
-                // Cannot be in-place before split because split is using different ptrs without offsets
-                if (child->getType() == Type::Split) {
-                    canBeInPlace = false;
-                    break;
-                }
-
-                if (child->isInPlace()) {
-                    canBeInPlace = false;
-                    break;
-                }
-
-                auto& edges = child->getChildEdges();
-                for (auto& edge : edges) {
-                    auto e = edge.lock();
-                    if (!e)
-                        IE_THROW() << "Node " << child->getName() << " contains empty child edge";
-
-                    if (e->getMemory().GetData() == ce->getMemory().GetData()) {
-                        canBeInPlace = false;
-                        break;
-                    }
-                }
-
-                if (!canBeInPlace)
-                    break;
-            }
-            if (canBeInPlace) {
-                for (auto& edge : childEdges) {
-                    auto e = edge.lock();
-                    if (!e)
-                        IE_THROW() << "Node " << inputNodePtr->getName() << " contains empty child edge";
-
-                    changeEdgePtr(e, it.second);
+            std::vector<EdgePtr> all_edges;
+            void * new_data = it.second;
+            auto new_size = _inputs[it.first]->byteSize();
+            if (collect_readonly_edges(inputNodePtr, 0, all_edges)) {
+                for (int i = 0; i < all_edges.size(); i++) {
+                    all_edges[i]->getMemoryPtr()->setDataHandle(new_data, new_size);
                 }
             }
-
             continue;
         }
 

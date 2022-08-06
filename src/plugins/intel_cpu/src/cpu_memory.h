@@ -179,7 +179,7 @@ public:
     /**
      * @brief Resets the memory manager to a new one created with the provided raw memory
      */
-    void setDataHandle(void* data);
+    void setDataHandle(void* data, size_t size = 0);
 
     const MemoryDesc& getDesc() const {
         return *pMemDesc;
