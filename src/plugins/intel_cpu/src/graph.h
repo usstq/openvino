@@ -23,6 +23,7 @@ namespace intel_cpu {
 class InferRequestBase;
 class InferRequest;
 
+
 class Graph {
 public:
     typedef std::shared_ptr<Graph> Ptr;
@@ -196,6 +197,12 @@ public:
         return graphHasDynamicInput;
     }
 
+    std::string repr(void);
+
+    // For dumping purposes. -1 - no counting, all other positive
+    // values mean increment it within each Infer() call
+    int infer_count = 0;
+
 protected:
     void VisitNode(NodePtr node, std::vector<NodePtr>& sortedNodes);
 
@@ -211,10 +218,6 @@ protected:
     }
     Status status { NotReady };
     Config config;
-
-    // For dumping purposes. -1 - no counting, all other positive
-    // values mean increment it within each Infer() call
-    int infer_count = -1;
 
     bool reuse_io_tensors = true;
 

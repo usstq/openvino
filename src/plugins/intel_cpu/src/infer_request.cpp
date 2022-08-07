@@ -26,6 +26,8 @@
 #include <transformations/utils/utils.hpp>
 #include <ie_ngraph_utils.hpp>
 
+#include "openvino/runtime/profiler.hpp"
+
 namespace ov {
 namespace intel_cpu {
 
@@ -137,6 +139,7 @@ void InferRequestBase::PullStates() {
 }
 
 void InferRequestBase::redefineMemoryForInputNodes() {
+    auto _prof = ov::Profile("redefineMemoryForInputNodes");
     const auto cpuInputNodes = graph->GetInputNodesMap();
 
     for (const auto &blob : _inputs) {
@@ -151,6 +154,8 @@ void InferRequestBase::redefineMemoryForInputNodes() {
 
 void InferRequestBase::InferImpl() {
     using namespace openvino::itt;
+    auto _prof = ov::Profile("InferImpl");
+
     OV_ITT_SCOPED_TASK(itt::domains::intel_cpu, profilingTask);
     auto graphLock = execNetwork->GetGraph();
     graph = &(graphLock._graph);
@@ -254,6 +259,7 @@ static bool collect_readonly_edges(const NodePtr node,
 }
 
 void InferRequestBase::changeDefaultPtr() {
+    auto _prof = ov::Profile("changeDefaultPtr");
     for (auto& it : externalPtr) {
         const auto& inputNodesMap = graph->GetInputNodesMap();
         auto input = inputNodesMap.find(it.first);
@@ -862,6 +868,7 @@ InferenceEngine::Blob::Ptr InferRequest::GetBlob(const std::string& name) {
 }
 
 void InferRequest::PushInputData() {
+    auto _prof = ov::Profile("InferRequest::PushInputData");
     for (auto input : _inputs) {
         auto inputName = input.first;
         if (!modelInputsMap[inputName]) {

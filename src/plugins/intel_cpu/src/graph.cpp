@@ -50,6 +50,8 @@
 #include <low_precision/low_precision.hpp>
 #include "memory_desc/dnnl_blocked_memory_desc.h"
 
+#include "openvino/runtime/profiler.hpp"
+
 using namespace dnnl;
 using namespace InferenceEngine;
 using namespace InferenceEngine::details;
@@ -835,6 +837,7 @@ void Graph::CreatePrimitives() {
 }
 
 void Graph::PushInputData(const std::string& name, const InferenceEngine::Blob::Ptr &in) {
+    auto _prof = ov::Profile("Graph::PushInputData");
     if (!IsReady()) IE_THROW()<< "Wrong state. Topology not ready.";
 
     auto input = inputNodesMap.find(name);
@@ -883,6 +886,7 @@ void Graph::PushInputData(const std::string& name, const InferenceEngine::Blob::
 }
 
 void Graph::PullOutputData(BlobMap &out) {
+    auto _prof = ov::Profile("Graph::PullOutputData");
     if (!IsReady())
         IE_THROW() << "Wrong state. Topology not ready.";
 
@@ -996,16 +1000,68 @@ inline void Graph::ExecuteNode(const NodePtr& node, const dnnl::stream& stream) 
     DEBUG_LOG(*node);
 }
 
+class ProfilerNode : public ov::Profiler {
+    std::string name;
+    std::string type;
+    std::string exec_type;
+
+public:
+    ProfilerNode(const NodePtr & node) {
+        name = node->getName();
+        type = node->getTypeStr();
+        exec_type = node->getPrimitiveDescriptorType();
+    }
+    ProfileData get_info() override {
+        ProfileData prof;
+        prof.name = type;
+        prof.cat = "cpu::Node";
+        prof.args["node_name"] = name;
+        prof.args["exec_type"] = exec_type;
+        return prof;
+    }
+};
+
+class ProfilerGraph : public ov::Profiler {
+    Graph * g;
+
+public:
+    ProfilerGraph(Graph * g) : g(g) {}
+    ProfileData get_info() override {
+        ProfileData prof;
+        std::stringstream ss_key;
+        ss_key << "file:" << "graph_" << reinterpret_cast<void*>(g) << "_#" << g->infer_count << ".txt";
+        prof.name = "Graph::Infer_#" + std::to_string(g->infer_count);
+        prof.cat = "cpu::graph";
+        prof.args[ss_key.str()] = g->repr();
+        return prof;
+    }
+};
+
+std::string Graph::repr(void) {
+    std::stringstream ss_value;
+#ifdef CPU_DEBUG_CAPS
+    for (const auto& node : constantGraphNodes) {
+        ss_value << *node << std::endl;
+    }
+    for (const auto& node : executableGraphNodes) {
+        ss_value << *node << std::endl;
+    }
+#endif
+    return ss_value.str();
+}
+
 void Graph::Infer(InferRequestBase* request) {
     if (!IsReady()) {
         IE_THROW() << "Wrong state. Topology is not ready.";
     }
+    auto _prof = ov::Profile<ProfilerGraph>(this);
 
     dnnl::stream stream(eng);
 
     for (const auto& node : executableGraphNodes) {
         VERBOSE(node, config.verbose);
         PERF(node, config.collectPerfCounters);
+        auto _prof = ov::Profile<ProfilerNode>(node);
 
         if (request)
             request->ThrowIfCanceled();

@@ -13,6 +13,8 @@
 #include "pyopenvino/core/common.hpp"
 #include "pyopenvino/core/containers.hpp"
 
+#include "openvino/runtime/profiler.hpp"
+
 PYBIND11_MAKE_OPAQUE(Containers::TensorIndexMap);
 PYBIND11_MAKE_OPAQUE(Containers::TensorNameMap);
 
@@ -222,6 +224,7 @@ void regclass_InferRequest(py::module m) {
         "start_async",
         [](InferRequestWrapper& self, const ov::Tensor& inputs, py::object& userdata) {
             // Update inputs if there are any
+            self._profiler = ov::Profile("start_async");
             self._request.set_input_tensor(inputs);
             if (!userdata.is(py::none())) {
                 if (self.user_callback_defined) {
@@ -260,8 +263,11 @@ void regclass_InferRequest(py::module m) {
     cls.def(
         "start_async",
         [](InferRequestWrapper& self, const py::dict& inputs, py::object& userdata) {
-            // Update inputs if there are any
-            Common::set_request_tensors(self._request, inputs);
+            {
+                auto _prof = ov::Profile("set_request_tensors");
+                // Update inputs if there are any
+                Common::set_request_tensors(self._request, inputs);
+            }
             if (!userdata.is(py::none())) {
                 if (self.user_callback_defined) {
                     self.userdata = userdata;
@@ -271,6 +277,7 @@ void regclass_InferRequest(py::module m) {
             }
             py::gil_scoped_release release;
             self._start_time = Time::now();
+            self._profiler = ov::Profile("start_async");
             self._request.start_async();
         },
         py::arg("inputs"),
@@ -304,6 +311,7 @@ void regclass_InferRequest(py::module m) {
         [](InferRequestWrapper& self) {
             py::gil_scoped_release release;
             self._request.wait();
+            self._profiler.reset();
         },
         R"(
             Waits for the result to become available. 

@@ -69,6 +69,8 @@ public:
 
     Time::time_point _start_time;
     Time::time_point _end_time;
+
+    std::shared_ptr<void> _profiler;
 };
 
 void regclass_InferRequest(py::module m);

@@ -29,6 +29,7 @@
 #include "pyopenvino/core/infer_request.hpp"
 #include "pyopenvino/core/offline_transformations.hpp"
 #include "pyopenvino/core/profiling_info.hpp"
+#include "pyopenvino/core/profiler.hpp"
 #include "pyopenvino/core/properties/properties.hpp"
 #include "pyopenvino/core/tensor.hpp"
 #include "pyopenvino/core/variable_state.hpp"
@@ -202,6 +203,8 @@ PYBIND11_MODULE(pyopenvino, m) {
     regclass_Version(m);
     regclass_AsyncInferQueue(m);
     regclass_ProfilingInfo(m);
+    regclass_Profiler(m);
+    
     regclass_Extension(m);
 
     // Properties and hints
