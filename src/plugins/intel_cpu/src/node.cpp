@@ -1654,5 +1654,251 @@ std::vector<NodePtr>::iterator Node::tryMapFusedOpsToOscales(std::vector<NodePtr
     return postop;
 }
 
+// this function is designed to not use legacy post-ops at all and instead
+// try to generate the best performance output-scales & post-ops (avoid using
+// binary postOps as much as we can but also use it if we have to).
+// for old platforms, we recommned to keep using legacy PostOps for best performance.
+void Node::setUpAttrs(dnnl::primitive_attr& attr,
+                      bool isINT8,
+                      dnnl::memory::data_type sumAsDataType,  // second input of sum was taken in-place from output memory as of this data type
+                      dnnl::memory::data_type outputDataType, // output data type
+                      const VectorDims&       outputDataDims, // output data dimensions/shapes
+                      const int               dimOC,          // outputDataDims[dimOC] is the number of output channels
+                      std::vector<MemoryPtr>& postOpsArgs) {
+    bool useLegacyPostOps = false;
+    fsg.name = getName() + "_fusedWith";
+    for (int i = 0; i < fusedWith.size(); ++i) {
+        auto& node = fusedWith[i];
+        // selectively peek node as FusedOP, others are of unknown type
+        if (auto* fakeQuantizeNode = dynamic_cast<FakeQuantize*>(node.get())) {
+            FusedOP clip(FusedOP::types::clip);
+            clip.a = fakeQuantizeNode->getCropLow();
+            clip.b = fakeQuantizeNode->getCropHigh();
+
+            FusedOP inputLinear(FusedOP::types::linear);
+            inputLinear.a = fakeQuantizeNode->getInputScale();
+            inputLinear.b = fakeQuantizeNode->getInputShift();
+
+            FusedOP round(FusedOP::types::round);
+
+            FusedOP outputLinear(FusedOP::types::linear);
+            outputLinear.a = fakeQuantizeNode->getOutputScale();
+            outputLinear.b = fakeQuantizeNode->getOutputShift();
+
+            fsg.append(clip);
+            fsg.append(inputLinear);
+            fsg.append(round);
+            fsg.append(outputLinear);
+            continue;
+        }
+
+        if (auto* eltwiseNode = dynamic_cast<Eltwise*>(node.get())) {
+            int const_port = 1 - eltwiseNode->getFusingPort();
+
+            // only OC dimension can be non-one (per-OC)
+            // compare with dimsPerOC
+            auto getBroadcastType = [&](const VectorDims& dims) -> int {
+                // per-tensor
+                if (ov::shape_size(dims) == 1)
+                    return 0;
+                // per-OC ?
+                //   dimsPerOC:   1 1 6 1
+                //        dims:     1 6 1  --- per-OC
+                //              1 1 1 6 1  --- per-OC
+                //              2 1 1 1 4  --- Wrong!
+                auto dimOC2 = static_cast<ssize_t>(dims.size()) - (static_cast<ssize_t>(outputDataDims.size()) - dimOC);
+                if (dimOC2 < 0)
+                    return -1;
+                if (dims[dimOC2] != outputDataDims[dimOC])
+                    return -1;
+                for (int i = 0; i < dims.size(); i++) {
+                    if (i != dimOC2 && dims[i] != 1)
+                        return -1;
+                }
+                return 1;  // per-OC
+            };
+
+            if (eltwiseNode->getAlgorithm() == Algorithm::EltwiseMultiply && (const_port == 0 || const_port == 1)) {
+                auto brdtype = getBroadcastType(eltwiseNode->getInputShapeAtPort(const_port).getStaticDims());
+                if (brdtype == 0 || brdtype == 1) {
+                    FusedOP eltlinear(FusedOP::types::linear);
+                    if (brdtype == 0)
+                        eltlinear.a = eltwiseNode->getScales()[0];
+                    else
+                        eltlinear.a = eltwiseNode->getScales();
+                    eltlinear.b = 0.0f;
+                    fsg.append(eltlinear);
+                    continue;
+                }
+            }
+
+            if (eltwiseNode->getAlgorithm() == Algorithm::EltwisePowerStatic && eltwiseNode->getAlpha() == 1.0f) {
+                FusedOP eltlinear(FusedOP::types::linear);
+                eltlinear.a = eltwiseNode->getBeta();
+                eltlinear.b = eltwiseNode->getGamma();
+                fsg.append(eltlinear);
+                continue;
+            }
+
+            if (eltwiseNode->getOneDnnAlgorithm() == dnnl::algorithm::eltwise_relu) {
+                FusedOP eltlinear(FusedOP::types::relu);
+                eltlinear.a = eltwiseNode->getAlpha();
+                fsg.append(eltlinear);
+                continue;
+            }
+
+            // the rest node is unknown to FusedSubGraph
+            FusedOP unknown(FusedOP::types::unknown);
+            unknown.node = node;
+            unknown.fusedIndex = i;
+            fsg.append(unknown);
+        }
+    }
+
+    fsg.optimize(outputDataType);
+
+    // map fsg as postOps
+    // first multiply in linear can be mapped as output scale in INT8 inference
+    // if output u8/s8, the last clip & round maybe dropped since oneDNN will do that by default
+    dnnl::post_ops ops;
+
+    VectorDims dimsPerTensor(outputDataDims.size(), 1);
+    VectorDims dimsPerOC(outputDataDims.size(), 1);
+    dimsPerOC[dimOC] = outputDataDims[dimOC];
+
+    auto appendBinary = [&](const dnnl::algorithm alg, const std::vector<float>& data) {
+        VectorDims* pdims = &dimsPerTensor;
+        if (data.size() > 1) {
+            assert(data.size() == outputDataDims[dimOC]);
+            pdims = &dimsPerOC;
+        }
+        DnnlBlockedMemoryDesc memoryDesc(Precision::FP32, Shape(*pdims));
+        ops.append_binary(alg, memoryDesc.getDnnlDesc());
+        postOpsArgs.emplace_back(new Memory(getEngine()));
+        postOpsArgs.back()->Create(memoryDesc, data.data());
+    };
+
+    auto map_add = [&](const brdvector& a) {
+        if (a.size() == 0 || a == 0.0f)
+            return;
+        if (a.size() == 1) {
+            ops.append_eltwise(1.0, dnnl::algorithm::eltwise_linear, 1.0f, a[0]);
+            return;
+        }
+        appendBinary(dnnl::algorithm::binary_add, a.values);
+    };
+    auto map_mul = [&](const brdvector& a) {
+        if (a.size() == 0 || a == 1.0f)
+            return;
+        if (a.size() == 1)
+            ops.append_eltwise(1.0f, dnnl::algorithm::eltwise_linear, a[0], 0);
+        else
+            appendBinary(dnnl::algorithm::binary_mul, a.values);
+    };
+    auto map_min = [&](const brdvector& a) {
+        if (a.size() == 0)
+            return;
+        if (a.size() == 1)
+            ops.append_eltwise(1.0f, dnnl::algorithm::eltwise_clip, -std::numeric_limits<float>::max(), a[0]);
+        else
+            appendBinary(dnnl::algorithm::binary_min, a.values);
+    };
+    auto map_max = [&](const brdvector& a) {
+        if (a.size() == 0)
+            return;
+        if (a.size() == 1)
+            ops.append_eltwise(1.0f, dnnl::algorithm::eltwise_clip, a[0], std::numeric_limits<float>::max());
+        else
+            appendBinary(dnnl::algorithm::binary_max, a.values);
+    };
+
+    auto it = fsg.ops.begin();
+    if (isINT8 && it != fsg.ops.end() && it->is_linear()) {
+        // multiply part will be mapped as output scale
+        // and the rest part will be mapped as eltwise/binary
+        attr.set_output_scales(it->a.size() == 1 ? 0 : 1 << 1, it->a.values);
+        map_add(it->b);
+    }
+
+    for (; it != fsg.ops.end(); ++it) {
+        if (it->is_relu()) {
+            ops.append_eltwise(1.0, dnnl::algorithm::eltwise_relu, it->a[0], 0);
+        } else if (it->is_round()) {
+            ops.append_eltwise(1.0f, dnnl::algorithm::eltwise_round_half_to_even, 0, 0);
+        } else if (it->is_clip()) {
+            if (it->a.size() == 1 && it->b.size() == 1) {
+                ops.append_eltwise(1.0f, dnnl::algorithm::eltwise_clip, it->a[0], it->b[0]);
+            } else {
+                map_max(it->a);
+                map_min(it->b);
+            }
+        } else if (it->is_linear()) {
+            if (it->a.size() == 1 && it->b.size() == 1) {
+                ops.append_eltwise(1.0f, dnnl::algorithm::eltwise_linear, it->a[0], it->b[0]);
+            } else {
+                map_mul(it->a);
+                map_add(it->b);
+            }
+        } else {
+            assert(it->is_unknown());
+
+            // map
+            if (auto* eltwiseNode = dynamic_cast<Eltwise*>(it->node.get())) {
+                if (eltwiseNode->isSpecialConvolutionAddFusing()) {
+                    ops.append_sum(1.0, sumAsDataType);
+                } else {
+                    if (useLegacyPostOps || eltwiseNode->getOneDnnAlgorithm() != dnnl::algorithm::undef) {
+                        eltwiseNode->appendPostOps(ops, dimsPerOC, postOpsArgs);
+                    } else {
+                        eltwiseNode->appendBinPostOps(ops, dimsPerOC, postOpsArgs);
+                    }
+                }
+                continue;
+            }
+
+            auto* convolutionNode = dynamic_cast<Convolution*>(it->node.get());
+            if (convolutionNode) {
+                postOpsArgs.push_back(getParentEdgeAt(getOriginalInputsNumber() + 0)->getMemoryPtr());
+                postOpsArgs.push_back(getParentEdgeAt(getOriginalInputsNumber() + 1)->getMemoryPtr());
+
+                const auto& inActivationDims = convolutionNode->inputShapes[0].getStaticDims();
+                int dw_conv_ih = inActivationDims[convolutionNode->inputShapes[0].getRank() - 2];
+                int dw_conv_iw = inActivationDims[convolutionNode->inputShapes[0].getRank() - 1];
+
+                const auto& dwWeightsDims = convolutionNode->inputShapes[1].getStaticDims();
+                int ker_w = dwWeightsDims[dwWeightsDims.size() - 1];
+                int ker_h = dwWeightsDims[dwWeightsDims.size() - 2];
+                int str_h = convolutionNode->getStride()[1];
+                int str_w = convolutionNode->getStride()[0];
+                memory::data_type dw_conv_in_dt = memory::data_type::f32;
+                if (isINT8) {
+                    if (it->fusedIndex == 0) {
+                        dw_conv_in_dt = DnnlExtensionUtils::IEPrecisionToDataType(getOriginalOutputPrecisionAtPort(0));
+                    } else {
+                        dw_conv_in_dt = DnnlExtensionUtils::IEPrecisionToDataType(
+                            fusedWith[it->fusedIndex - 1]->getOriginalOutputPrecisionAtPort(0));
+                    }
+                }
+
+                // todo: rewrite onto append_dw_k3s2p1
+                ops.append_dw_conv(dw_conv_ih,
+                                   dw_conv_iw,
+                                   ker_h,
+                                   ker_w,
+                                   str_h,
+                                   str_w,
+                                   dnnl::memory::convert_to_c(dw_conv_in_dt));
+                continue;
+            }
+
+            if (it->node->getType() == Type::Split || it->node->getType() == Type::Concatenation)
+                continue;
+
+            IE_THROW() << "Fusing of " << NameFromType(it->node->getType()) << " operation to "
+                       << NameFromType(this->getType()) << " node is not implemented";
+        }
+    }
+}
+
 }   // namespace intel_cpu
 }   // namespace ov

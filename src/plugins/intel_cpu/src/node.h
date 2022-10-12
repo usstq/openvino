@@ -30,6 +30,7 @@
 #include "cpu_shape.h"
 #include "nodes/node_config.h"
 #include "cache/multi_cache.h"
+#include "fused_subgraph.h"
 
 #include <utils/shape_inference/static_shape.hpp>
 #include <utils/shape_inference/shape_inference.hpp>
@@ -758,6 +759,14 @@ protected:
                                                            int dimOC);
     std::shared_ptr<std::mutex> sharedMutex = nullptr;
 
+    void setUpAttrs(dnnl::primitive_attr& attr,
+                    bool isINT8,
+                    dnnl::memory::data_type sumAsDataType,
+                    dnnl::memory::data_type outputDataType,
+                    const VectorDims& outputDims,  // outputDims is output dimensions/shapes
+                    int dimOC,                     // outputDims[dimOC] is the number of output channels
+                    std::vector<MemoryPtr>& postOpsArgs);
+
 private:
     std::vector<EdgeWeakPtr> parentEdges;
     std::vector<EdgeWeakPtr> childEdges;
@@ -803,6 +812,8 @@ private:
 
     std::vector<VectorDims> shapeInferGeneric(const std::vector<StaticShape>& input_shapes,
                                               uint32_t input_value_port_mask) const;
+
+    FusedSubGraph fsg;
 
 #ifdef CPU_DEBUG_CAPS
     friend class Verbose;
