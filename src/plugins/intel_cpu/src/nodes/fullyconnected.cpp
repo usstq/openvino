@@ -311,6 +311,11 @@ void FullyConnected::prepareParams() {
 
     appendPostOpArgs(*attr, primArgs, postOpsArgs);
 
+    auto pd = (*prim).get_primitive_desc();
+    scratchpad_md = DnnlExtensionUtils::query_md(pd, dnnl::query::scratchpad_md);
+    scratchpadMem = getRuntimeScratchPad()->getScratchPadMem(scratchpad_md);
+    primArgs[DNNL_ARG_SCRATCHPAD] = scratchpadMem->GetPrimitive();
+
     auto reshapeMemory = [this](int argType) {
         auto param = primArgs.find(argType);
         if (param != primArgs.end()) {

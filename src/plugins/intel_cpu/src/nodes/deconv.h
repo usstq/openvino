@@ -119,6 +119,8 @@ private:
     std::string errorPrefix;
 
     InferenceEngine::Blob::Ptr createWeiBlobAsIO(InferenceEngine::SizeVector dims);
+
+    DnnlMemoryDescPtr scratchpad_md;
 };
 
 }   // namespace node

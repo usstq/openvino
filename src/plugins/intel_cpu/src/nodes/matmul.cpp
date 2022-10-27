@@ -572,6 +572,11 @@ void MatMul::prepareParams() {
 
     prim = result.first;
 
+    auto pd = (*prim).get_primitive_desc();
+    scratchpad_md = DnnlExtensionUtils::query_md(pd, dnnl::query::scratchpad_md);
+    scratchpadMem = getRuntimeScratchPad()->getScratchPadMem(scratchpad_md);
+
+    primArgs[DNNL_ARG_SCRATCHPAD] = scratchpadMem->GetPrimitive();
     primArgs[DNNL_ARG_SRC_0] = src0MemPtr->GetPrimitive();
     primArgs[DNNL_ARG_WEIGHTS_0] = src1MemPtr->GetPrimitive();
     primArgs[DNNL_ARG_DST] = dstMemPtr->GetPrimitive();
@@ -582,7 +587,7 @@ void MatMul::prepareParams() {
 }
 
 void MatMul::executeDynamicImpl(dnnl::stream strm) {
-    Node::execute(strm);
+    execute(strm);
 }
 
 const std::vector<impl_desc_type>& MatMul::getPrimitivesPriority() {
@@ -620,6 +625,12 @@ const std::vector<impl_desc_type>& MatMul::getPrimitivesPriority() {
             implPriorities.push_back(impl);
     }
     return implPriorities;
+}
+
+void MatMul::execute(dnnl::stream strm) {
+    if (prim) {
+        (*prim).execute(strm, primArgs);
+    }
 }
 
 }   // namespace node

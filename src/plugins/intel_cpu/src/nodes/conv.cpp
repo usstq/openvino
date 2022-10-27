@@ -1304,6 +1304,7 @@ void Convolution::prepareParams() {
         else
             addZeroPoints(attr);
         setPostOps(attr, outMemoryDesc->getShape().getStaticDims(), preferLegacyPostOps, true);
+        attr.set_scratchpad_mode(dnnl::scratchpad_mode::user);
 
         return std::make_shared<dnnl::primitive_attr>(std::move(attr));
     };
@@ -1448,6 +1449,11 @@ void Convolution::prepareParams() {
             appendZeroPointsArgs();
 
         Node::appendPostOpArgs(*pAttrLocal, primArgs, convPostOpsArgs[preferLegacyPostOps]);
+
+        auto pd = (*(execPtr->get_execPrim())).get_primitive_desc();
+        scratchpad_md = DnnlExtensionUtils::query_md(pd, dnnl::query::scratchpad_md);
+        scratchpadMem = getRuntimeScratchPad()->getScratchPadMem(scratchpad_md);
+        primArgs[DNNL_ARG_SCRATCHPAD] = scratchpadMem->GetPrimitive();
     } else {
         IE_THROW() << "Primitive descriptor was not found for node " << getName() << ".";
     }
@@ -1477,6 +1483,7 @@ void Convolution::execute(dnnl::stream strm) {
     if (!execPtr) {
         IE_THROW() << "Can't execute Convolution node with name: " << getName() << ", because executor is not compiled";
     }
+
     execPtr->exec(primArgs, strm);
 }
 

@@ -387,9 +387,13 @@ void Pooling::prepareParams() {
 
     prim = result.first;
 
+    auto pd = (*prim).get_primitive_desc();
+    scratchpad_md = DnnlExtensionUtils::query_md(pd, dnnl::query::scratchpad_md);
+    scratchpadMem = getRuntimeScratchPad()->getScratchPadMem(scratchpad_md);
+
     auto src = getParentEdgesAtPort(0)[0]->getMemoryPtr()->GetPrimitive();
     auto dst = getChildEdgesAtPort(0)[0]->getMemoryPtr()->GetPrimitive();
-    primArgs = {{DNNL_ARG_SRC, src}, {DNNL_ARG_DST, dst}};
+    primArgs = {{DNNL_ARG_SRC, src}, {DNNL_ARG_DST, dst}, {DNNL_ARG_SCRATCHPAD, scratchpadMem->GetPrimitive()}};
 
     Node::appendPostOpArgs(*attr, primArgs, postOpsArgs);
 }
@@ -633,6 +637,12 @@ void Pooling::setPostOps(dnnl::primitive_attr &attr) {
     }
 
     attr.set_post_ops(ops);
+}
+
+void Pooling::execute(dnnl::stream strm) {
+    if (prim) {
+        (*prim).execute(strm, primArgs);
+    }
 }
 
 }   // namespace node

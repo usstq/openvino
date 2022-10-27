@@ -199,9 +199,13 @@ void Lrn::prepareParams() {
     }
     prim = result.first;
 
+    auto pd = (*prim).get_primitive_desc();
+    scratchpad_md = DnnlExtensionUtils::query_md(pd, dnnl::query::scratchpad_md);
+    scratchpadMem = getRuntimeScratchPad()->getScratchPadMem(scratchpad_md);
+
     auto src = srcMemPtr->GetPrimitive();
     auto dst = dstMemPtr->GetPrimitive();
-    primArgs = { {DNNL_ARG_SRC, src}, {DNNL_ARG_DST, dst} };
+    primArgs = { {DNNL_ARG_SRC, src}, {DNNL_ARG_DST, dst}, {DNNL_ARG_SCRATCHPAD, scratchpadMem->GetPrimitive()} };
 }
 
 bool Lrn::created() const {
@@ -225,6 +229,12 @@ std::vector<VectorDims> Lrn::shapeInfer() const {
 
 void Lrn::executeDynamicImpl(dnnl::stream strm) {
     execute(strm);
+}
+
+void Lrn::execute(dnnl::stream strm) {
+    if (prim) {
+        (*prim).execute(strm, primArgs);
+    }
 }
 
 }   // namespace node
