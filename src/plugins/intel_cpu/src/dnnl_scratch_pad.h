@@ -19,10 +19,13 @@ class DnnlScratchPad {
 
 public:
     DnnlScratchPad(dnnl::engine eng) : eng(eng) {
-        mgrPtr = std::make_shared<DnnlMemoryMngr>(std::unique_ptr<MemoryMngrWithReuse>(new MemoryMngrWithReuse()));
+        auto * p = new MemoryMngrWithReuse();
+        mgrPtr = std::make_shared<DnnlMemoryMngr>(std::unique_ptr<MemoryMngrWithReuse>(p));
     }
 
     MemoryPtr getScratchPadMem(const DnnlMemoryDescPtr& md) {
+        if (md->getMaxMemSize() == 0)
+            return nullptr;
         auto mem = std::make_shared<Memory>(eng);
         mem->Create(md, mgrPtr);
         return mem;

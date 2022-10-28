@@ -939,8 +939,10 @@ void Deconvolution::prepareParams() {
 
         auto pd = (*(execPtr->get_execPrim())).get_primitive_desc();
         scratchpad_md = DnnlExtensionUtils::query_md(pd, dnnl::query::scratchpad_md);
-        scratchpadMem = getRuntimeScratchPad()->getScratchPadMem(scratchpad_md);
-        primArgs[DNNL_ARG_SCRATCHPAD] = scratchpadMem->GetPrimitive();
+        if (scratchpadMem = getRuntimeScratchPad()->getScratchPadMem(scratchpad_md))
+            primArgs[DNNL_ARG_SCRATCHPAD] = scratchpadMem->GetPrimitive();
+        else
+            primArgs.erase(DNNL_ARG_SCRATCHPAD);
     } else {
         IE_THROW() << "Primitive descriptor was not found for node " << getName() << ".";
     }

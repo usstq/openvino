@@ -576,7 +576,11 @@ void MatMul::prepareParams() {
     scratchpad_md = DnnlExtensionUtils::query_md(pd, dnnl::query::scratchpad_md);
     scratchpadMem = getRuntimeScratchPad()->getScratchPadMem(scratchpad_md);
 
-    primArgs[DNNL_ARG_SCRATCHPAD] = scratchpadMem->GetPrimitive();
+    if (scratchpadMem)
+        primArgs[DNNL_ARG_SCRATCHPAD] = scratchpadMem->GetPrimitive();
+    else
+        primArgs.erase(DNNL_ARG_SCRATCHPAD);
+
     primArgs[DNNL_ARG_SRC_0] = src0MemPtr->GetPrimitive();
     primArgs[DNNL_ARG_WEIGHTS_0] = src1MemPtr->GetPrimitive();
     primArgs[DNNL_ARG_DST] = dstMemPtr->GetPrimitive();

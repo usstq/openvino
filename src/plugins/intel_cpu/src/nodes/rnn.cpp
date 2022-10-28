@@ -902,9 +902,12 @@ void RNN::execute(dnnl::stream strm) {
         {DNNL_ARG_WEIGHTS_LAYER, wgh_data_mem->GetPrimitive()},
         {DNNL_ARG_WEIGHTS_ITER,  wgh_stat_mem->GetPrimitive()},
         {DNNL_ARG_BIAS,          wgh_bias_mem->GetPrimitive()},
-        {DNNL_ARG_DST_LAYER,     dst_data_mem->GetPrimitive()},
-        {DNNL_ARG_SCRATCHPAD,    scratchpadMem->GetPrimitive()}
+        {DNNL_ARG_DST_LAYER,     dst_data_mem->GetPrimitive()}
     };
+
+    if (scratchpadMem) {
+        args[DNNL_ARG_SCRATCHPAD] = scratchpadMem->GetPrimitive();
+    }
 
     int state_i_tags[] {DNNL_ARG_SRC_ITER, DNNL_ARG_SRC_ITER_C};
     int state_o_tags[] {DNNL_ARG_DST_ITER, DNNL_ARG_DST_ITER_C};
