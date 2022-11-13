@@ -211,6 +211,8 @@ void Graph::Replicate(const std::shared_ptr<const ov::Model> &subgraph, const Ex
         graphEdges.push_back(edge);
         graphNodes.push_back(outNode);
     }
+    if (config.enforceBF16)
+        EnforceBF16();
 }
 
 void Graph::Replicate(const CNNNetwork &network, const ExtensionManager::Ptr& extMgr) {
@@ -437,6 +439,12 @@ void Graph::InitDescriptors() {
             if (inputNode)
                 inputNode->withMeanImage();
         }
+
+        // propagate config into subgraph
+        for (auto &sub_graph : node->getSubGraphs()) {
+            sub_graph->setConfig(getConfig());
+        }
+
         OV_ITT_SCOPE_NEXT(FIRST_INFERENCE, taskChain, node->profiling.getSupportedDescriptors);
         node->getSupportedDescriptors();
 
