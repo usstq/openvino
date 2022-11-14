@@ -1436,8 +1436,8 @@ void Graph::EnforceBF16() {
                  * Precision conversion to BF16 does automatically, if convolution follows up after Constant Inputs
                  * and if activation is BF16 */
                 if (!(parent->getType() == Type::Input && parent->isConstant() &&
-                    // Concatenation node is exception because it doesn't change an accuracy for BF16 activation
-                      node->getType() != Type::Concatenation) &&
+                    // Concatenation & Gather node is exception because it doesn't change an accuracy for BF16 activation
+                      node->getType() != Type::Concatenation && node->getType() != Type::Gather) &&
                     // exclude Eltwise after Input since it supports conversion to BF16
                     !(parent->getType() == Type::Input && node->getType() == Type::Eltwise) &&
                     node->getOriginalInputPrecisionAtPort(i) == Precision::FP32)
