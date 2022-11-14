@@ -944,7 +944,12 @@ void RNN::prepareParams() {
 
     bool wFormatWasChanged = false;
     // WA To avoid different weights layer and iter formats in FP32 case.
-    if (one_of(inDataTypes[xIdx], memory::data_type::f32, memory::data_type::bf16) &&
+    if (cell_type == dnnl::algorithm::vanilla_lstm) {
+        if (wFormat != dnnl::memory::format_tag::any) {
+            wFormat = dnnl::memory::format_tag::any;
+            wFormatWasChanged = true;
+        }
+    } else if (one_of(inDataTypes[xIdx], memory::data_type::f32, memory::data_type::bf16) &&
         (SL != 1 || B < optimalBatchSize)) {
         if (wFormat != dnnl::memory::format_tag::ldigo) {
             wFormat = dnnl::memory::format_tag::ldigo;
