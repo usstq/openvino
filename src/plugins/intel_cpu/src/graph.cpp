@@ -1406,7 +1406,8 @@ void Graph::EnforceBF16() {
                     Type::RNNSeq,         // recurent nets
                     Type::MatMul,         // bert nets
                     Type::ROIPooling,     // object detection nets
-                    Type::Interpolate))    // super resolution nets
+                    Type::Interpolate,     // super resolution nets
+                    Type::TensorIterator))  // subgraph
                 continue;   // stop at significant nodes
 
             const auto res = skipNodes.insert(parent);
