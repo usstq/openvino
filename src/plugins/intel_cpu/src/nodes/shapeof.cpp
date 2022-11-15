@@ -58,8 +58,9 @@ void ShapeOf::initSupportedPrimitiveDescriptors() {
                              {{LayoutType::ncsp, Precision::I32}},
                              impl_desc_type::ref);
 
-        // Shapeof should be precision-agnostic, thus in BF16 mode, it also support FP32
-        if (precision == Precision::BF16)
+        // Shapeof should be precision-agnostic, thus it should report both
+        // precisions to avoid reorder as much as possible
+        if (precision != Precision::FP32)
             addSupportedPrimDesc({{df, Precision::FP32}},
                                 {{LayoutType::ncsp, Precision::I32}},
                                 impl_desc_type::ref);
