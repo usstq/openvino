@@ -461,6 +461,45 @@ void Input::initSupportedPdDefault() {
     addSupportedPrimDesc(inPortConfs,
                          outPortConfs,
                          impl_desc_type::unknown);
+
+    if (allowBF16) {
+        // when the Input node is in a subgraph, it should report noth BF16 and FP32
+        // and inside selectOptimalPrimitiveDescriptor() overload, it can check its children's
+        // prefered precision and to avoid reorder as much as possible, it should select
+        // the precision that causes least amount of `reorder` computations (in terms of
+        // cost of converting its output).
+        if (getType() == Type::Input) {
+            addSupportedPrimDesc({}, {{LayoutType::ncsp, Precision::BF16}}, impl_desc_type::unknown);
+        } else if (getType() == Type::Output) {
+            addSupportedPrimDesc({{LayoutType::ncsp, Precision::BF16}}, {}, impl_desc_type::unknown);
+        }
+    }
+}
+
+void Input::selectOptimalPrimitiveDescriptor() {
+    // ngraph precision is FP32 and BF16 is allowed
+    // check all children's SupportedPrimitiveDescriptors, prefer BF16 if there is more children can benefit from it.
+    if (allowBF16 && getType() == Type::Input && getOriginalOutputPrecisionAtPort(0) == Precision::FP32) {
+        int cnt_FP32 = 0;
+        int cnt_BF16 = 0;
+        for (auto edgePtr : getChildEdgesAtPort(0)) {
+            auto child = edgePtr->getChild();
+            auto child_port = edgePtr->getOutputNum();
+            for (auto & desc : child->getSupportedPrimitiveDescriptors()) {
+                auto inPrec = desc.getConfig().inConfs[child_port].getMemDesc()->getPrecision();
+                if (inPrec == Precision::FP32) cnt_FP32++;
+                if (inPrec == Precision::BF16) cnt_BF16++;
+            }
+        }
+        if (cnt_BF16 > 0 || cnt_FP32 > 0) {
+            auto selectedPrimitive = (cnt_BF16 > cnt_FP32) ? 1 : 0;
+            selectPrimitiveDescriptorByIndex(selectedPrimitive);
+            return;
+        }
+    }
+
+    // default logic
+    Node::selectOptimalPrimitiveDescriptor();
 }
 
 void Input::initSupportedPdFromMemDesc() {

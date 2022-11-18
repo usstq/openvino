@@ -268,6 +268,18 @@ private:
     DnnlScratchPadPtr rtScratchPad;
 
     void EnforceBF16();
+
+    // subgraph is special when EnforceBF16() on them.
+    //
+    // 1. the Input node of subgraph should expose the precision which most
+    //    benefits the computational layers inside the subgraph. So if Input
+    //    node has allowBF16 flag set, it will check its consumers/children nodes
+    //    and expose the precision fit their needs best.
+    //
+    // 2. no need to skip any nodes when trying to enfore bf16
+    //    since the input/output may be bf16.
+    //
+    bool isSubgraph = false;
 };
 
 }   // namespace intel_cpu
