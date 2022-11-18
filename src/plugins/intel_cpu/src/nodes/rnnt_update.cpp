@@ -60,7 +60,6 @@ void RnntUpdate::initSupportedPrimitiveDescriptors() {
         addSupportedPrimDesc(inputConfigurators, outputConfigurators, impl_desc_type::ref);
     };
 
-    auto allowBF16 = false;
     addConfig(allowBF16);
 }
 
