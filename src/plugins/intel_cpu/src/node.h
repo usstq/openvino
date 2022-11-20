@@ -589,6 +589,10 @@ public:
         return {};
     }
 
+    MultiCachePtr getRuntimeCache() const {
+        return rtParamsCache;
+    }
+
     bool allowBF16 = false;
 
 protected:
@@ -720,10 +724,6 @@ protected:
     // called after memory allocation/reallocation
     virtual void prepareParams() {
         IE_THROW(NotImplemented) << "[DS] prapareParams not implemented for node with type " << NameFromType(getType());
-    }
-
-    MultiCachePtr getRuntimeCache() const {
-        return rtParamsCache;
     }
 
     DnnlScratchPadPtr getRuntimeScratchPad() const {
