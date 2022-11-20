@@ -28,6 +28,10 @@ public:
 private:
     const std::shared_ptr<ngraph::Node> ngraphOp;
     const std::string additionalErrorMessage;
+
+    bool internalDynamismShapeInfer = true;
+    std::set<int> inputsSupportBF16;
+    std::set<int> outputsSupportBF16;
 };
 
 }   // namespace node

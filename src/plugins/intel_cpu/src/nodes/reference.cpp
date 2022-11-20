@@ -32,6 +32,23 @@ Reference::Reference(const std::shared_ptr<ngraph::Node>& op, const dnnl::engine
     if (ov::is_type<ngraph::op::v8::RandomUniform>(ngraphOp)) {
         constant = ConstantType::NoConst;
     }
+
+    // rt_info "inputsSupportBF16"/"outputsSupportBF16"
+    // indicates that the reference implementation support
+    // BF16 data type at runtime.
+    const auto & rtInfo = ngraphOp->get_rt_info();
+    auto it = rtInfo.find("inputsSupportBF16");
+    if (it != rtInfo.end()) {
+        inputsSupportBF16 = it->second.as<std::set<int>>();
+    }
+    it = rtInfo.find("outputsSupportBF16");
+    if (it != rtInfo.end()) {
+        outputsSupportBF16 = it->second.as<std::set<int>>();
+    }
+    it = rtInfo.find("internalDynamismShapeInfer");
+    if (it != rtInfo.end()) {
+        internalDynamismShapeInfer = it->second.as<bool>();
+    }
 }
 
 void Reference::getSupportedDescriptors() {}
@@ -43,13 +60,21 @@ void Reference::initSupportedPrimitiveDescriptors() {
     std::vector<PortConfigurator> inputConfigurators;
     inputConfigurators.reserve(inputShapes.size());
     for (size_t i = 0; i < inputShapes.size(); i++) {
-        inputConfigurators.emplace_back(LayoutType::ncsp, convertPrecision(ngraphOp->get_input_element_type(i)), inputShapes[i]);
+        auto prec = convertPrecision(ngraphOp->get_input_element_type(i));
+        if (allowBF16 && inputsSupportBF16.count(i)) {
+            prec = Precision::BF16;
+        }
+        inputConfigurators.emplace_back(LayoutType::ncsp, prec, inputShapes[i]);
     }
 
     std::vector<PortConfigurator> outputConfigurators;
     outputConfigurators.reserve(inputShapes.size());
     for (size_t i = 0; i < outputShapes.size(); i++) {
-        outputConfigurators.emplace_back(LayoutType::ncsp, convertPrecision(ngraphOp->get_output_element_type(i)), outputShapes[i]);
+        auto prec = convertPrecision(ngraphOp->get_output_element_type(i));
+        if (allowBF16 && outputsSupportBF16.count(i)) {
+            prec = Precision::BF16;
+        }
+        outputConfigurators.emplace_back(LayoutType::ncsp, prec, outputShapes[i]);
     }
 
     addSupportedPrimDesc(inputConfigurators, outputConfigurators, impl_desc_type::ref);
@@ -60,16 +85,14 @@ void Reference::createPrimitive() {}
 void Reference::execute(dnnl::stream strm) {
     ov::TensorVector inputs;
     for (size_t i = 0; i < inputShapes.size(); i++) {
-        void *srcDataPtr = getParentEdgesAtPort(i)[0]->getMemory().GetPtr();
-        inputs.push_back(ov::Tensor(ngraphOp->get_input_element_type(i),
-                                             getParentEdgesAtPort(i)[0]->getMemory().getStaticDims(), srcDataPtr));
+        const Memory& mem = getParentEdgesAtPort(i)[0]->getMemory();
+        inputs.push_back(ov::Tensor(convertPrecision(mem.getDesc().getPrecision()), mem.getStaticDims(), mem.GetPtr()));
     }
 
     ov::TensorVector outputs;
     for (size_t i = 0; i < outputShapes.size(); i++) {
-        void *dstDataPtr = getChildEdgesAtPort(i)[0]->getMemory().GetPtr();
-        outputs.push_back(ov::Tensor(ngraphOp->get_output_element_type(i),
-                                              getChildEdgesAtPort(i)[0]->getMemory().getStaticDims(), dstDataPtr));
+        const Memory& mem = getChildEdgesAtPort(i)[0]->getMemory();
+        outputs.push_back(ov::Tensor(convertPrecision(mem.getDesc().getPrecision()), mem.getStaticDims(), mem.GetPtr()));
     }
 
     if (!ngraphOp->evaluate(outputs, inputs)) {
@@ -90,7 +113,9 @@ bool Reference::created() const {
 }
 
 bool Reference::needShapeInfer() const {
-    return true;
+    if (internalDynamismShapeInfer)
+        return true;
+    return Node::needShapeInfer();
 }
 
 }   // namespace node
