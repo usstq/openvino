@@ -83,16 +83,31 @@ void Reference::initSupportedPrimitiveDescriptors() {
 void Reference::createPrimitive() {}
 
 void Reference::execute(dnnl::stream strm) {
+    auto getTensor = [this](TensorCache& tensorCache, int port, const Memory& mem) -> const ov::Tensor& {
+        auto prec = mem.getDesc().getPrecision();
+        auto dims = mem.getStaticDims();
+        void* ptr = mem.GetPtr();
+        auto it = tensorCache.find(port);
+        if (it != tensorCache.end()) {
+            TensorEntry& tentry = it->second;
+            // cache hit
+            if (std::get<0>(tentry) == prec && std::get<1>(tentry) == dims && std::get<2>(tentry) == ptr)
+                return std::get<3>(tentry);
+        }
+        tensorCache[port] = TensorEntry{prec, dims, ptr, ov::Tensor(convertPrecision(prec), dims, ptr)};
+        return std::get<3>(tensorCache[port]);
+    };
+
     ov::TensorVector inputs;
     for (size_t i = 0; i < inputShapes.size(); i++) {
         const Memory& mem = getParentEdgesAtPort(i)[0]->getMemory();
-        inputs.push_back(ov::Tensor(convertPrecision(mem.getDesc().getPrecision()), mem.getStaticDims(), mem.GetPtr()));
+        inputs.push_back(getTensor(inputTensorCache, i, mem));
     }
 
     ov::TensorVector outputs;
     for (size_t i = 0; i < outputShapes.size(); i++) {
         const Memory& mem = getChildEdgesAtPort(i)[0]->getMemory();
-        outputs.push_back(ov::Tensor(convertPrecision(mem.getDesc().getPrecision()), mem.getStaticDims(), mem.GetPtr()));
+        outputs.push_back(getTensor(outputTensorCache, i, mem));
     }
 
     if (!ngraphOp->evaluate(outputs, inputs)) {

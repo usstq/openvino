@@ -32,6 +32,12 @@ private:
     bool internalDynamismShapeInfer = true;
     std::set<int> inputsSupportBF16;
     std::set<int> outputsSupportBF16;
+
+    using TensorEntry = std::tuple<InferenceEngine::Precision, VectorDims, void *, ov::Tensor>;
+    using TensorCache = std::map<int, TensorEntry>;
+
+    TensorCache inputTensorCache;
+    TensorCache outputTensorCache;
 };
 
 }   // namespace node
