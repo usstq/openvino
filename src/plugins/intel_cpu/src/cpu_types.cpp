@@ -201,7 +201,7 @@ const InferenceEngine::details::caseless_unordered_map<std::string, Type> type_t
         { "PriorBox", Type::PriorBox},
         { "PriorBoxClustered", Type::PriorBoxClustered},
         {"Interaction", Type::Interaction},
-        { "MHA", Type::MHA}
+        { "MHA", Type::MHA},
 };
 
 Type TypeFromName(const std::string& type) {

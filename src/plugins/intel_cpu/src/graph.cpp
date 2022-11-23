@@ -1423,8 +1423,9 @@ void Graph::EnforceBF16() {
      * Experiments show zero peformance impact on average */
     std::unordered_set<NodePtr> nodesToSkip;
 
-    // Main graph keeps FP32 precision for inputs & the graph tails which do not benefit from BF16 acceleration.
-    // Subgraph will convert all internal nodes since generally it's not connected to main outputs.
+    // the Input/Output to main graph was kept un-enforeced,
+    // but Input/Output to subgraph should expose it's internal prefered precision.
+    // thus no skip is done for subgraph
     if (!isSubgraph) {
         // starting from output nodes
         for (const auto& entry : outputNodesMap) {
@@ -1447,7 +1448,8 @@ void Graph::EnforceBF16() {
 
         // allows node to expose BF16, but it's an option rather than enforcement
         // each node should only report BF16 in their NodeDesc if it's execution can
-        // really support BF16 (can benefit from BF16 precision).
+        // really support BF16 and take BF16's advantage of smaller memory footprint
+        // and/or fast CPU instructions.
         node->allowBF16 = true;
         if (node->getType() == Type::Input || node->getType() == Type::Output) {
             continue;
