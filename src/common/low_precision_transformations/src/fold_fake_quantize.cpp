@@ -38,6 +38,17 @@ bool FoldFakeQuantizeTransformation::transform(TransformationContext& context, n
         return false;
     }
 
+    const auto constOutputSrc = getConstOutput(fakeQuantize);
+    if (constOutputSrc) {
+        // since outputLow & outputHigh are same constant, the output
+        // can be built by broadcasting the outputLow/outputHigh
+        const auto data_shape_node = std::make_shared<opset1::ShapeOf>(fakeQuantize->input_value(0));
+        const auto resultConstant = std::make_shared<opset1::Broadcast>(constOutputSrc, data_shape_node);
+        replace_node(fakeQuantize, resultConstant);
+        std::cout << fakeQuantize->get_friendly_name() << " is folded as const" << std::endl;
+        return true;
+    }
+
     if (!canBeTransformed(context, fakeQuantize)) {
         return false;
     }
@@ -57,6 +68,25 @@ bool FoldFakeQuantizeTransformation::transform(TransformationContext& context, n
     }
 
     return false;
+}
+
+std::shared_ptr<opset1::Constant> FoldFakeQuantizeTransformation::getConstOutput(std::shared_ptr<opset1::FakeQuantize> fakeQuantize) const {
+    auto fakeQuantizeInputs = fakeQuantize->input_values();
+
+    const auto outputLow = as_type_ptr<opset1::Constant>(fakeQuantizeInputs[3].get_node_shared_ptr());
+    const auto outputHigh = as_type_ptr<opset1::Constant>(fakeQuantizeInputs[4].get_node_shared_ptr());
+
+    if (outputLow == nullptr || outputHigh == nullptr) {
+        return nullptr;
+    }
+
+    const auto vecLow = outputLow->cast_vector<float>();
+    const auto vecHigh = outputHigh->cast_vector<float>();
+
+    if (vecLow == vecHigh) {
+        return outputLow;
+    }
+    return nullptr;
 }
 
 bool FoldFakeQuantizeTransformation::canBeTransformed(const TransformationContext& context, std::shared_ptr<Node> op) const {
