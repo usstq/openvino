@@ -12,15 +12,32 @@
 namespace ov {
 namespace intel_cpu {
 
-std::shared_ptr<dnnl::primitive> getReorderPrim(Node * pnode,
+std::shared_ptr<dnnl::primitive> getReorderPrim(MultiCachePtr cache,
+                                                const dnnl::engine& engine,
                                                 const dnnl::memory::desc& src,
                                                 const dnnl::memory::desc& dest,
                                                 impl_desc_type* p_impl_type = nullptr);
 
-std::shared_ptr<dnnl::primitive> getReorderPrim(Node * pnode,
+inline std::shared_ptr<dnnl::primitive> getReorderPrim(Node* pnode,
+                                                const dnnl::memory::desc& src,
+                                                const dnnl::memory::desc& dest,
+                                                impl_desc_type* p_impl_type = nullptr) {
+    return getReorderPrim(pnode->getRuntimeCache(), pnode->getEngine(), src, dest, p_impl_type);
+}
+
+inline std::shared_ptr<dnnl::primitive> getReorderPrim(Node* pnode,
                                                 const dnnl::memory& src,
                                                 const dnnl::memory& dest,
-                                                impl_desc_type* p_impl_type = nullptr);
+                                                impl_desc_type* p_impl_type = nullptr) {
+    return getReorderPrim(pnode, src.get_desc(), dest.get_desc(), p_impl_type);
+}
+
+inline std::shared_ptr<dnnl::primitive> getReorderPrim(MultiCachePtr cache,
+                                                const dnnl::memory& src,
+                                                const dnnl::memory& dest,
+                                                impl_desc_type* p_impl_type = nullptr) {
+    return getReorderPrim(cache, dest.get_engine(), src.get_desc(), dest.get_desc(), p_impl_type);
+}
 
 }  // namespace intel_cpu
 }  // namespace ov

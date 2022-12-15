@@ -4,14 +4,16 @@
 
 #include "reorder_prim.h"
 
+#include <dnnl_extension_utils.h>
+#include <dnnl_types.h>
+
+#include <algorithm>
+#include <common/primitive_hashing_utils.hpp>
+#include <cpu/x64/cpu_isa_traits.hpp>
 #include <memory>
 #include <string>
-#include <algorithm>
-#include <dnnl_types.h>
-#include <dnnl_extension_utils.h>
+
 #include "utils/general_utils.h"
-#include <cpu/x64/cpu_isa_traits.hpp>
-#include <common/primitive_hashing_utils.hpp>
 
 namespace ov {
 namespace intel_cpu {
@@ -40,14 +42,14 @@ bool ReorderKey::operator==(const ReorderKey& rhs) const {
     return retVal;
 }
 
-std::shared_ptr<dnnl::primitive> getReorderPrim(Node * pnode,
-                                              const dnnl::memory::desc& src,
-                                              const dnnl::memory::desc& dest,
-                                              impl_desc_type* p_impl_type) {
-    auto builder = [&pnode, &p_impl_type](const ReorderKey& key) -> std::shared_ptr<dnnl::primitive> {
+std::shared_ptr<dnnl::primitive> getReorderPrim(MultiCachePtr cache,
+                                                const dnnl::engine& engine,
+                                                const dnnl::memory::desc& src,
+                                                const dnnl::memory::desc& dest,
+                                                impl_desc_type* p_impl_type) {
+    auto builder = [&engine, &p_impl_type](const ReorderKey& key) -> std::shared_ptr<dnnl::primitive> {
         dnnl::primitive_attr attr;
-        dnnl::reorder::primitive_desc pd =
-            dnnl::reorder::primitive_desc(pnode->getEngine(), key.src, pnode->getEngine(), key.dest, attr, true);
+        dnnl::reorder::primitive_desc pd = dnnl::reorder::primitive_desc(engine, key.src, engine, key.dest, attr, true);
         if (!pd)
             return nullptr;
         auto info = pd.impl_info_str();
@@ -57,15 +59,11 @@ std::shared_ptr<dnnl::primitive> getReorderPrim(Node * pnode,
     };
 
     ReorderKey key = {src, dest};
-    auto result = pnode->getRuntimeCache()->getOrCreate(key, builder);
-    return result.first;
-}
-
-std::shared_ptr<dnnl::primitive> getReorderPrim(Node * pnode,
-                                              const dnnl::memory & src,
-                                              const dnnl::memory & dest,
-                                              impl_desc_type* p_impl_type) {
-    return getReorderPrim(pnode, src.get_desc(), dest.get_desc(), p_impl_type);
+    if (cache) {
+        auto result = cache->getOrCreate(key, builder);
+        return result.first;
+    }
+    return builder(key);
 }
 
 }  // namespace intel_cpu
