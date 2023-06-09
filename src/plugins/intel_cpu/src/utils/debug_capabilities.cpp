@@ -577,7 +577,37 @@ std::ostream & operator<<(std::ostream & os, const dnnl::memory::format_tag form
     return os;
 }
 
+DumpModel::DumpModel(const std::string& file_name) : file_name(file_name) {
+}
+
+bool DumpModel::run_on_model(const std::shared_ptr<ov::Model>& model) {
+    std::ofstream ofs(file_name);
+    if (!ofs) {
+        std::cout << "Error opening file " << file_name << " for output" << std::endl;
+        return false;
+    }
+    ofs << PrintableModel(*model);
+    ofs.close();
+
+    ov::serialize(model, file_name+".xml");
+    std::cout << "Model dumpped into " << file_name << " and " << file_name << ".xml" << std::endl;
+
+    return false;
+}
+
 }   // namespace intel_cpu
 }   // namespace ov
+#else
+namespace ov {
+namespace intel_cpu {
 
+DumpModel::DumpModel(const std::string&) {
+}
+
+bool DumpModel::run_on_model(const std::shared_ptr<ov::Model>&) {
+    return false;
+}
+
+}   // namespace intel_cpu
+}   // namespace ov
 #endif

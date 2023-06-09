@@ -119,6 +119,8 @@
 #include "dnnl.hpp"
 #include <cpu/x64/cpu_isa_traits.hpp>
 
+#include "utils/debug_capabilities.h"
+
 namespace ov {
 namespace intel_cpu {
 
@@ -577,6 +579,8 @@ void Transformations::PostLpt() {
     CPU_REGISTER_PASS_COMMON(postLPTPassManager, ov::pass::ConstantFolding);
 
     // Snippets may brake MHA patterns so the fusion has to performed before
+    CPU_REGISTER_PASS_X64(postLPTPassManager, DumpModel, "before_MHA.txt");
+
     CPU_REGISTER_PASS_X64(postLPTPassManager, MHAFusion);
     CPU_REGISTER_PASS_X64(postLPTPassManager, FuseFQtoInteraction);
 

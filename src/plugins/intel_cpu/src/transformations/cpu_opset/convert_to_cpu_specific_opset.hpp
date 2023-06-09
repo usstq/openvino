@@ -50,6 +50,8 @@ inline void ConvertToCPUSpecificOpset(std::shared_ptr<ngraph::Function> &nGraphF
     CPU_REGISTER_PASS_COMMON(manager, NgramFusion);
     CPU_REGISTER_PASS_COMMON(manager, ov::pass::Validate);
 
+    CPU_REGISTER_PASS_X64(manager, DumpModel, "final_MHA.txt");
+
     manager.run_passes(nGraphFunc);
 }
 
