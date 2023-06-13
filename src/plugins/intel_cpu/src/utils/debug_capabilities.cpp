@@ -440,7 +440,8 @@ std::ostream & operator<<(std::ostream & os, const PrintableModel& model) {
     }
     os << ") {\n";
     for (auto op : f.get_ordered_ops()) {
-        auto type = op->get_type_name();
+        const auto & type_info = op->get_type_info();
+        auto type = std::string(type_info.get_version()) + "::" + type_info.name;
         auto name = op->get_friendly_name();
         os << prefix << "\t";
         if (op->get_output_size() > 1)

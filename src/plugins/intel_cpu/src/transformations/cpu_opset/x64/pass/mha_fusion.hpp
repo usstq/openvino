@@ -49,6 +49,12 @@ public:
     MHAQuantFusion2();
 };
 
+class MHADynamicFloatFusion: public MHAFusionBase {
+public:
+    OPENVINO_RTTI("MHADynamicFloatFusion", "0");
+    MHADynamicFloatFusion();
+};
+
 class MHAFusion : public ngraph::pass::GraphRewrite {
 public:
     OPENVINO_RTTI("MHAFusion", "0");
@@ -57,6 +63,8 @@ public:
         add_matcher<MHAFloatFusion2>();
         add_matcher<MHAQuantFusion>();
         add_matcher<MHAQuantFusion2>();
+
+        add_matcher<MHADynamicFloatFusion>();
     }
 };
 

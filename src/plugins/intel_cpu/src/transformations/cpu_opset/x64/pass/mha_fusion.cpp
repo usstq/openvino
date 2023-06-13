@@ -577,3 +577,166 @@ ov::intel_cpu::MHAQuantFusion2::MHAQuantFusion2() {
     auto m = std::make_shared<ngraph::pattern::Matcher>(transpose3, matcher_name);
     this->register_matcher(m, callback);
 }
+
+#include <openvino/opsets/opset8.hpp>
+using namespace ov::pass::pattern;
+using namespace ov;
+
+namespace node_pattern {
+
+template <class... Args>
+std::shared_ptr<Node> node_type(const OutputVector& inputs) {
+    return wrap_type<Args...>(inputs);
+}
+
+template <class... Args>
+std::shared_ptr<Node> node_type(const OutputVector& inputs, const std::function<bool(const Output<Node>&)>& pred) {
+    return wrap_type<Args...>(inputs, [pred](const Output<Node>& output) {
+        auto ret = pred(output);
+        if (!ret)
+            std::cout << "   match failed at : " << output << std::endl;
+        return ret;
+    });
+}
+
+inline std::shared_ptr<Node> input(const ov::PartialShape& pshape) {
+    return any_input([pshape](const Output<Node>& value) {
+        auto ret = pshape.compatible(value.get_partial_shape());
+        if (!ret)
+            std::cout << "   match failed at input : " << value << std::endl;
+        return ret;
+    });
+}
+
+template <typename T>
+inline std::shared_ptr<Node> ConstScalar(const T& v) {
+    return node_type<opset1::Constant>({}, [v](const Output<Node>& value) {
+        auto s1 = as_type_ptr<opset1::Constant>(value.get_node_shared_ptr());
+        auto shape = s1->get_output_shape(0);
+        if (shape_size(shape) > 1)
+            return false;
+        std::vector<T> output_vector = s1->cast_vector<T>();
+        return (v == output_vector[0]);
+    });
+}
+
+inline std::shared_ptr<Node> Convert(const Output<Node>& input,
+                                     const element::Type& src_type,
+                                     const element::Type& dst_type) {
+    return node_type<opset1::Convert>({input}, [src_type, dst_type](const Output<Node>& value) {
+        auto s1 = as_type_ptr<opset1::Convert>(value.get_node_shared_ptr());
+        return s1->get_input_element_type(0) == src_type && s1->get_convert_element_type() == dst_type;
+    });
+}
+
+inline std::shared_ptr<Node> Softmax(const Output<Node>& input, int axis) {
+    return node_type<opset1::Softmax, opset8::Softmax>({input}, [axis](const Output<Node>& value) {
+        auto s1 = as_type_ptr<opset1::Softmax>(value.get_node_shared_ptr());
+        if (s1)
+            return s1->get_axis() == axis;
+        auto s8 = as_type_ptr<opset8::Softmax>(value.get_node_shared_ptr());
+        if (s8)
+            return s8->get_axis() == axis;
+        return false;
+    });
+}
+
+// attenstion_mask subgraph doing following mapping:
+//   0 => -3.40282e+38  (-FLT_MAX)
+//   1 =>  0
+// so by adding this mask to score, after softmax, 0-part of the mask will be masked
+inline std::shared_ptr<Node> attention_mask_for_softmax(const Output<Node>& input) {
+    auto att_mask_f32 = Convert(input, element::i32, element::f32);
+    auto mul_max = node_type<opset1::Multiply>({att_mask_f32, ConstScalar(std::numeric_limits<float>::max())});
+    auto mul_lowest = node_type<opset1::Add>({mul_max, ConstScalar(std::numeric_limits<float>::lowest())});
+    return mul_lowest;
+}
+
+inline std::shared_ptr<Node> causal_mask_for_softmax(
+            const Output<Node>& query_length,
+            const Output<Node>& key_length   // key_length
+            ) {
+
+    auto lower_triangular_const = node_type<opset1::Constant>({}, [](const Output<Node>& value) {
+        auto s1 = as_type_ptr<opset1::Constant>(value.get_node_shared_ptr());
+        if (s1->get_output_element_type(0) != element::u8)
+            return false;
+        auto shape = s1->get_output_shape(0);
+        if (shape.size() != 4)
+            return false;
+        if (shape[0] != 1 || shape[1] != 1 || shape[2] != shape[3])
+            return false;
+        // NxN const matrix
+        auto max_positions = shape[2];
+        std::vector<uint8_t> output_vector = s1->cast_vector<uint8_t>();
+        // check if it's unit lower triangular matrix
+        for (int i = 0; i < max_positions; i++) {
+            for(int j = 0; j < max_positions; j++) {
+                if (bool(output_vector[i*max_positions + j]) != bool(j<=i))
+                    return false;
+            }
+        }
+        return true;
+    });
+
+    auto shape0 = node_type<opset1::Multiply>(shape0, ConstScalar(-1));
+    
+    auto length_diff = node_type<opset1::Add>
+
+    auto start = node_type<opset1::Reshape>(length_diff, ConstScalar(1));
+
+    auto slice1 = node_type<opset8::Slice>(
+        lower_triangular_const, //  gpt_neox.layers.1.attention.bias
+        start,          // start
+        key_length,     // stop
+        ConstScalar(1), // step
+        ConstScalar(2)  // axis
+    );
+
+    auto cond = node_type<opset8::Slice>(
+        slice1, //  gpt_neox.layers.1.attention.bias
+        ConstScalar(0), // start
+        key_length,     // stop
+        ConstScalar(1), // step
+        ConstScalar(3)  // axis
+    );
+
+    return node_type<opset1::Select>({cond, value_then, value_else});
+}
+
+};  // namespace node_pattern
+
+ov::intel_cpu::MHADynamicFloatFusion::MHADynamicFloatFusion() {
+    MATCHER_SCOPE(MHADynamicFloatFusion);
+    auto dyn = ov::Dimension::dynamic();
+    auto B = ov::Dimension::dynamic();
+    auto H = ov::Dimension::dynamic();
+    auto qL = ov::Dimension::dynamic();
+    auto kL = ov::Dimension::dynamic();
+
+    auto src = node_pattern::input({B, H, qL, kL});
+    auto att_mask_in = node_pattern::input({B, 1, 1, kL});
+
+    auto add_causal_mask = node_pattern::attention_mask_for_softmax(att_mask_in);
+
+    auto att_mask = node_pattern::attention_mask_for_softmax(att_mask_in);
+
+    auto add_att_mask = node_pattern::node_type<opset1::Add>({add_causal_mask, att_mask});
+    //auto softmax = node_pattern::Softmax(add_att_mask, 3);
+    auto softmax = wrap_type<opset1::Softmax, opset8::Softmax>({add_att_mask});
+
+    std::cout << "MHADynamicFloatFusion" << std::endl;
+    matcher_pass_callback callback = [=](Matcher& m) {
+        auto& pattern_to_output = m.get_pattern_value_map();
+        auto node_src = pattern_to_output.at(src).get_node_shared_ptr();
+        auto node_softmax = pattern_to_output.at(softmax).get_node_shared_ptr();
+
+        std::cout << "MHADynamicFloatFusion::callback" << std::endl;
+        std::cout << "\t" << node_src << std::endl;
+        std::cout << "\t" << node_softmax << std::endl;
+        return false;
+    };
+
+    auto m = std::make_shared<Matcher>(softmax, matcher_name);
+    this->register_matcher(m, callback);
+}
