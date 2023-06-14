@@ -580,96 +580,236 @@ ov::intel_cpu::MHAQuantFusion2::MHAQuantFusion2() {
 
 #include <memory>
 #include <openvino/opsets/opset8.hpp>
-#include "ngraph/pattern/op/or.hpp"
+#include "ngraph/pattern/op/pattern.hpp"
 using namespace ov::pass::pattern;
 using namespace ov;
+using ov::pass::pattern::op::ValuePredicate;
 
 struct PatternNode;
 
 PatternNode operator*(PatternNode lhs, PatternNode rhs);
 PatternNode operator+(PatternNode lhs, PatternNode rhs);
 
-struct PatternNode {
-    std::shared_ptr<Node> node;
+// Combination of Label & WrapType:
+//      m_dtype : graph_value's element type is match
+//      m_pshape: graph_value's partial shape is compatible
+//          type: graph_value is produced by specific types of nodes
+//   m_predicate: check other aspect
+//
+class PNode : public ov::pass::pattern::op::Pattern {
+    ov::PartialShape m_pshape;
+    element::Type m_dtype = element::undefined;
+    bool check_value_pattern = false;
 
-    operator std::shared_ptr<Node> () {
-        return node;
+    std::string comment;
+
+public:
+    OPENVINO_RTTI("PNode");
+    std::vector<NodeTypeInfo> m_wrapped_types;
+
+    PNode(const OutputVector& inputs = {}, ValuePredicate pred = nullptr) : ov::pass::pattern::op::Pattern(inputs, pred) {}
+
+    void set_value_pattern(const ov::PartialShape& pshape, element::Type dtype = element::undefined) {
+        m_pshape = pshape;
+        m_dtype = dtype;
+        check_value_pattern = true;
     }
-
-    template <class... Args>
-    static std::shared_ptr<Node> node_type(const OutputVector& inputs) {
-        return wrap_type<Args...>(inputs);
-    }
-
-    template <class... Args>
-    static std::shared_ptr<Node> node_type(const OutputVector& inputs, const std::function<bool(const Output<Node>&)>& pred) {
-        return wrap_type<Args...>(inputs, [pred](const Output<Node>& output) {
-            auto ret = pred(output);
-            if (!ret)
-                std::cout << "   match failed at : " << output << std::endl;
-            return ret;
-        });
-    }
-
-    // any input with given partial shape
-    PatternNode(const ov::PartialShape& pshape, const element::Type & dtype = element::undefined) {
-        node = any_input([pshape, dtype](const Output<Node>& value) {
-            auto ret = pshape.compatible(value.get_partial_shape());
-            if (ret && dtype != element::undefined)
-                ret = (value.get_element_type() == dtype);
-            if (!ret)
-                std::cout << "   match failed at input : " << value << std::endl;
-            return ret;
-        });
-    }
-
-    // implict conversion from std::shared_ptr<Node>
-    PatternNode(const std::shared_ptr<Node>& node) : node(node) {}
 
     // constant scalar pattern with v as value, of shape [], [1], [1,1], ...
     template <typename T, typename std::enable_if<std::is_arithmetic<T>::value, bool>::type = true>
-    static std::shared_ptr<Node> ConstScalar(const T v) {
-        return node_type<opset1::Constant>({}, [v](const Output<Node>& value) {
+    void set_const_scalar(const T v) {
+        comment = "value=" + std::to_string(v);
+        m_wrapped_types = {opset1::Constant::get_type_info_static()};
+        m_predicate = [v](const Output<Node>& value) {
             auto s1 = as_type_ptr<opset1::Constant>(value.get_node_shared_ptr());
             auto shape = s1->get_output_shape(0);
             if (shape_size(shape) > 1)
                 return false;
             std::vector<T> output_vector = s1->cast_vector<T>();
             return (v == output_vector[0]);
-        });
+        };
     }
 
+    bool verbose = true;
+
+    bool match_value(Matcher* matcher,
+                     const Output<Node>& pattern_value,
+                     const Output<Node>& graph_value) override {
+        if (check_value_pattern) {
+            bool pshape_ok = m_pshape.compatible(graph_value.get_partial_shape());
+            bool dtype_ok = (m_dtype == element::undefined) || (m_dtype == graph_value.get_element_type());
+            if ((!pshape_ok) || (!dtype_ok)) {
+                if (verbose)
+                    std::cout << "**** mismatch at : " << graph_value << " with v" << m_var_id << std::endl;
+                return false;
+            }
+        }
+
+        if (m_wrapped_types.size()) {
+            if (!std::any_of(m_wrapped_types.begin(), m_wrapped_types.end(), [&](const NodeTypeInfo& type_info) {
+                    return graph_value.get_node_shared_ptr()->get_type_info().is_castable(type_info);
+                })) {
+                if (verbose)
+                    std::cout << "**** mismatch at : " << graph_value << " with v" << m_var_id << std::endl;
+                return false;
+            }
+        }
+
+        if (m_predicate) {
+            if (!m_predicate(graph_value)) {
+                if (verbose)
+                    std::cout << "**** predicate failed at : " << graph_value << " with v" << m_var_id << std::endl;
+                return false;
+            }
+        }
+
+        auto& pattern_map = matcher->get_pattern_value_map();
+        pattern_map[shared_from_this()] = graph_value;
+        matcher->add_node(graph_value);
+
+        bool ret = (get_input_size() == 0
+                    ? true
+                    : matcher->match_arguments(pattern_value.get_node(), graph_value.get_node_shared_ptr()));
+        if (verbose)
+            std::cout << "   " << ret << "      match : " << graph_value << " with v" << m_var_id << std::endl;
+
+        return ret;
+    }
+    friend std::ostream& operator<<(std::ostream& os, const PNode& dt);
+
+    int m_var_id = -1;
+
+    void dump_all(std::ostream& os) {
+        int cur_var_id = 0;
+        clear_var_id();
+        os << "pattern {" << std::endl;
+        _dump_all_impl(os, cur_var_id);
+        os << "}" << std::endl;
+    }
+
+    void clear_var_id() {
+        for (size_t i = 0; i < this->get_input_size(); i++) {
+            auto parent_node = this->get_input_node_shared_ptr(i);
+            auto port = this->input_value(i).get_index();
+            auto parent_pnode = std::dynamic_pointer_cast<PNode>(parent_node);
+            parent_pnode->clear_var_id();
+        }
+        m_var_id = -1;
+    }
+
+    void _dump_all_impl(std::ostream& os, int & cur_var_id) {
+        // start from this, recursivedly dump all input PNode
+        for (size_t i = 0; i < this->get_input_size(); i++) {
+            auto parent_node = this->get_input_node_shared_ptr(i);
+            auto port = this->input_value(i).get_index();
+            auto parent_pnode = std::dynamic_pointer_cast<PNode>(parent_node);
+            parent_pnode->_dump_all_impl(os, cur_var_id);
+        }
+        const char * sep = "";
+
+        // prevent redundant dump
+        if (m_var_id >=0) return;
+
+        // take one id for this, increase id for next
+        m_var_id = cur_var_id++;
+
+        os << "\t";
+        if (check_value_pattern) {
+            if (m_dtype != element::undefined)
+                os << m_dtype << "_";
+            os << m_pshape << " ";
+        }
+        os << "v" << m_var_id << " = ";
+        // dump current node
+        if (m_wrapped_types.size()) {
+            sep = "";
+            for (auto & wt : m_wrapped_types) {
+                os << sep << wt.get_version() + "::" + wt.name;
+                sep = " or ";
+            }
+        } else {
+            os << "AnyType";
+        }
+        os << "(";
+        sep = "";
+        for (size_t i = 0; i < this->get_input_size(); i++) {
+            auto parent_node = this->get_input_node_shared_ptr(i);
+            auto port = this->input_value(i).get_index();
+            auto parent_pnode = std::dynamic_pointer_cast<PNode>(parent_node);
+            os << sep << "v" << parent_pnode->m_var_id;
+            if (port > 0) os << "[" << port << "]";
+            sep = ",";
+        }
+        os << ")   # " << comment << std::endl;
+    }
+};
+
+std::ostream& operator<<(std::ostream& os, const PNode& p) {
+    os << "Pattern{";
+    if (p.m_wrapped_types.size()) {
+        for (auto & wt : p.m_wrapped_types)
+            os << wt.get_version() + "::" + wt.name << ",";
+    }
+    if (p.check_value_pattern) {
+        os << " " << p.m_pshape << " " << p.m_dtype;
+    }
+    if (p.m_predicate)
+        os << " +predicate";
+    os << "}";
+    return os;
+}
+
+struct PatternNode {
+    std::shared_ptr<PNode> node;
+
+    PatternNode(const std::shared_ptr<PNode>& node) : node(node) {}
+
+    // any input with given partial shape
+    PatternNode(const ov::PartialShape& pshape, const element::Type& dtype = element::undefined) {
+        node = std::make_shared<PNode>();
+        node->set_value_pattern(pshape, dtype);
+    }
     PatternNode(const int v) {
-        node = ConstScalar(v);
+        node = std::make_shared<PNode>();
+        node->set_const_scalar(v);
+    }
+    PatternNode(const float v) {
+        node = std::make_shared<PNode>();
+        node->set_const_scalar(v);
     }
 
-    PatternNode(const float v) {
-        node = ConstScalar(v);
+    template <typename... OPs>
+    static std::shared_ptr<PNode> WrapType(const OutputVector& input_values = {}, ValuePredicate pred = nullptr) {
+        auto node = std::make_shared<PNode>(input_values, pred);
+        node->m_wrapped_types = {OPs::get_type_info_static()...};
+        node->set_output_type(0, element::Type_t::dynamic, PartialShape::dynamic());
+        return node;
     }
 
     PatternNode shape() const {
-        return node_type<opset1::ShapeOf>({node});
+        return WrapType<opset1::ShapeOf>({node});
     }
+
     // 1D indexing mapped to Gather from axis 0, node is producer of shape vector
     PatternNode operator[](int i) const {
-        return node_type<opset8::Gather>({node, PatternNode(i).node, PatternNode(0).node});
+        return WrapType<opset8::Gather>({node, PatternNode(i).node, PatternNode(0).node});
     }
 
     PatternNode Convert(const element::Type& dst_type) const {
-        return node_type<opset1::Convert>({node->output(0)}, [dst_type](const Output<Node>& value) {
+        return WrapType<opset1::Convert>({node->output(0)}, [dst_type](const Output<Node>& value) {
             auto s1 = as_type_ptr<opset1::Convert>(value.get_node_shared_ptr());
             return s1->get_convert_element_type() == dst_type;
         });
     }
 
     PatternNode Softmax(int axis) const {
-        return node_type<opset1::Softmax, opset8::Softmax>({node->output(0)}, [axis](const Output<Node>& value) {
+        return WrapType<opset1::Softmax, opset8::Softmax>({node->output(0)}, [axis](const Output<Node>& value) {
             auto s1 = as_type_ptr<opset1::Softmax>(value.get_node_shared_ptr());
             if (s1)
-                return s1->get_axis() == axis;
+                return s1->get_axis() == static_cast<size_t>(axis);
             auto s8 = as_type_ptr<opset8::Softmax>(value.get_node_shared_ptr());
             if (s8)
-                return s8->get_axis() == axis;
+                return s8->get_axis() == static_cast<int64_t>(axis);
             return false;
         });
     }
@@ -678,18 +818,18 @@ struct PatternNode {
                       const PatternNode& stop,
                       const PatternNode& step,
                       const PatternNode& axis) {
-        return node_type<opset8::Slice>({start.node, stop.node, step.node, axis.node});
+        return WrapType<opset8::Slice>({node, start.node, stop.node, step.node, axis.node});
     }
 
     PatternNode Select(const PatternNode& n_then, const PatternNode& n_else) {
-        return node_type<opset1::Select>({node, n_then.node, n_else.node});
+        return WrapType<opset1::Select>({node, n_then.node, n_else.node});
     }
 
     // lower triangular part of a matrix
     template <element::Type_t ET>
     static PatternNode tril() {
         using T = typename element_type_traits<ET>::value_type;
-        return node_type<opset1::Constant>({}, [](const Output<Node>& value) {
+        return WrapType<opset1::Constant>({}, [](const Output<Node>& value) {
             auto s1 = as_type_ptr<opset1::Constant>(value.get_node_shared_ptr());
             if (s1->get_output_element_type(0) != element::u8)
                 return false;
@@ -714,17 +854,11 @@ struct PatternNode {
 };
 
 PatternNode operator*(PatternNode lhs, PatternNode rhs) {
-    auto exchangable = std::make_shared<ov::pass::pattern::op::Or>(
-        OutputVector{PatternNode::node_type<opset1::Multiply>({lhs.node, rhs.node})->output(0),
-                     PatternNode::node_type<opset1::Multiply>({rhs.node, lhs.node})->output(0)});
-    return std::dynamic_pointer_cast<Node>(exchangable);
+    return PatternNode::WrapType<opset1::Multiply>({lhs.node, rhs.node});
 }
 
 PatternNode operator+(PatternNode lhs, PatternNode rhs) {
-    auto exchangable = std::make_shared<ov::pass::pattern::op::Or>(
-        OutputVector{PatternNode::node_type<opset1::Add>({lhs.node, rhs.node})->output(0),
-                     PatternNode::node_type<opset1::Add>({rhs.node, lhs.node})->output(0)});
-    return std::dynamic_pointer_cast<Node>(exchangable);
+    return PatternNode::WrapType<opset1::Add>({lhs.node, rhs.node});
 }
 
 ov::intel_cpu::MHADynamicFloatFusion::MHADynamicFloatFusion() {
@@ -747,13 +881,12 @@ ov::intel_cpu::MHADynamicFloatFusion::MHADynamicFloatFusion() {
     auto tril_bias = PatternNode::tril<element::Type_t::u8>();
     auto causal_mask = tril_bias.Slice(start, key_length, 1, 2).Slice(0, key_length, 1, 3);
 
-    auto add_att_mask =
-        causal_mask.Select(src, float_lowest) + (att_mask_in.Convert(element::f32) * float_max + float_lowest);
-
-    // auto softmax = node_pattern::Softmax(add_att_mask, 3);
-    auto softmax = add_att_mask.Softmax(3);
+    auto masked_score = causal_mask.Select(src, float_lowest) + (att_mask_in.Convert(element::f32) * float_max + float_lowest);
+    auto softmax = masked_score.Softmax(3);
 
     std::cout << "MHADynamicFloatFusion" << std::endl;
+    softmax.node->dump_all(std::cout);
+
     matcher_pass_callback callback = [=](Matcher& m) {
         auto& pattern_to_output = m.get_pattern_value_map();
         auto node_src = pattern_to_output.at(src.node).get_node_shared_ptr();
