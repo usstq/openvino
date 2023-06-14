@@ -578,133 +578,154 @@ ov::intel_cpu::MHAQuantFusion2::MHAQuantFusion2() {
     this->register_matcher(m, callback);
 }
 
+#include <memory>
 #include <openvino/opsets/opset8.hpp>
+#include "ngraph/pattern/op/or.hpp"
 using namespace ov::pass::pattern;
 using namespace ov;
 
-namespace node_pattern {
+struct PatternNode;
 
-template <class... Args>
-std::shared_ptr<Node> node_type(const OutputVector& inputs) {
-    return wrap_type<Args...>(inputs);
-}
+PatternNode operator*(PatternNode lhs, PatternNode rhs);
+PatternNode operator+(PatternNode lhs, PatternNode rhs);
 
-template <class... Args>
-std::shared_ptr<Node> node_type(const OutputVector& inputs, const std::function<bool(const Output<Node>&)>& pred) {
-    return wrap_type<Args...>(inputs, [pred](const Output<Node>& output) {
-        auto ret = pred(output);
-        if (!ret)
-            std::cout << "   match failed at : " << output << std::endl;
-        return ret;
-    });
-}
+struct PatternNode {
+    std::shared_ptr<Node> node;
 
-inline std::shared_ptr<Node> input(const ov::PartialShape& pshape) {
-    return any_input([pshape](const Output<Node>& value) {
-        auto ret = pshape.compatible(value.get_partial_shape());
-        if (!ret)
-            std::cout << "   match failed at input : " << value << std::endl;
-        return ret;
-    });
-}
+    operator std::shared_ptr<Node> () {
+        return node;
+    }
 
-template <typename T>
-inline std::shared_ptr<Node> ConstScalar(const T& v) {
-    return node_type<opset1::Constant>({}, [v](const Output<Node>& value) {
-        auto s1 = as_type_ptr<opset1::Constant>(value.get_node_shared_ptr());
-        auto shape = s1->get_output_shape(0);
-        if (shape_size(shape) > 1)
+    template <class... Args>
+    static std::shared_ptr<Node> node_type(const OutputVector& inputs) {
+        return wrap_type<Args...>(inputs);
+    }
+
+    template <class... Args>
+    static std::shared_ptr<Node> node_type(const OutputVector& inputs, const std::function<bool(const Output<Node>&)>& pred) {
+        return wrap_type<Args...>(inputs, [pred](const Output<Node>& output) {
+            auto ret = pred(output);
+            if (!ret)
+                std::cout << "   match failed at : " << output << std::endl;
+            return ret;
+        });
+    }
+
+    // any input with given partial shape
+    PatternNode(const ov::PartialShape& pshape, const element::Type & dtype = element::undefined) {
+        node = any_input([pshape, dtype](const Output<Node>& value) {
+            auto ret = pshape.compatible(value.get_partial_shape());
+            if (ret && dtype != element::undefined)
+                ret = (value.get_element_type() == dtype);
+            if (!ret)
+                std::cout << "   match failed at input : " << value << std::endl;
+            return ret;
+        });
+    }
+
+    // implict conversion from std::shared_ptr<Node>
+    PatternNode(const std::shared_ptr<Node>& node) : node(node) {}
+
+    // constant scalar pattern with v as value, of shape [], [1], [1,1], ...
+    template <typename T, typename std::enable_if<std::is_arithmetic<T>::value, bool>::type = true>
+    static std::shared_ptr<Node> ConstScalar(const T v) {
+        return node_type<opset1::Constant>({}, [v](const Output<Node>& value) {
+            auto s1 = as_type_ptr<opset1::Constant>(value.get_node_shared_ptr());
+            auto shape = s1->get_output_shape(0);
+            if (shape_size(shape) > 1)
+                return false;
+            std::vector<T> output_vector = s1->cast_vector<T>();
+            return (v == output_vector[0]);
+        });
+    }
+
+    PatternNode(const int v) {
+        node = ConstScalar(v);
+    }
+
+    PatternNode(const float v) {
+        node = ConstScalar(v);
+    }
+
+    PatternNode shape() const {
+        return node_type<opset1::ShapeOf>({node});
+    }
+    // 1D indexing mapped to Gather from axis 0, node is producer of shape vector
+    PatternNode operator[](int i) const {
+        return node_type<opset8::Gather>({node, PatternNode(i).node, PatternNode(0).node});
+    }
+
+    PatternNode Convert(const element::Type& dst_type) const {
+        return node_type<opset1::Convert>({node->output(0)}, [dst_type](const Output<Node>& value) {
+            auto s1 = as_type_ptr<opset1::Convert>(value.get_node_shared_ptr());
+            return s1->get_convert_element_type() == dst_type;
+        });
+    }
+
+    PatternNode Softmax(int axis) const {
+        return node_type<opset1::Softmax, opset8::Softmax>({node->output(0)}, [axis](const Output<Node>& value) {
+            auto s1 = as_type_ptr<opset1::Softmax>(value.get_node_shared_ptr());
+            if (s1)
+                return s1->get_axis() == axis;
+            auto s8 = as_type_ptr<opset8::Softmax>(value.get_node_shared_ptr());
+            if (s8)
+                return s8->get_axis() == axis;
             return false;
-        std::vector<T> output_vector = s1->cast_vector<T>();
-        return (v == output_vector[0]);
-    });
-}
+        });
+    }
 
-inline std::shared_ptr<Node> Convert(const Output<Node>& input,
-                                     const element::Type& src_type,
-                                     const element::Type& dst_type) {
-    return node_type<opset1::Convert>({input}, [src_type, dst_type](const Output<Node>& value) {
-        auto s1 = as_type_ptr<opset1::Convert>(value.get_node_shared_ptr());
-        return s1->get_input_element_type(0) == src_type && s1->get_convert_element_type() == dst_type;
-    });
-}
+    PatternNode Slice(const PatternNode& start,
+                      const PatternNode& stop,
+                      const PatternNode& step,
+                      const PatternNode& axis) {
+        return node_type<opset8::Slice>({start.node, stop.node, step.node, axis.node});
+    }
 
-inline std::shared_ptr<Node> Softmax(const Output<Node>& input, int axis) {
-    return node_type<opset1::Softmax, opset8::Softmax>({input}, [axis](const Output<Node>& value) {
-        auto s1 = as_type_ptr<opset1::Softmax>(value.get_node_shared_ptr());
-        if (s1)
-            return s1->get_axis() == axis;
-        auto s8 = as_type_ptr<opset8::Softmax>(value.get_node_shared_ptr());
-        if (s8)
-            return s8->get_axis() == axis;
-        return false;
-    });
-}
+    PatternNode Select(const PatternNode& n_then, const PatternNode& n_else) {
+        return node_type<opset1::Select>({node, n_then.node, n_else.node});
+    }
 
-// attenstion_mask subgraph doing following mapping:
-//   0 => -3.40282e+38  (-FLT_MAX)
-//   1 =>  0
-// so by adding this mask to score, after softmax, 0-part of the mask will be masked
-inline std::shared_ptr<Node> attention_mask_for_softmax(const Output<Node>& input) {
-    auto att_mask_f32 = Convert(input, element::i32, element::f32);
-    auto mul_max = node_type<opset1::Multiply>({att_mask_f32, ConstScalar(std::numeric_limits<float>::max())});
-    auto mul_lowest = node_type<opset1::Add>({mul_max, ConstScalar(std::numeric_limits<float>::lowest())});
-    return mul_lowest;
-}
-
-inline std::shared_ptr<Node> causal_mask_for_softmax(
-            const Output<Node>& query_length,
-            const Output<Node>& key_length   // key_length
-            ) {
-
-    auto lower_triangular_const = node_type<opset1::Constant>({}, [](const Output<Node>& value) {
-        auto s1 = as_type_ptr<opset1::Constant>(value.get_node_shared_ptr());
-        if (s1->get_output_element_type(0) != element::u8)
-            return false;
-        auto shape = s1->get_output_shape(0);
-        if (shape.size() != 4)
-            return false;
-        if (shape[0] != 1 || shape[1] != 1 || shape[2] != shape[3])
-            return false;
-        // NxN const matrix
-        auto max_positions = shape[2];
-        std::vector<uint8_t> output_vector = s1->cast_vector<uint8_t>();
-        // check if it's unit lower triangular matrix
-        for (int i = 0; i < max_positions; i++) {
-            for(int j = 0; j < max_positions; j++) {
-                if (bool(output_vector[i*max_positions + j]) != bool(j<=i))
-                    return false;
+    // lower triangular part of a matrix
+    template <element::Type_t ET>
+    static PatternNode tril() {
+        using T = typename element_type_traits<ET>::value_type;
+        return node_type<opset1::Constant>({}, [](const Output<Node>& value) {
+            auto s1 = as_type_ptr<opset1::Constant>(value.get_node_shared_ptr());
+            if (s1->get_output_element_type(0) != element::u8)
+                return false;
+            auto shape = s1->get_output_shape(0);
+            if (shape.size() != 4)
+                return false;
+            if (shape[0] != 1 || shape[1] != 1 || shape[2] != shape[3])
+                return false;
+            // NxN const matrix
+            auto max_positions = shape[2];
+            std::vector<T> output_vector = s1->cast_vector<T>();
+            // check if it's unit lower triangular matrix
+            for (int i = 0; i < max_positions; i++) {
+                for (int j = 0; j < max_positions; j++) {
+                    if (static_cast<bool>(output_vector[i * max_positions + j]) != static_cast<bool>(j <= i))
+                        return false;
+                }
             }
-        }
-        return true;
-    });
+            return true;
+        });
+    }
+};
 
-    auto shape0 = node_type<opset1::Multiply>(shape0, ConstScalar(-1));
-    
-    auto length_diff = node_type<opset1::Add>
-
-    auto start = node_type<opset1::Reshape>(length_diff, ConstScalar(1));
-
-    auto slice1 = node_type<opset8::Slice>(
-        lower_triangular_const, //  gpt_neox.layers.1.attention.bias
-        start,          // start
-        key_length,     // stop
-        ConstScalar(1), // step
-        ConstScalar(2)  // axis
-    );
-
-    auto cond = node_type<opset8::Slice>(
-        slice1, //  gpt_neox.layers.1.attention.bias
-        ConstScalar(0), // start
-        key_length,     // stop
-        ConstScalar(1), // step
-        ConstScalar(3)  // axis
-    );
-
-    return node_type<opset1::Select>({cond, value_then, value_else});
+PatternNode operator*(PatternNode lhs, PatternNode rhs) {
+    auto exchangable = std::make_shared<ov::pass::pattern::op::Or>(
+        OutputVector{PatternNode::node_type<opset1::Multiply>({lhs.node, rhs.node})->output(0),
+                     PatternNode::node_type<opset1::Multiply>({rhs.node, lhs.node})->output(0)});
+    return std::dynamic_pointer_cast<Node>(exchangable);
 }
 
-};  // namespace node_pattern
+PatternNode operator+(PatternNode lhs, PatternNode rhs) {
+    auto exchangable = std::make_shared<ov::pass::pattern::op::Or>(
+        OutputVector{PatternNode::node_type<opset1::Add>({lhs.node, rhs.node})->output(0),
+                     PatternNode::node_type<opset1::Add>({rhs.node, lhs.node})->output(0)});
+    return std::dynamic_pointer_cast<Node>(exchangable);
+}
 
 ov::intel_cpu::MHADynamicFloatFusion::MHADynamicFloatFusion() {
     MATCHER_SCOPE(MHADynamicFloatFusion);
@@ -714,22 +735,29 @@ ov::intel_cpu::MHADynamicFloatFusion::MHADynamicFloatFusion() {
     auto qL = ov::Dimension::dynamic();
     auto kL = ov::Dimension::dynamic();
 
-    auto src = node_pattern::input({B, H, qL, kL});
-    auto att_mask_in = node_pattern::input({B, 1, 1, kL});
+    PatternNode src(ov::PartialShape{B, H, qL, kL});
+    PatternNode att_mask_in(ov::PartialShape{B, 1, 1, kL}, element::i32);
 
-    auto add_causal_mask = node_pattern::attention_mask_for_softmax(att_mask_in);
+    auto float_max = std::numeric_limits<float>::max();
+    auto float_lowest = std::numeric_limits<float>::lowest();
 
-    auto att_mask = node_pattern::attention_mask_for_softmax(att_mask_in);
+    PatternNode key_length(ov::PartialShape{1});
+    PatternNode start(ov::PartialShape{1});
 
-    auto add_att_mask = node_pattern::node_type<opset1::Add>({add_causal_mask, att_mask});
-    //auto softmax = node_pattern::Softmax(add_att_mask, 3);
-    auto softmax = wrap_type<opset1::Softmax, opset8::Softmax>({add_att_mask});
+    auto tril_bias = PatternNode::tril<element::Type_t::u8>();
+    auto causal_mask = tril_bias.Slice(start, key_length, 1, 2).Slice(0, key_length, 1, 3);
+
+    auto add_att_mask =
+        causal_mask.Select(src, float_lowest) + (att_mask_in.Convert(element::f32) * float_max + float_lowest);
+
+    // auto softmax = node_pattern::Softmax(add_att_mask, 3);
+    auto softmax = add_att_mask.Softmax(3);
 
     std::cout << "MHADynamicFloatFusion" << std::endl;
     matcher_pass_callback callback = [=](Matcher& m) {
         auto& pattern_to_output = m.get_pattern_value_map();
-        auto node_src = pattern_to_output.at(src).get_node_shared_ptr();
-        auto node_softmax = pattern_to_output.at(softmax).get_node_shared_ptr();
+        auto node_src = pattern_to_output.at(src.node).get_node_shared_ptr();
+        auto node_softmax = pattern_to_output.at(softmax.node).get_node_shared_ptr();
 
         std::cout << "MHADynamicFloatFusion::callback" << std::endl;
         std::cout << "\t" << node_src << std::endl;
@@ -737,6 +765,6 @@ ov::intel_cpu::MHADynamicFloatFusion::MHADynamicFloatFusion() {
         return false;
     };
 
-    auto m = std::make_shared<Matcher>(softmax, matcher_name);
+    auto m = std::make_shared<Matcher>(softmax.node, matcher_name);
     this->register_matcher(m, callback);
 }
