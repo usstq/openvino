@@ -346,7 +346,8 @@ protected:
         fillData(parentEdge->getMemory(), prec);
     }
     void infer() {
-        reorderNode->updateShapes();
+        std::unordered_map<std::string, std::array<uint64_t, 5>> countersMap;
+        reorderNode->updateShapes(countersMap);
         reorderNode->updateDynamicParams();
         reorderNode->executeDynamic(stream);
     }

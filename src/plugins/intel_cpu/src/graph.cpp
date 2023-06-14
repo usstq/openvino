@@ -67,6 +67,17 @@ typedef std::unordered_set<EdgePtr> edge_cluster_t;
 typedef std::vector<edge_cluster_t> edge_clusters_t;
 
 Graph::~Graph() {
+#ifdef CPU_DEBUG_CAPS
+    for (const auto& item : countersMap) {
+        constexpr int divisor = 1000000;
+        std::cout << item.first << " : ";
+        auto& timeArray = item.second;
+        for (size_t i = 0; i < timeArray.size() - 1; i++) {
+            std::cout << float(timeArray[i]) / divisor << " , "; // / infer_call_count
+        }
+        std::cout << timeArray.back() << std::endl;
+    }
+#endif
     CPU_DEBUG_CAP_ENABLE(summary_perf(*this));
 }
 
@@ -1012,13 +1023,29 @@ public:
 
 class UpdateNodesSeq : public IUpdateNodes {
 public:
-    explicit UpdateNodesSeq(std::vector<NodePtr>& executableGraphNodes) : m_executableGraphNodes(executableGraphNodes) {}
+#ifdef CPU_DEBUG_CAPS
+    explicit UpdateNodesSeq(std::vector<NodePtr>& executableGraphNodes,
+            std::unordered_map<std::string, std::array<uint64_t, 5>>& countersMap)
+            : m_executableGraphNodes(executableGraphNodes)
+            , m_countersMap(countersMap) {}
+#else
+    explicit UpdateNodesSeq(std::vector<NodePtr>& executableGraphNodes)
+            : m_executableGraphNodes(executableGraphNodes) {}
+#endif
     void run(size_t stopIndx) override {
         for (; prepareCounter < stopIndx; ++prepareCounter) {
             const auto& node = m_executableGraphNodes[prepareCounter];
             if (node->isDynamicNode()) {
+#ifdef CPU_DEBUG_CAPS
+                node->updateShapes(m_countersMap);
+                auto start = std::chrono::steady_clock::now();
+                node->updateDynamicParams();
+                auto end = std::chrono::steady_clock::now();
+                m_countersMap[node->getTypeStr()][2] += std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count();
+#else
                 node->updateShapes();
                 node->updateDynamicParams();
+#endif
             }
         }
     }
@@ -1026,6 +1053,9 @@ public:
 private:
     size_t prepareCounter = 0;
     std::vector<NodePtr>& m_executableGraphNodes;
+#ifdef CPU_DEBUG_CAPS
+    std::unordered_map<std::string, std::array<uint64_t, 5>>& m_countersMap;
+#endif
 };
 
 #if (OV_THREAD == OV_THREAD_SEQ)
@@ -1041,7 +1071,12 @@ public:
             for (size_t i = node_indx; i < stop_indx; i++) {
                 const auto& node = m_executableGraphNodes[i];
                 if (node->isDynamicNode()) {
+#ifdef CPU_DEBUG_CAPS
+                    std::unordered_map<std::string, std::array<uint64_t, 5>> countersMap;
+                    node->updateShapes(countersMap);
+#else
                     node->updateShapes();
+#endif
                 }
                 m_prepareCounter.store(i, std::memory_order::memory_order_release);
             }
@@ -1211,11 +1246,16 @@ void Graph::InferDynamic(InferRequestBase* request) {
     syncIndsWorkSet.insert(executableGraphNodes.size());
 
     std::unique_ptr<IUpdateNodes> updateNodes{};
+#ifdef CPU_DEBUG_CAPS
+    // use seq way to mearsure the time of update shape
+    updateNodes.reset(new UpdateNodesSeq(executableGraphNodes, countersMap));
+#else
     if (parallel_get_max_threads() > 1) {
         updateNodes.reset(new UpdateNodes(executableGraphNodes));
     } else {
         updateNodes.reset(new UpdateNodesSeq(executableGraphNodes));
     }
+#endif
     size_t inferCounter = 0;
 
     for (auto stopIndx : syncIndsWorkSet) {
@@ -1227,7 +1267,15 @@ void Graph::InferDynamic(InferRequestBase* request) {
 
             if (request)
                 request->ThrowIfCanceled();
+#ifdef CPU_DEBUG_CAPS
+            auto start = std::chrono::steady_clock::now();
             ExecuteNode(node, stream);
+            auto end = std::chrono::steady_clock::now();
+            countersMap[node->getTypeStr()][3] += std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count();
+            countersMap[node->getTypeStr()][4] += 1;
+#else
+            ExecuteNode(node, stream);
+#endif
         }
     }
 }
