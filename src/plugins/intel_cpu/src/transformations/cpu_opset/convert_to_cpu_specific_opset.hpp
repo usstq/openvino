@@ -20,6 +20,8 @@
 #include "common/pass/rnn_sequences_optimization.hpp"
 #include "transformations/common_optimizations/reshape_sequence_fusion.hpp"
 #include "common/pass/ngram_fusion.hpp"
+#include "common/pass/convert_shapeof_to_dimof.hpp"
+
 #include "transformations/defs.hpp"
 
 #include "itt.hpp"
@@ -48,6 +50,7 @@ inline void ConvertToCPUSpecificOpset(std::shared_ptr<ngraph::Function> &nGraphF
     CPU_REGISTER_PASS_COMMON(manager, ov::pass::ConstantFolding);
     CPU_REGISTER_PASS_COMMON(manager, ov::pass::ConvertPrecision, precisions_map {{ ngraph::element::i64, ngraph::element::i32 }});
     CPU_REGISTER_PASS_COMMON(manager, NgramFusion);
+    CPU_REGISTER_PASS_COMMON(manager, ConvertShapeOfToDimOf);
     CPU_REGISTER_PASS_COMMON(manager, ov::pass::Validate);
 
     CPU_REGISTER_PASS_X64(manager, DumpModel, "final_MHA.txt");
