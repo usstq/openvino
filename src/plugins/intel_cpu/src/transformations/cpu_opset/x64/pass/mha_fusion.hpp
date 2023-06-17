@@ -63,8 +63,6 @@ public:
         add_matcher<MHAFloatFusion2>();
         add_matcher<MHAQuantFusion>();
         add_matcher<MHAQuantFusion2>();
-
-        add_matcher<MHADynamicFloatFusion>();
     }
 };
 

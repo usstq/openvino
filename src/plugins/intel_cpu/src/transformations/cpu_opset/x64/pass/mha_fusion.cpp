@@ -10,6 +10,7 @@
 #include <ngraph/pattern/op/wrap_type.hpp>
 #include "transformations/cpu_opset/x64/op/mha.hpp"
 #include "simplify_fakequantize.hpp"
+#include "transformations/cpu_opset/common/op/dimof.hpp"
 
 #include "itt.hpp"
 
@@ -584,232 +585,106 @@ ov::intel_cpu::MHAQuantFusion2::MHAQuantFusion2() {
 using namespace ov::pass::pattern;
 using namespace ov;
 using ov::pass::pattern::op::ValuePredicate;
-
 struct PatternNode;
 
 PatternNode operator*(PatternNode lhs, PatternNode rhs);
 PatternNode operator+(PatternNode lhs, PatternNode rhs);
 
-// Combination of Label & WrapType:
-//      m_dtype : graph_value's element type is match
-//      m_pshape: graph_value's partial shape is compatible
-//          type: graph_value is produced by specific types of nodes
-//   m_predicate: check other aspect
-//
-class PNode : public ov::pass::pattern::op::Pattern {
-    ov::PartialShape m_pshape;
-    element::Type m_dtype = element::undefined;
-    bool check_value_pattern = false;
+struct PatternNode {
+    std::shared_ptr<Node> node;
 
-    std::string comment;
+    operator std::shared_ptr<Node> () {
+        return node;
+    }
 
-public:
-    OPENVINO_RTTI("PNode");
-    std::vector<NodeTypeInfo> m_wrapped_types;
+    template <class... Args>
+    static std::shared_ptr<Node> node_type(const OutputVector& inputs) {
+        return wrap_type<Args...>(inputs);
+    }
 
-    PNode(const OutputVector& inputs = {}, ValuePredicate pred = nullptr) : ov::pass::pattern::op::Pattern(inputs, pred) {}
+    template <class... Args>
+    static std::shared_ptr<Node> node_type(const OutputVector& inputs, const std::function<bool(const Output<Node>&)>& pred) {
+        return wrap_type<Args...>(inputs, [pred](const Output<Node>& output) {
+            auto ret = pred(output);
+            if (!ret)
+                std::cout << "   match failed at : " << output << std::endl;
+            return ret;
+        });
+    }
 
-    void set_value_pattern(const ov::PartialShape& pshape, element::Type dtype = element::undefined) {
-        m_pshape = pshape;
-        m_dtype = dtype;
-        check_value_pattern = true;
+    // any input with given partial shape
+    PatternNode(const ov::PartialShape& pshape, const element::Type & dtype = element::undefined) {
+        node = any_input([pshape, dtype](const Output<Node>& value) {
+            auto ret = pshape.compatible(value.get_partial_shape());
+            if (ret && dtype != element::undefined)
+                ret = (value.get_element_type() == dtype);
+            if (!ret)
+                std::cout << "   match failed at input : " << value << std::endl;
+            return ret;
+        });
+    }
+
+    // implict conversion from std::shared_ptr<Node>
+    PatternNode(const std::shared_ptr<Node>& node) : node(node) {}
+
+    // 1d const tensor or scalar
+    template <typename T, typename std::enable_if<std::is_arithmetic<T>::value, bool>::type = true>
+    static std::shared_ptr<Node> ConstVector(const std::vector<T>& vec, bool must_be_scalar = false) {
+        auto pred = [vec, must_be_scalar](const Output<Node>& value) {
+            auto s1 = as_type_ptr<opset1::Constant>(value.get_node_shared_ptr());
+            auto shape = s1->get_output_shape(0);
+            if (must_be_scalar && shape.size() != 0)
+                return false;
+            if (shape.size() > 1)
+                return false;
+            if (shape_size(shape) != vec.size())
+                return false;
+            std::vector<T> actual = s1->cast_vector<T>();
+            return actual == vec;
+        };
+        return node_type<opset1::Constant>({}, pred);
     }
 
     // constant scalar pattern with v as value, of shape [], [1], [1,1], ...
     template <typename T, typename std::enable_if<std::is_arithmetic<T>::value, bool>::type = true>
-    void set_const_scalar(const T v) {
-        comment = "value=" + std::to_string(v);
-        m_wrapped_types = {opset1::Constant::get_type_info_static()};
-        m_predicate = [v](const Output<Node>& value) {
-            auto s1 = as_type_ptr<opset1::Constant>(value.get_node_shared_ptr());
-            auto shape = s1->get_output_shape(0);
-            if (shape_size(shape) > 1)
-                return false;
-            std::vector<T> output_vector = s1->cast_vector<T>();
-            return (v == output_vector[0]);
-        };
+    static std::shared_ptr<Node> ConstScalar(const T v) {
+        return ConstVector(std::vector<T>{v}, true);
     }
 
-    bool verbose = true;
-
-    bool match_value(Matcher* matcher,
-                     const Output<Node>& pattern_value,
-                     const Output<Node>& graph_value) override {
-        if (check_value_pattern) {
-            bool pshape_ok = m_pshape.compatible(graph_value.get_partial_shape());
-            bool dtype_ok = (m_dtype == element::undefined) || (m_dtype == graph_value.get_element_type());
-            if ((!pshape_ok) || (!dtype_ok)) {
-                if (verbose)
-                    std::cout << "**** mismatch at : " << graph_value << " with v" << m_var_id << std::endl;
-                return false;
-            }
-        }
-
-        if (m_wrapped_types.size()) {
-            if (!std::any_of(m_wrapped_types.begin(), m_wrapped_types.end(), [&](const NodeTypeInfo& type_info) {
-                    return graph_value.get_node_shared_ptr()->get_type_info().is_castable(type_info);
-                })) {
-                if (verbose)
-                    std::cout << "**** mismatch at : " << graph_value << " with v" << m_var_id << std::endl;
-                return false;
-            }
-        }
-
-        if (m_predicate) {
-            if (!m_predicate(graph_value)) {
-                if (verbose)
-                    std::cout << "**** predicate failed at : " << graph_value << " with v" << m_var_id << std::endl;
-                return false;
-            }
-        }
-
-        auto& pattern_map = matcher->get_pattern_value_map();
-        pattern_map[shared_from_this()] = graph_value;
-        matcher->add_node(graph_value);
-
-        bool ret = (get_input_size() == 0
-                    ? true
-                    : matcher->match_arguments(pattern_value.get_node(), graph_value.get_node_shared_ptr()));
-        if (verbose)
-            std::cout << "   " << ret << "      match : " << graph_value << " with v" << m_var_id << std::endl;
-
-        return ret;
-    }
-    friend std::ostream& operator<<(std::ostream& os, const PNode& dt);
-
-    int m_var_id = -1;
-
-    void dump_all(std::ostream& os) {
-        int cur_var_id = 0;
-        clear_var_id();
-        os << "pattern {" << std::endl;
-        _dump_all_impl(os, cur_var_id);
-        os << "}" << std::endl;
-    }
-
-    void clear_var_id() {
-        for (size_t i = 0; i < this->get_input_size(); i++) {
-            auto parent_node = this->get_input_node_shared_ptr(i);
-            auto port = this->input_value(i).get_index();
-            auto parent_pnode = std::dynamic_pointer_cast<PNode>(parent_node);
-            parent_pnode->clear_var_id();
-        }
-        m_var_id = -1;
-    }
-
-    void _dump_all_impl(std::ostream& os, int & cur_var_id) {
-        // start from this, recursivedly dump all input PNode
-        for (size_t i = 0; i < this->get_input_size(); i++) {
-            auto parent_node = this->get_input_node_shared_ptr(i);
-            auto port = this->input_value(i).get_index();
-            auto parent_pnode = std::dynamic_pointer_cast<PNode>(parent_node);
-            parent_pnode->_dump_all_impl(os, cur_var_id);
-        }
-        const char * sep = "";
-
-        // prevent redundant dump
-        if (m_var_id >=0) return;
-
-        // take one id for this, increase id for next
-        m_var_id = cur_var_id++;
-
-        os << "\t";
-        if (check_value_pattern) {
-            if (m_dtype != element::undefined)
-                os << m_dtype << "_";
-            os << m_pshape << " ";
-        }
-        os << "v" << m_var_id << " = ";
-        // dump current node
-        if (m_wrapped_types.size()) {
-            sep = "";
-            for (auto & wt : m_wrapped_types) {
-                os << sep << wt.get_version() + "::" + wt.name;
-                sep = " or ";
-            }
-        } else {
-            os << "AnyType";
-        }
-        os << "(";
-        sep = "";
-        for (size_t i = 0; i < this->get_input_size(); i++) {
-            auto parent_node = this->get_input_node_shared_ptr(i);
-            auto port = this->input_value(i).get_index();
-            auto parent_pnode = std::dynamic_pointer_cast<PNode>(parent_node);
-            os << sep << "v" << parent_pnode->m_var_id;
-            if (port > 0) os << "[" << port << "]";
-            sep = ",";
-        }
-        os << ")   # " << comment << std::endl;
-    }
-};
-
-std::ostream& operator<<(std::ostream& os, const PNode& p) {
-    os << "Pattern{";
-    if (p.m_wrapped_types.size()) {
-        for (auto & wt : p.m_wrapped_types)
-            os << wt.get_version() + "::" + wt.name << ",";
-    }
-    if (p.check_value_pattern) {
-        os << " " << p.m_pshape << " " << p.m_dtype;
-    }
-    if (p.m_predicate)
-        os << " +predicate";
-    os << "}";
-    return os;
-}
-
-struct PatternNode {
-    std::shared_ptr<PNode> node;
-
-    PatternNode(const std::shared_ptr<PNode>& node) : node(node) {}
-
-    // any input with given partial shape
-    PatternNode(const ov::PartialShape& pshape, const element::Type& dtype = element::undefined) {
-        node = std::make_shared<PNode>();
-        node->set_value_pattern(pshape, dtype);
-    }
     PatternNode(const int v) {
-        node = std::make_shared<PNode>();
-        node->set_const_scalar(v);
+        node = ConstScalar(v);
     }
+
     PatternNode(const float v) {
-        node = std::make_shared<PNode>();
-        node->set_const_scalar(v);
+        node = ConstScalar(v);
     }
 
-    template <typename... OPs>
-    static std::shared_ptr<PNode> WrapType(const OutputVector& input_values = {}, ValuePredicate pred = nullptr) {
-        auto node = std::make_shared<PNode>(input_values, pred);
-        node->m_wrapped_types = {OPs::get_type_info_static()...};
-        node->set_output_type(0, element::Type_t::dynamic, PartialShape::dynamic());
-        return node;
+    PatternNode ShapeOf() const {
+        return node_type<opset1::ShapeOf>({node});
     }
 
-    PatternNode shape() const {
-        return WrapType<opset1::ShapeOf>({node});
-    }
-
-    // 1D indexing mapped to Gather from axis 0, node is producer of shape vector
-    PatternNode operator[](int i) const {
-        return WrapType<opset8::Gather>({node, PatternNode(i).node, PatternNode(0).node});
+    PatternNode DimOf(int axis, bool output_scalar) const {
+        return node_type<ov::intel_cpu::DimOfNode>({node}, [axis, output_scalar](const Output<Node>& value) {
+            auto s1 = as_type_ptr<ov::intel_cpu::DimOfNode>(value.get_node_shared_ptr());
+            return s1->get_axis() == axis && s1->get_output_scalar() == output_scalar;
+        });
     }
 
     PatternNode Convert(const element::Type& dst_type) const {
-        return WrapType<opset1::Convert>({node->output(0)}, [dst_type](const Output<Node>& value) {
+        return node_type<opset1::Convert>({node->output(0)}, [dst_type](const Output<Node>& value) {
             auto s1 = as_type_ptr<opset1::Convert>(value.get_node_shared_ptr());
             return s1->get_convert_element_type() == dst_type;
         });
     }
 
     PatternNode Softmax(int axis) const {
-        return WrapType<opset1::Softmax, opset8::Softmax>({node->output(0)}, [axis](const Output<Node>& value) {
+        return node_type<opset1::Softmax, opset8::Softmax>({node->output(0)}, [axis](const Output<Node>& value) {
             auto s1 = as_type_ptr<opset1::Softmax>(value.get_node_shared_ptr());
             if (s1)
-                return s1->get_axis() == static_cast<size_t>(axis);
+                return s1->get_axis() == axis;
             auto s8 = as_type_ptr<opset8::Softmax>(value.get_node_shared_ptr());
             if (s8)
-                return s8->get_axis() == static_cast<int64_t>(axis);
+                return s8->get_axis() == axis;
             return false;
         });
     }
@@ -818,18 +693,18 @@ struct PatternNode {
                       const PatternNode& stop,
                       const PatternNode& step,
                       const PatternNode& axis) {
-        return WrapType<opset8::Slice>({node, start.node, stop.node, step.node, axis.node});
+        return node_type<opset8::Slice>({start.node, stop.node, step.node, axis.node});
     }
 
     PatternNode Select(const PatternNode& n_then, const PatternNode& n_else) {
-        return WrapType<opset1::Select>({node, n_then.node, n_else.node});
+        return node_type<opset1::Select>({node, n_then.node, n_else.node});
     }
 
     // lower triangular part of a matrix
     template <element::Type_t ET>
     static PatternNode tril() {
         using T = typename element_type_traits<ET>::value_type;
-        return WrapType<opset1::Constant>({}, [](const Output<Node>& value) {
+        return node_type<opset1::Constant>({}, [](const Output<Node>& value) {
             auto s1 = as_type_ptr<opset1::Constant>(value.get_node_shared_ptr());
             if (s1->get_output_element_type(0) != element::u8)
                 return false;
@@ -854,34 +729,180 @@ struct PatternNode {
 };
 
 PatternNode operator*(PatternNode lhs, PatternNode rhs) {
-    return PatternNode::WrapType<opset1::Multiply>({lhs.node, rhs.node});
+    return PatternNode::node_type<opset1::Multiply>({lhs.node, rhs.node});
 }
 
 PatternNode operator+(PatternNode lhs, PatternNode rhs) {
-    return PatternNode::WrapType<opset1::Add>({lhs.node, rhs.node});
+    return PatternNode::node_type<opset1::Add>({lhs.node, rhs.node});
 }
 
+/*
+	f32_[?,8,?,64]  present.0.key = opset1::Concat(past_key_values.0.key,/gpt_neox/layers.0/attention/Concat_10) 	 attrs: axis=-2
+	f32_[?,8,?,64]  query = opset1::Concat(/gpt_neox/layers.0/attention/Add_1,/gpt_neox/layers.0/attention/Slice_4) 	 attrs: axis=-1
+
+==============================================================================
+    i32_[]  query_batch_size = cpu_plugin_opset::DimOf(query) 	 attrs: axis=0 output_scalar=1
+	i32_[]  batch_size_heads = opset1::Multiply(query_batch_size,i32(8)) 	 attrs: auto_broadcast=numpy
+	i32_[1]  batch_size_heads_1d = opset1::Reshape(batch_size_heads,i32([1])) 	 attrs: special_zero=0
+	i32_[1]  query_length = cpu_plugin_opset::DimOf(query) 	 attrs: axis=2 output_scalar=0
+	i32_[3]  query_shape3d = opset1::Concat(batch_size_heads_1d,query_length,i32([64])) 	 attrs: axis=0
+	f32_[?,?,?]  query3d = opset1::Reshape(query,query_shape3d) 	 attrs: special_zero=1
+	f32_[?,8,?,64]  key_div_sqrtd = cpu_plugin_opset::PowerStatic(present.0.key) 	 attrs: scale=0.125000 power=1.000000 shift=0.000000 out-type=f32
+	i32_[3]  key_shape3d = opset1::Concat(batch_size_heads_1d,key_length,i32([64])) 	 attrs: axis=0
+	f32_[?,?,?]  key3d = opset1::Reshape(key_div_sqrtd,key_shape3d) 	 attrs: special_zero=1
+==============================================================================
+	f32_[?,?,?]  attn_scores2 = opset1::MatMul(query3d,key3d) 	 attrs: transpose_a=0 transpose_b=1
+==============================================================================
+	i32_[3]  ShapeOf_24954 = opset1::ShapeOf(attn_scores2) 	 attrs: type_relax=1 input_data_types=[] output_data_types=[i32]
+	i32_[1]  query_length = cpu_plugin_opset::DimOf(query) 	 attrs: axis=2 output_scalar=0
+	i32_[3]  attn_scores_shape3d = opset1::Concat(batch_size_heads_1d,query_length,key_length) 	 attrs: axis=0
+	i32_[3]  Maximum_24821 = opset1::Maximum(i32([1,1,1]),attn_scores_shape3d) 	 attrs: auto_broadcast=numpy
+	i32_[3]  Maximum_24955 = opset1::Maximum(ShapeOf_24954,Maximum_24821) 	 attrs: auto_broadcast=numpy
+	f32_[?,?,?]  attn_scores1 = opset1::Broadcast(attn_scores2,Maximum_24955,u8(0)) 	 attrs: mode=numpy
+
+	i32_[1]  query_batch_size = cpu_plugin_opset::DimOf(query) 	 attrs: axis=0 output_scalar=0
+	i32_[1]  query_length = cpu_plugin_opset::DimOf(query) 	 attrs: axis=2 output_scalar=0
+	i32_[4]  attn_scores_shape4d = opset1::Concat(  query_batch_size,
+                                                    i32([8]),
+                                                    query_length,
+                                                    key_length) 	 attrs: axis=0
+	f32_[?,?,?,?]  attn_scores0 = opset1::Reshape(  attn_scores1,
+                                                    attn_scores_shape4d) 	 attrs: special_zero=1
+
+==============================================================================
+	i32_[1]  key_length = cpu_plugin_opset::DimOf(present.0.key) 	 attrs: axis=-2 output_scalar=0
+    i32_[]  key_length_scalar = opset1::Squeeze(key_length,i32([0])) 	 attrs:
+	i32_[]  query_length = cpu_plugin_opset::DimOf(query) 	 attrs: axis=2 output_scalar=1
+	i32_[]  Multiply_59211 = opset1::Multiply(query_length,i32(-1)) 	 attrs: auto_broadcast=numpy
+	i32_[]  /gpt_neox/layers.0/attention/Sub = opset1::Add(key_length_scalar,Multiply_59211) 	 attrs: auto_broadcast=numpy
+	i32_[1]  kL_sub_qL = opset1::Reshape(/gpt_neox/layers.0/attention/Sub,i32([1])) 	 attrs: special_zero=0
+	i32_[1]  key_length = cpu_plugin_opset::DimOf(present.0.key) 	 attrs: axis=-2 output_scalar=0
+	u8_[1,1,..2048,2048]  bias_slice1 = opset8::Slice(
+                                                gpt_neox.layers.1.attention.bias,
+                                                kL_sub_qL,
+                                                key_length,
+                                                i32([1]),
+                                                i32([2])) 	 attrs:
+	u8_[1,1,..2048,..2048]  causal_mask = opset8::Slice(
+                                                bias_slice1,
+                                                i32([0]),
+                                                key_length,
+                                                i32([1]),
+                                                i32([3])) 	 attrs:
+==============================================================================
+	f32_[?,?,?,?]  after_causal_mask = opset1::Select(  causal_mask,
+                                                        attn_scores0,
+                                                        f32(-3.40282e+38)) 	 attrs: type_relax=1 input_data_types=[boolean] output_data_types=[] auto_broadcast=numpy
+
+
+==============================================================================
+	i32_[1]  batch_size = cpu_plugin_opset::DimOf(input_ids) 	 attrs: axis=0 output_scalar=0
+	i32_[2]  /gpt_neox/Concat_1 = opset1::Concat(batch_size,i32([-1])) 	 attrs: axis=0
+	i32_[?,?]  /gpt_neox/Reshape_1 = opset1::Reshape(attention_mask,/gpt_neox/Concat_1) 	 attrs: special_zero=1
+	i32_[?,1,1,?]  /gpt_neox/Unsqueeze_4 = opset1::Unsqueeze(/gpt_neox/Reshape_1,i32([1,2])) 	 attrs:
+	f32_[?,1,1,?]  /gpt_neox/Cast_2 = opset1::Convert(/gpt_neox/Unsqueeze_4) 	 attrs: destination_type=f32
+	f32_[?,1,1,?]  Multiply_42419 = cpu_plugin_opset::PowerStatic(/gpt_neox/Cast_2) 	 attrs: scale=340282346638528859811704183484516925440.000000 power=1.000000 shift=0.000000 out-type=f32
+	f32_[?,1,1,?]  /gpt_neox/Mul = cpu_plugin_opset::PowerStatic(Multiply_42419) 	 attrs: scale=1.000000 power=1.000000 shift=-340282346638528859811704183484516925440.000000 out-type=f32
+==============================================================================
+
+	f32_[?,?,?,?]  after_attn_mask = opset1::Add(
+                                        after_causal_mask,
+                                        /gpt_neox/Mul) 	 attrs: auto_broadcast=numpy
+	f32_[?,?,?,?]  /gpt_neox/layers.0/attention/Softmax = opset1::Softmax(after_attn_mask) 	 attrs: axis=3
+==============================================================================
+*/
 ov::intel_cpu::MHADynamicFloatFusion::MHADynamicFloatFusion() {
     MATCHER_SCOPE(MHADynamicFloatFusion);
-    auto dyn = ov::Dimension::dynamic();
-    auto B = ov::Dimension::dynamic();
-    auto H = ov::Dimension::dynamic();
+#if 0
+    auto B = ov::Dimension::dynamic();  // batch
+    auto H = ov::Dimension::dynamic();  // number of heads
     auto qL = ov::Dimension::dynamic();
     auto kL = ov::Dimension::dynamic();
-
-    PatternNode src(ov::PartialShape{B, H, qL, kL});
-    PatternNode att_mask_in(ov::PartialShape{B, 1, 1, kL}, element::i32);
-
+    auto S = ov::Dimension::dynamic();  // head size
     auto float_max = std::numeric_limits<float>::max();
     auto float_lowest = std::numeric_limits<float>::lowest();
 
-    PatternNode key_length(ov::PartialShape{1});
-    PatternNode start(ov::PartialShape{1});
+    //PatternNode score(ov::PartialShape{B, H, qL, kL});                     //
+    PatternNode att_mask_in(ov::PartialShape{B, 1, 1, kL}, element::i32);  // from paramter
+    PatternNode present_key(ov::PartialShape{B, 8, kL, S}, element::f32);  // conact from past_key & cur
+    PatternNode query(ov::PartialShape{B, H, qL, S}, element::f32);        // query
 
     auto tril_bias = PatternNode::tril<element::Type_t::u8>();
-    auto causal_mask = tril_bias.Slice(start, key_length, 1, 2).Slice(0, key_length, 1, 3);
+    auto key_length = present_key.DimOf(-2, false);
+    auto kL_minus_qL = (key_length.DimOf(0) + (query.ShapeOf() * -1)[2]).Reshape(1);
+    auto causal_mask = tril_bias.Slice(kL_minus_qL, key_length, 1, 2).Slice(0, key_length, 1, 3);
 
-    auto masked_score = causal_mask.Select(src, float_lowest) + (att_mask_in.Convert(element::f32) * float_max + float_lowest);
+    //
+    // auto query_reshaped = query.Reshape();
+
+    /*
+    f32_[?,8,?,64]  Multiply_52958 = opset1::Multiply(present.5.key,Constant_52957) 	 attrs: auto_broadcast=numpy
+
+    // rotery embedding
+        f32_[?,8,?,64]  /gpt_neox/layers.5/attention/Concat_9 = opset1::Concat(
+                /gpt_neox/layers.5/attention/Add_1,
+                /gpt_neox/layers.5/attention/Slice_4) 	 attrs: axis=-1
+
+    //query_shape
+    i32_[4]  /gpt_neox/layers.5/attention/Shape_14 = opset1::ShapeOf(/gpt_neox/layers.5/attention/Concat_9) 	 attrs:
+    type_relax=1 input_data_types=[] output_data_types=[i32]
+
+        i32_[1]  /gpt_neox/layers.5/attention/Gather_9 = opset8::Gather(
+                    /gpt_neox/layers.5/attention/Shape_14, 0, 0) 	 attrs: batch_dims=0
+        i32_[]  /gpt_neox/layers.5/attention/Gather_10 = opset1::Constant(8) 	 attrs: element_type=i32 shape=[]
+    value=?
+
+        i32_[]  /gpt_neox/layers.5/attention/Mul_4 = opset1::Multiply(
+                /gpt_neox/layers.5/attention/Gather_9, batch_size
+                /gpt_neox/layers.5/attention/Gather_10 num_attention_heads
+                ) 	 attrs: auto_broadcast=numpy
+
+        i32_[1]  /gpt_neox/layers.5/attention/Unsqueeze_20 = opset1::Reshape(
+                /gpt_neox/layers.5/attention/Mul_4,
+                [1]) 	 attrs: special_zero=0
+    i32_[3]  /gpt_neox/layers.5/attention/Concat_14 = opset1::Concat(
+                    /gpt_neox/layers.5/attention/Unsqueeze_20, batch_size * num_attention_heads
+                    /gpt_neox/layers.5/attention/Slice_11,     key_length
+                    [64]) 	 attrs: axis=0
+
+         f32_[?,?,64]  /gpt_neox/layers.5/attention/Reshape_2 = opset1::Reshape(
+                                                              Multiply_52958,
+                                          /gpt_neox/layers.5/attention/Concat_14) 	 attrs: special_zero=1    //
+
+
+        query = query.view(batch_size * num_attention_heads, query_length, attn_head_size)
+        key = key.view(batch_size * num_attention_heads, key_length, attn_head_size)
+
+
+
+    i32_[3]  /gpt_neox/layers.5/attention/Concat_13 = opset1::Concat(
+                    /gpt_neox/layers.5/attention/Unsqueeze_17,
+                    /gpt_neox/layers.5/attention/Gather_11,
+                    64) 	 attrs: axis=0
+        f32_[?,?,64]  /gpt_neox/layers.5/attention/Reshape_1 = opset1::Reshape(
+                    /gpt_neox/layers.5/attention/Concat_9,
+                    /gpt_neox/layers.5/attention/Concat_13) 	 attrs: special_zero=1
+    // Q*K'
+        f32_[?,?,?]  /gpt_neox/layers.5/attention/Mul_5 = opset1::MatMul(
+                    /gpt_neox/layers.5/attention/Reshape_1,
+                    /gpt_neox/layers.5/attention/Reshape_2) 	 attrs: transpose_a=0 transpose_b=1
+    */
+    //
+    auto query_shape = query.ShapeOf();
+    auto query_length = query_shape[2];
+
+    auto BH = (query_shape[0] * 8).Reshape(1); // batch_size * num_head
+
+    auto key_3d = (present_key * 0.125f)._view({BH, key_length, PatternNode(64)});
+    auto query_3d = query._view({BH, query_length, PatternNode(64)});
+
+    auto score = PatternNode::MatMul(query_3d, key_3d, false, true);
+
+    //attn_scores.ShapeOf()
+
+    // apply causal & attention mask to score
+    auto masked_score = PatternNode::Select(causal_mask, score, float_lowest) +
+                        (att_mask_in.Convert(element::f32) * float_max + float_lowest);
     auto softmax = masked_score.Softmax(3);
 
     std::cout << "MHADynamicFloatFusion" << std::endl;
@@ -889,7 +910,7 @@ ov::intel_cpu::MHADynamicFloatFusion::MHADynamicFloatFusion() {
 
     matcher_pass_callback callback = [=](Matcher& m) {
         auto& pattern_to_output = m.get_pattern_value_map();
-        auto node_src = pattern_to_output.at(src.node).get_node_shared_ptr();
+        auto node_src = pattern_to_output.at(score.node).get_node_shared_ptr();
         auto node_softmax = pattern_to_output.at(softmax.node).get_node_shared_ptr();
 
         std::cout << "MHADynamicFloatFusion::callback" << std::endl;
@@ -900,4 +921,5 @@ ov::intel_cpu::MHADynamicFloatFusion::MHADynamicFloatFusion() {
 
     auto m = std::make_shared<Matcher>(softmax.node, matcher_name);
     this->register_matcher(m, callback);
+#endif
 }
