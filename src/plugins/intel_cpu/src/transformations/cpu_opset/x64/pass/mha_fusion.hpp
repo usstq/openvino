@@ -56,11 +56,19 @@ public:
     EliminateBcastAfterMatmul();
 };
 
+// recognize different CausalMask operations and fuse them into 1
+class CausalMaskFusion: public ngraph::pass::MatcherPass {
+public:
+    OPENVINO_RTTI("CausalMaskFusion", "0");
+    CausalMaskFusion();
+};
+
 class MHADynamicFloatFusion: public ngraph::pass::GraphRewrite {
 public:
     OPENVINO_RTTI("MHADynamicFloatFusion", "0");
     MHADynamicFloatFusion() {
         add_matcher<EliminateBcastAfterMatmul>();
+        add_matcher<CausalMaskFusion>();
     }
 };
 

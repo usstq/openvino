@@ -591,6 +591,18 @@ struct PatternNode;
 PatternNode operator*(PatternNode lhs, PatternNode rhs);
 PatternNode operator+(PatternNode lhs, PatternNode rhs);
 
+static bool MATCHER_VERBOSE = std::getenv("MATCHER_VERBOSE") ? atoi(std::getenv("MATCHER_VERBOSE")) : false;
+
+template<typename ... Args>
+void MatcherVerbose(Args&& ... args) {
+    if (!MATCHER_VERBOSE) return;
+    std::stringstream ss;
+    int dummy[] = {(ss << std::forward<Args>(args) << " ", 0)...};
+    (void)(dummy);
+    ss << std::endl;
+    std::cout << ss.str();
+}
+
 struct PatternNode {
     std::shared_ptr<Node> node;
 
@@ -600,7 +612,10 @@ struct PatternNode {
 
     template <class... Args>
     static std::shared_ptr<Node> node_type(const OutputVector& inputs) {
-        return wrap_type<Args...>(inputs);
+        return wrap_type<Args...>(inputs, [](const Output<Node>& output) {
+            MatcherVerbose("\tmatched : ", output);
+            return true;
+        });
     }
 
     template <class... Args>
@@ -608,8 +623,7 @@ struct PatternNode {
                                            const std::function<bool(const Output<Node>&)>& pred) {
         return wrap_type<Args...>(inputs, [pred](const Output<Node>& output) {
             auto ret = pred(output);
-            if (!ret)
-                std::cout << "   match failed at : " << output << std::endl;
+            MatcherVerbose(ret ? "\tmatched : " : "******* failed", output);
             return ret;
         });
     }
@@ -624,8 +638,7 @@ struct PatternNode {
             auto ret = pshape.compatible(value.get_partial_shape());
             if (ret && dtype != element::undefined)
                 ret = (value.get_element_type() == dtype);
-            if (!ret)
-                std::cout << "   match failed at input : " << value << std::endl;
+            MatcherVerbose(ret ? "\tmatched : " : "******* failed", value);
             return ret;
         });
     }
@@ -635,8 +648,7 @@ struct PatternNode {
             auto ret = rank.compatible(value.get_partial_shape().rank());
             if (ret && dtype != element::undefined)
                 ret = (value.get_element_type() == dtype);
-            if (!ret)
-                std::cout << "   match failed at input : " << value << std::endl;
+            MatcherVerbose(ret ? "\tmatched : " : "******* failed", value);
             return ret;
         });
     }
@@ -669,11 +681,11 @@ struct PatternNode {
     }
 
     PatternNode(const int v) {
-        node = ConstScalar(v);
+        node = ConstVector(std::vector<int>{v});
     }
 
     PatternNode(const float v) {
-        node = ConstScalar(v);
+        node = ConstVector(std::vector<float>{v});
     }
 
     PatternNode(const std::vector<int>& vec) {
@@ -714,7 +726,7 @@ struct PatternNode {
                       const PatternNode& stop,
                       const PatternNode& step,
                       const PatternNode& axis) {
-        return node_type<opset8::Slice>({start.node, stop.node, step.node, axis.node});
+        return node_type<opset8::Slice>({node, start.node, stop.node, step.node, axis.node});
     }
 
     static inline PatternNode Select(const PatternNode& cond, const PatternNode& n_then, const PatternNode& n_else) {
@@ -822,12 +834,66 @@ ov::intel_cpu::EliminateBcastAfterMatmul::EliminateBcastAfterMatmul() {
         auto& pattern_to_output = m.get_pattern_value_map();
         auto out_matmul = pattern_to_output.at(c3d.node);
         // rmeove bcast
-        std::cout << "EliminateBcastAfterMatmul::callback" << m.get_match_value() << std::endl;
+        // std::cout << "EliminateBcastAfterMatmul::callback" << m.get_match_value() << std::endl;
         ngraph::replace_node(m.get_match_root(), {out_matmul});
         return true;
     };
 
     auto m = std::make_shared<Matcher>(cbcast.node, matcher_name);
+    this->register_matcher(m, callback);
+}
+/*
+
+    i32_[1]  query_length = cpu_plugin_opset::DimOf(query) 	 attrs: axis=2 output_scalar=0
+    i32_[1]  batch_size = cpu_plugin_opset::DimOf(query) 	 attrs: axis=0 output_scalar=0
+    i32_[1]  present.1.key.shape[-2] = cpu_plugin_opset::DimOf(present.1.key) 	 attrs: axis=-2 output_scalar=0
+	i32_[1]  present.1.key.shape[[-2]] = cpu_plugin_opset::DimOf(present.1.key) 	 attrs: axis=-2 output_scalar=0
+
+	i32_[1]  Multiply_59203 = opset1::Multiply(query_length,i32(-1)) 	 attrs: auto_broadcast=numpy
+	i32_[1]  kL_sub_qL = opset1::Add(present.1.key.shape[-2],Multiply_59203) 	 attrs: auto_broadcast=numpy
+	u8_[1,1,..2048,2048]  /gpt_neox/layers.1/attention/Slice_12 = opset8::Slice(
+                gpt_neox.layers.1.attention.bias,
+                kL_sub_qL,
+                present.1.key.shape[[-2]],
+                i32([1]),
+                i32([2])) 	 attrs:
+	u8_[1,1,..2048,..2048]  /gpt_neox/layers.1/attention/Slice_13 = opset8::Slice(/gpt_neox/layers.1/attention/Slice_12,i32([0]),present.1.key.shape[[-2]],i32([1]),i32([3])) 	 attrs:
+	i32_[1]  BH = opset1::Multiply(batch_size,i32(8)) 	 attrs: auto_broadcast=numpy
+
+
+*/
+ov::intel_cpu::CausalMaskFusion::CausalMaskFusion() {
+    MATCHER_SCOPE(CausalMaskFusion);
+    auto B = ov::Dimension::dynamic();  // batch
+    auto H = ov::Dimension::dynamic();  // number of heads
+    auto qL = ov::Dimension::dynamic();
+    auto kL = ov::Dimension::dynamic();
+    auto S = ov::Dimension::dynamic();  // head size
+    PatternNode attn_scores_4d(ov::Rank(4), element::f32);  // from paramter
+    PatternNode present_key(ov::PartialShape{B, H, kL, S}, element::f32);  // conact from past_key & cur
+    PatternNode query(ov::PartialShape{B, H, qL, S}, element::f32);        // query
+
+    auto query_length = query.DimOf(2, false);
+    auto key_length = present_key.DimOf(-2, false);
+
+    auto gptneox_version = [&]() {
+        auto tril_bias = PatternNode::tril<element::Type_t::u8>();
+        auto kL_minus_qL = key_length + (query_length * PatternNode(-1));
+        auto causal_mask = tril_bias.Slice(kL_minus_qL, key_length, 1, 2).Slice(0, key_length, 1, 3);
+        auto select = PatternNode::Select(causal_mask, attn_scores_4d, std::numeric_limits<float>::lowest());
+        return select;
+    };
+
+    auto gptneox_causal_mask = gptneox_version();
+
+    matcher_pass_callback callback = [=](Matcher& m) {
+        auto& pattern_to_output = m.get_pattern_value_map();
+        //auto node_src = pattern_to_output.at(select.node).get_node_shared_ptr();
+        std::cout << "CausalMaskFusion::callback " << m.get_match_value() << std::endl;
+        return false;
+    };
+
+    auto m = std::make_shared<Matcher>(gptneox_causal_mask.node, matcher_name);
     this->register_matcher(m, callback);
 }
 
