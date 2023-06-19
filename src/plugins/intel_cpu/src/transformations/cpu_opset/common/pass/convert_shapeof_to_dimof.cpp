@@ -286,7 +286,12 @@ ov::intel_cpu::RemoveReshapeTailOfDimOfSubgraph::RemoveReshapeTailOfDimOfSubgrap
         bool found = collect_scalar_subgraph(all_dimof, all_nodes, last_output, true);
 
         for (auto& dimof : all_dimof) {
-            dimof->set_output_scalar(false);
+            if (dimof->get_output_scalar()) {
+                dimof->set_output_scalar(false);
+                // these dimOf nodes has updated attributes, following matcher-pass EliminateDuplicateDimOf
+                // may hit it after the change, thus register them for re-check
+                register_new_node(dimof);
+            }
         }
 
         for (auto& node_in_subgraph : all_nodes) {
@@ -319,31 +324,23 @@ ov::intel_cpu::EliminateDuplicateDimOf::EliminateDuplicateDimOf() {
         if (this_axis < 0)
             this_axis += rank;
 
-        std::shared_ptr<ov::Node> replacement_dimof;
+        bool replaced = false;
         for (auto& other_input : this_dimof->input_value(0).get_target_inputs()) {
             auto other_dimof = dynamic_cast<ov::intel_cpu::DimOfNode*>(other_input.get_node());
             if (!other_dimof || other_dimof == this_dimof.get())
                 continue;
             if (this_output_scalar != other_dimof->get_output_scalar())
                 continue;
-
             auto other_axis = other_dimof->get_axis();
             if (other_axis < 0)
                 other_axis += rank;
-
             if (this_axis != other_axis)
                 continue;
-
-            replacement_dimof = other_dimof->shared_from_this();
-            break;
+            ngraph::replace_node(other_dimof->shared_from_this(), this_dimof);
+            replaced = true;
         }
 
-        if (replacement_dimof) {
-            ngraph::replace_node(this_dimof, replacement_dimof);
-            return true;
-        }
-
-        return false;
+        return replaced;
     };
 
     auto m = std::make_shared<ngraph::pattern::Matcher>(dimof, matcher_name);
