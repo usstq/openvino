@@ -439,7 +439,31 @@ std::ostream & operator<<(std::ostream & os, const PrintableModel& model) {
         os << "\t" << tag << op->get_friendly_name() << ",\n" << prefix;
     }
     os << ") {\n";
+
+    // collect all scalar & short 1D vectors for literal-style display
+    std::map<std::shared_ptr<ov::Node>, std::string> literal_consts;
     for (auto op : f.get_ordered_ops()) {
+        const auto & type_info = op->get_type_info();
+        if (auto constop = std::dynamic_pointer_cast<op::v0::Constant>(op)) {
+            auto shape = constop->get_shape();
+            if (shape.size() > 1) continue;
+            auto is_scalar = shape.size() == 0;
+            if (shape_size(constop->get_shape()) > 8) continue;
+            std::stringstream ss;
+            sep = "";
+            ss << op->get_output_element_type(0) << "(" << (!is_scalar? "[" : "");
+            for (auto v : constop->get_value_strings()) {
+                ss << sep << v;
+                sep = ",";
+            }
+            ss << (!is_scalar? "]" : "") << ")";
+            literal_consts[op] = ss.str();
+        }
+    }
+
+    for (auto op : f.get_ordered_ops()) {
+        if (literal_consts.count(op)) continue;
+
         const auto & type_info = op->get_type_info();
         auto type = std::string(type_info.get_version()) + "::" + type_info.name;
         auto name = op->get_friendly_name();
@@ -462,7 +486,10 @@ std::ostream & operator<<(std::ostream & os, const PrintableModel& model) {
                 auto out_port = vout.get_index();
                 os << sep << tag << iop->get_friendly_name() << "[" << out_port << "]";
             } else {
-                os << sep << tag << iop->get_friendly_name();
+                if (literal_consts.count(iop))
+                    os << sep << tag << literal_consts[iop];
+                else
+                    os << sep << tag << iop->get_friendly_name();
             }
             sep = ",";
         }
@@ -590,7 +617,7 @@ bool DumpModel::run_on_model(const std::shared_ptr<ov::Model>& model) {
     ofs << PrintableModel(*model);
     ofs.close();
 
-    ov::serialize(model, file_name+".xml");
+    ov::serialize(model, file_name+".xml", "/dev/null");
     std::cout << "Model dumpped into " << file_name << " and " << file_name << ".xml" << std::endl;
 
     return false;
