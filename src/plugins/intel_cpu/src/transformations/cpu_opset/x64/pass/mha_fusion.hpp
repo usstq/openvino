@@ -49,10 +49,19 @@ public:
     MHAQuantFusion2();
 };
 
-class MHADynamicFloatFusion: public MHAFusionBase {
+// some MHA pattern using torch.baddbmm introduces redundant broadcast
+class EliminateBcastAfterMatmul: public ngraph::pass::MatcherPass {
+public:
+    OPENVINO_RTTI("EliminateBcastAfterMatmul", "0");
+    EliminateBcastAfterMatmul();
+};
+
+class MHADynamicFloatFusion: public ngraph::pass::GraphRewrite {
 public:
     OPENVINO_RTTI("MHADynamicFloatFusion", "0");
-    MHADynamicFloatFusion();
+    MHADynamicFloatFusion() {
+        add_matcher<EliminateBcastAfterMatmul>();
+    }
 };
 
 class MHAFusion : public ngraph::pass::GraphRewrite {

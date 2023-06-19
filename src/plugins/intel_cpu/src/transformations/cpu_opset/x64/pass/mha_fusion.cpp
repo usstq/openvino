@@ -581,6 +581,7 @@ ov::intel_cpu::MHAQuantFusion2::MHAQuantFusion2() {
 
 #include <memory>
 #include <openvino/opsets/opset8.hpp>
+
 #include "ngraph/pattern/op/pattern.hpp"
 using namespace ov::pass::pattern;
 using namespace ov;
@@ -593,7 +594,7 @@ PatternNode operator+(PatternNode lhs, PatternNode rhs);
 struct PatternNode {
     std::shared_ptr<Node> node;
 
-    operator std::shared_ptr<Node> () {
+    operator std::shared_ptr<Node>() {
         return node;
     }
 
@@ -603,7 +604,8 @@ struct PatternNode {
     }
 
     template <class... Args>
-    static std::shared_ptr<Node> node_type(const OutputVector& inputs, const std::function<bool(const Output<Node>&)>& pred) {
+    static std::shared_ptr<Node> node_type(const OutputVector& inputs,
+                                           const std::function<bool(const Output<Node>&)>& pred) {
         return wrap_type<Args...>(inputs, [pred](const Output<Node>& output) {
             auto ret = pred(output);
             if (!ret)
@@ -612,10 +614,25 @@ struct PatternNode {
         });
     }
 
+    PatternNode() {
+        node = any_input();
+    }
+
     // any input with given partial shape
-    PatternNode(const ov::PartialShape& pshape, const element::Type & dtype = element::undefined) {
+    PatternNode(const ov::PartialShape& pshape, const element::Type& dtype = element::undefined) {
         node = any_input([pshape, dtype](const Output<Node>& value) {
             auto ret = pshape.compatible(value.get_partial_shape());
+            if (ret && dtype != element::undefined)
+                ret = (value.get_element_type() == dtype);
+            if (!ret)
+                std::cout << "   match failed at input : " << value << std::endl;
+            return ret;
+        });
+    }
+
+    PatternNode(const ov::Rank& rank, const element::Type& dtype = element::undefined) {
+        node = any_input([rank, dtype](const Output<Node>& value) {
+            auto ret = rank.compatible(value.get_partial_shape().rank());
             if (ret && dtype != element::undefined)
                 ret = (value.get_element_type() == dtype);
             if (!ret)
@@ -659,8 +676,12 @@ struct PatternNode {
         node = ConstScalar(v);
     }
 
-    PatternNode ShapeOf() const {
-        return node_type<opset1::ShapeOf>({node});
+    PatternNode(const std::vector<int>& vec) {
+        node = ConstVector(vec);
+    }
+
+    static inline PatternNode ShapeOf(const PatternNode& in) {
+        return node_type<opset1::ShapeOf>({in.node});
     }
 
     PatternNode DimOf(int axis, bool output_scalar) const {
@@ -677,8 +698,8 @@ struct PatternNode {
         });
     }
 
-    PatternNode Softmax(int axis) const {
-        return node_type<opset1::Softmax, opset8::Softmax>({node->output(0)}, [axis](const Output<Node>& value) {
+    static inline PatternNode Softmax(const PatternNode& in, int axis) {
+        return node_type<opset1::Softmax, opset8::Softmax>({in.node->output(0)}, [axis](const Output<Node>& value) {
             auto s1 = as_type_ptr<opset1::Softmax>(value.get_node_shared_ptr());
             if (s1)
                 return s1->get_axis() == axis;
@@ -696,8 +717,40 @@ struct PatternNode {
         return node_type<opset8::Slice>({start.node, stop.node, step.node, axis.node});
     }
 
-    PatternNode Select(const PatternNode& n_then, const PatternNode& n_else) {
-        return node_type<opset1::Select>({node, n_then.node, n_else.node});
+    static inline PatternNode Select(const PatternNode& cond, const PatternNode& n_then, const PatternNode& n_else) {
+        return node_type<opset1::Select>({cond.node, n_then.node, n_else.node});
+    }
+
+    static inline PatternNode MatMul(const PatternNode& query_3d, const PatternNode& key_3d, bool transa, bool transb) {
+        return node_type<opset1::MatMul>({query_3d.node, key_3d.node}, [transa, transb](const Output<Node>& value) {
+            auto s1 = as_type_ptr<opset1::MatMul>(value.get_node_shared_ptr());
+            return s1->get_transpose_a() == transa && s1->get_transpose_b() == transb;
+        });
+    }
+
+    static inline PatternNode Maximum(const PatternNode& a, const PatternNode& b) {
+        return node_type<opset1::Maximum>({a.node, b.node});
+    }
+
+    static inline PatternNode Reshape(const PatternNode& in, const PatternNode& shape) {
+        return node_type<opset1::Reshape>({in.node, shape.node});
+    }
+
+    static inline PatternNode Broadcast(const PatternNode& data,
+                                        const PatternNode& taget_shape,
+                                        const PatternNode& axes_mapping) {
+        return node_type<opset1::Broadcast>({data.node, taget_shape.node, axes_mapping.node});
+    }
+
+    static inline PatternNode Concat(std::initializer_list<PatternNode> inputs, int64_t axis) {
+        OutputVector outputs;
+        for (auto& i : inputs) {
+            outputs.push_back(i.node->get_default_output());
+        }
+        return node_type<opset1::Concat>(outputs, [axis](const Output<Node>& value) {
+            auto s1 = as_type_ptr<opset1::Concat>(value.get_node_shared_ptr());
+            return s1->get_axis() == axis;
+        });
     }
 
     // lower triangular part of a matrix
@@ -736,84 +789,51 @@ PatternNode operator+(PatternNode lhs, PatternNode rhs) {
     return PatternNode::node_type<opset1::Add>({lhs.node, rhs.node});
 }
 
-/*
-	f32_[?,8,?,64]  present.0.key = opset1::Concat(past_key_values.0.key,/gpt_neox/layers.0/attention/Concat_10) 	 attrs: axis=-2
-	f32_[?,8,?,64]  query = opset1::Concat(/gpt_neox/layers.0/attention/Add_1,/gpt_neox/layers.0/attention/Slice_4) 	 attrs: axis=-1
+ov::intel_cpu::EliminateBcastAfterMatmul::EliminateBcastAfterMatmul() {
+    MATCHER_SCOPE(EliminateBcastAfterMatmul);
+    PatternNode B(ov::Rank(1));
+    PatternNode M(ov::Rank(1));
+    PatternNode N(ov::Rank(1));
+    PatternNode Ka(ov::Rank(1));
+    PatternNode Kb(ov::Rank(1));
+    PatternNode a4d(ov::Rank(4));
+    PatternNode b4d(ov::Rank(4));
+    PatternNode bcast_axes_mapping;
 
-==============================================================================
-    i32_[]  query_batch_size = cpu_plugin_opset::DimOf(query) 	 attrs: axis=0 output_scalar=1
-	i32_[]  batch_size_heads = opset1::Multiply(query_batch_size,i32(8)) 	 attrs: auto_broadcast=numpy
-	i32_[1]  batch_size_heads_1d = opset1::Reshape(batch_size_heads,i32([1])) 	 attrs: special_zero=0
-	i32_[1]  query_length = cpu_plugin_opset::DimOf(query) 	 attrs: axis=2 output_scalar=0
-	i32_[3]  query_shape3d = opset1::Concat(batch_size_heads_1d,query_length,i32([64])) 	 attrs: axis=0
-	f32_[?,?,?]  query3d = opset1::Reshape(query,query_shape3d) 	 attrs: special_zero=1
-	f32_[?,8,?,64]  key_div_sqrtd = cpu_plugin_opset::PowerStatic(present.0.key) 	 attrs: scale=0.125000 power=1.000000 shift=0.000000 out-type=f32
-	i32_[3]  key_shape3d = opset1::Concat(batch_size_heads_1d,key_length,i32([64])) 	 attrs: axis=0
-	f32_[?,?,?]  key3d = opset1::Reshape(key_div_sqrtd,key_shape3d) 	 attrs: special_zero=1
-==============================================================================
-	f32_[?,?,?]  attn_scores2 = opset1::MatMul(query3d,key3d) 	 attrs: transpose_a=0 transpose_b=1
-==============================================================================
-	i32_[3]  ShapeOf_24954 = opset1::ShapeOf(attn_scores2) 	 attrs: type_relax=1 input_data_types=[] output_data_types=[i32]
-	i32_[1]  query_length = cpu_plugin_opset::DimOf(query) 	 attrs: axis=2 output_scalar=0
-	i32_[3]  attn_scores_shape3d = opset1::Concat(batch_size_heads_1d,query_length,key_length) 	 attrs: axis=0
-	i32_[3]  Maximum_24821 = opset1::Maximum(i32([1,1,1]),attn_scores_shape3d) 	 attrs: auto_broadcast=numpy
-	i32_[3]  Maximum_24955 = opset1::Maximum(ShapeOf_24954,Maximum_24821) 	 attrs: auto_broadcast=numpy
-	f32_[?,?,?]  attn_scores1 = opset1::Broadcast(attn_scores2,Maximum_24955,u8(0)) 	 attrs: mode=numpy
+    auto shape_a = PatternNode::Concat({B, M, Ka}, 0);
+    auto shape_b = PatternNode::Concat({B, N, Kb}, 0);
 
-	i32_[1]  query_batch_size = cpu_plugin_opset::DimOf(query) 	 attrs: axis=0 output_scalar=0
-	i32_[1]  query_length = cpu_plugin_opset::DimOf(query) 	 attrs: axis=2 output_scalar=0
-	i32_[4]  attn_scores_shape4d = opset1::Concat(  query_batch_size,
-                                                    i32([8]),
-                                                    query_length,
-                                                    key_length) 	 attrs: axis=0
-	f32_[?,?,?,?]  attn_scores0 = opset1::Reshape(  attn_scores1,
-                                                    attn_scores_shape4d) 	 attrs: special_zero=1
+    auto a3d = PatternNode::Reshape(a4d, shape_a);
+    auto b3d = PatternNode::Reshape(b4d, shape_b);
 
-==============================================================================
-	i32_[1]  key_length = cpu_plugin_opset::DimOf(present.0.key) 	 attrs: axis=-2 output_scalar=0
-    i32_[]  key_length_scalar = opset1::Squeeze(key_length,i32([0])) 	 attrs:
-	i32_[]  query_length = cpu_plugin_opset::DimOf(query) 	 attrs: axis=2 output_scalar=1
-	i32_[]  Multiply_59211 = opset1::Multiply(query_length,i32(-1)) 	 attrs: auto_broadcast=numpy
-	i32_[]  /gpt_neox/layers.0/attention/Sub = opset1::Add(key_length_scalar,Multiply_59211) 	 attrs: auto_broadcast=numpy
-	i32_[1]  kL_sub_qL = opset1::Reshape(/gpt_neox/layers.0/attention/Sub,i32([1])) 	 attrs: special_zero=0
-	i32_[1]  key_length = cpu_plugin_opset::DimOf(present.0.key) 	 attrs: axis=-2 output_scalar=0
-	u8_[1,1,..2048,2048]  bias_slice1 = opset8::Slice(
-                                                gpt_neox.layers.1.attention.bias,
-                                                kL_sub_qL,
-                                                key_length,
-                                                i32([1]),
-                                                i32([2])) 	 attrs:
-	u8_[1,1,..2048,..2048]  causal_mask = opset8::Slice(
-                                                bias_slice1,
-                                                i32([0]),
-                                                key_length,
-                                                i32([1]),
-                                                i32([3])) 	 attrs:
-==============================================================================
-	f32_[?,?,?,?]  after_causal_mask = opset1::Select(  causal_mask,
-                                                        attn_scores0,
-                                                        f32(-3.40282e+38)) 	 attrs: type_relax=1 input_data_types=[boolean] output_data_types=[] auto_broadcast=numpy
+    // this topology automatically implies Ka == Kb
+    auto c3d = PatternNode::MatMul(a3d, b3d, false, true);
 
+    auto shape_c = PatternNode::ShapeOf(c3d);
 
-==============================================================================
-	i32_[1]  batch_size = cpu_plugin_opset::DimOf(input_ids) 	 attrs: axis=0 output_scalar=0
-	i32_[2]  /gpt_neox/Concat_1 = opset1::Concat(batch_size,i32([-1])) 	 attrs: axis=0
-	i32_[?,?]  /gpt_neox/Reshape_1 = opset1::Reshape(attention_mask,/gpt_neox/Concat_1) 	 attrs: special_zero=1
-	i32_[?,1,1,?]  /gpt_neox/Unsqueeze_4 = opset1::Unsqueeze(/gpt_neox/Reshape_1,i32([1,2])) 	 attrs:
-	f32_[?,1,1,?]  /gpt_neox/Cast_2 = opset1::Convert(/gpt_neox/Unsqueeze_4) 	 attrs: destination_type=f32
-	f32_[?,1,1,?]  Multiply_42419 = cpu_plugin_opset::PowerStatic(/gpt_neox/Cast_2) 	 attrs: scale=340282346638528859811704183484516925440.000000 power=1.000000 shift=0.000000 out-type=f32
-	f32_[?,1,1,?]  /gpt_neox/Mul = cpu_plugin_opset::PowerStatic(Multiply_42419) 	 attrs: scale=1.000000 power=1.000000 shift=-340282346638528859811704183484516925440.000000 out-type=f32
-==============================================================================
+    auto shape_c_bcast = PatternNode::Concat({B, M, N}, 0);
 
-	f32_[?,?,?,?]  after_attn_mask = opset1::Add(
-                                        after_causal_mask,
-                                        /gpt_neox/Mul) 	 attrs: auto_broadcast=numpy
-	f32_[?,?,?,?]  /gpt_neox/layers.0/attention/Softmax = opset1::Softmax(after_attn_mask) 	 attrs: axis=3
-==============================================================================
-*/
+    auto max_shape0 = PatternNode::Maximum(shape_c_bcast, PatternNode(std::vector<int>{1, 1, 1}));
+    auto max_shape = PatternNode::Maximum(max_shape0, shape_c);
+
+    auto cbcast = PatternNode::Broadcast(c3d, max_shape, bcast_axes_mapping);
+
+    matcher_pass_callback callback = [=](Matcher& m) {
+        auto& pattern_to_output = m.get_pattern_value_map();
+        auto out_matmul = pattern_to_output.at(c3d.node);
+        // rmeove bcast
+        std::cout << "EliminateBcastAfterMatmul::callback" << m.get_match_value() << std::endl;
+        ngraph::replace_node(m.get_match_root(), {out_matmul});
+        return true;
+    };
+
+    auto m = std::make_shared<Matcher>(cbcast.node, matcher_name);
+    this->register_matcher(m, callback);
+}
+
+#if 0
 ov::intel_cpu::MHADynamicFloatFusion::MHADynamicFloatFusion() {
     MATCHER_SCOPE(MHADynamicFloatFusion);
-#if 0
     auto B = ov::Dimension::dynamic();  // batch
     auto H = ov::Dimension::dynamic();  // number of heads
     auto qL = ov::Dimension::dynamic();
@@ -823,87 +843,35 @@ ov::intel_cpu::MHADynamicFloatFusion::MHADynamicFloatFusion() {
     auto float_lowest = std::numeric_limits<float>::lowest();
 
     //PatternNode score(ov::PartialShape{B, H, qL, kL});                     //
-    PatternNode att_mask_in(ov::PartialShape{B, 1, 1, kL}, element::i32);  // from paramter
+    PatternNode att_mask_4d(ov::PartialShape{B, 1, 1, kL}, element::i32);  // from paramter
     PatternNode present_key(ov::PartialShape{B, 8, kL, S}, element::f32);  // conact from past_key & cur
     PatternNode query(ov::PartialShape{B, H, qL, S}, element::f32);        // query
+    auto BH = query.DimOf(0, false) * 8;
+    auto query_length = query.DimOf(2, false);
+    auto key_length = present_key.DimOf(-2, false);
 
     auto tril_bias = PatternNode::tril<element::Type_t::u8>();
-    auto key_length = present_key.DimOf(-2, false);
     auto kL_minus_qL = (key_length.DimOf(0) + (query.ShapeOf() * -1)[2]).Reshape(1);
     auto causal_mask = tril_bias.Slice(kL_minus_qL, key_length, 1, 2).Slice(0, key_length, 1, 3);
 
-    //
-    // auto query_reshaped = query.Reshape();
-
-    /*
-    f32_[?,8,?,64]  Multiply_52958 = opset1::Multiply(present.5.key,Constant_52957) 	 attrs: auto_broadcast=numpy
-
-    // rotery embedding
-        f32_[?,8,?,64]  /gpt_neox/layers.5/attention/Concat_9 = opset1::Concat(
-                /gpt_neox/layers.5/attention/Add_1,
-                /gpt_neox/layers.5/attention/Slice_4) 	 attrs: axis=-1
-
-    //query_shape
-    i32_[4]  /gpt_neox/layers.5/attention/Shape_14 = opset1::ShapeOf(/gpt_neox/layers.5/attention/Concat_9) 	 attrs:
-    type_relax=1 input_data_types=[] output_data_types=[i32]
-
-        i32_[1]  /gpt_neox/layers.5/attention/Gather_9 = opset8::Gather(
-                    /gpt_neox/layers.5/attention/Shape_14, 0, 0) 	 attrs: batch_dims=0
-        i32_[]  /gpt_neox/layers.5/attention/Gather_10 = opset1::Constant(8) 	 attrs: element_type=i32 shape=[]
-    value=?
-
-        i32_[]  /gpt_neox/layers.5/attention/Mul_4 = opset1::Multiply(
-                /gpt_neox/layers.5/attention/Gather_9, batch_size
-                /gpt_neox/layers.5/attention/Gather_10 num_attention_heads
-                ) 	 attrs: auto_broadcast=numpy
-
-        i32_[1]  /gpt_neox/layers.5/attention/Unsqueeze_20 = opset1::Reshape(
-                /gpt_neox/layers.5/attention/Mul_4,
-                [1]) 	 attrs: special_zero=0
-    i32_[3]  /gpt_neox/layers.5/attention/Concat_14 = opset1::Concat(
-                    /gpt_neox/layers.5/attention/Unsqueeze_20, batch_size * num_attention_heads
-                    /gpt_neox/layers.5/attention/Slice_11,     key_length
-                    [64]) 	 attrs: axis=0
-
-         f32_[?,?,64]  /gpt_neox/layers.5/attention/Reshape_2 = opset1::Reshape(
-                                                              Multiply_52958,
-                                          /gpt_neox/layers.5/attention/Concat_14) 	 attrs: special_zero=1    //
-
-
-        query = query.view(batch_size * num_attention_heads, query_length, attn_head_size)
-        key = key.view(batch_size * num_attention_heads, key_length, attn_head_size)
-
-
-
-    i32_[3]  /gpt_neox/layers.5/attention/Concat_13 = opset1::Concat(
-                    /gpt_neox/layers.5/attention/Unsqueeze_17,
-                    /gpt_neox/layers.5/attention/Gather_11,
-                    64) 	 attrs: axis=0
-        f32_[?,?,64]  /gpt_neox/layers.5/attention/Reshape_1 = opset1::Reshape(
-                    /gpt_neox/layers.5/attention/Concat_9,
-                    /gpt_neox/layers.5/attention/Concat_13) 	 attrs: special_zero=1
-    // Q*K'
-        f32_[?,?,?]  /gpt_neox/layers.5/attention/Mul_5 = opset1::MatMul(
-                    /gpt_neox/layers.5/attention/Reshape_1,
-                    /gpt_neox/layers.5/attention/Reshape_2) 	 attrs: transpose_a=0 transpose_b=1
-    */
-    //
-    auto query_shape = query.ShapeOf();
-    auto query_length = query_shape[2];
-
-    auto BH = (query_shape[0] * 8).Reshape(1); // batch_size * num_head
 
     auto key_3d = (present_key * 0.125f)._view({BH, key_length, PatternNode(64)});
     auto query_3d = query._view({BH, query_length, PatternNode(64)});
 
-    auto score = PatternNode::MatMul(query_3d, key_3d, false, true);
+    auto attn_scores_raw = PatternNode::MatMul(query_3d, key_3d, false, true);
 
-    //attn_scores.ShapeOf()
+    query.DimOf(2, false)
+
+    auto max_shape0 = PatternNode::Maximum(PatternNode::ConstVector({1, 1, 1}), PatternNode::Concat({BH, query_length, key_length}));
+    auto max_shape1 = PatternNode::Maximum(max_shape0, PatternNode::ShapeOf(attn_scores_raw));
+
+    auto attn_scores_3d = PatternNode::Broadcast(attn_scores_raw, max_shape1, 0)
 
     // apply causal & attention mask to score
-    auto masked_score = PatternNode::Select(causal_mask, score, float_lowest) +
-                        (att_mask_in.Convert(element::f32) * float_max + float_lowest);
-    auto softmax = masked_score.Softmax(3);
+    auto masked_score = PatternNode::Select(causal_mask, attn_scores_4d, float_lowest) +
+                        (att_mask_4d.Convert(element::f32) * float_max + float_lowest);
+
+    auto softmax = PatternNode::Softmax(masked_score, 3);
 
     std::cout << "MHADynamicFloatFusion" << std::endl;
     softmax.node->dump_all(std::cout);
@@ -921,5 +889,5 @@ ov::intel_cpu::MHADynamicFloatFusion::MHADynamicFloatFusion() {
 
     auto m = std::make_shared<Matcher>(softmax.node, matcher_name);
     this->register_matcher(m, callback);
-#endif
 }
+#endif
