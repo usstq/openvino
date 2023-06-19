@@ -83,7 +83,7 @@ ov::intel_cpu::ConvertShapeOfToDimOf1::ConvertShapeOfToDimOf1() {
 
             // scalar version of DimOf which fused Squeeze children
             if (squeeze_nodes.size()) {
-                auto DimOf = std::make_shared<ov::intel_cpu::DimOfNode>(src_out, axis, true);
+                auto DimOf = register_new_node<ov::intel_cpu::DimOfNode>(src_out, axis, true);
                 std::stringstream ss;
                 ss << src_out.get_node_shared_ptr()->get_friendly_name() << ".shape[" << axis << "]";
                 DimOf->set_friendly_name(ss.str());
@@ -97,7 +97,7 @@ ov::intel_cpu::ConvertShapeOfToDimOf1::ConvertShapeOfToDimOf1() {
             // non-scalar version of DimOf which directly replace target node
             if (need_non_scalar_branch) {
                 bool output_is_scalar = (target->get_output_partial_shape(0).rank().get_length() == 0);
-                auto DimOf = std::make_shared<ov::intel_cpu::DimOfNode>(src_out, axis, output_is_scalar);
+                auto DimOf = register_new_node<ov::intel_cpu::DimOfNode>(src_out, axis, output_is_scalar);
                 std::stringstream ss;
                 ss << src_out.get_node_shared_ptr()->get_friendly_name() << ".shape";
                 if (output_is_scalar)
@@ -299,5 +299,53 @@ ov::intel_cpu::RemoveReshapeTailOfDimOfSubgraph::RemoveReshapeTailOfDimOfSubgrap
         return false;
     };
     auto m = std::make_shared<ngraph::pattern::Matcher>(reshape, matcher_name);
+    this->register_matcher(m, callback);
+}
+
+ov::intel_cpu::EliminateDuplicateDimOf::EliminateDuplicateDimOf() {
+    MATCHER_SCOPE(EliminateDuplicateDimOf);
+
+    auto src = ngraph::pattern::any_input(ngraph::pattern::has_static_rank());
+    auto dimof = ngraph::pattern::wrap_type<ov::intel_cpu::DimOfNode>({src});
+
+    ngraph::matcher_pass_callback callback = [=](ngraph::pattern::Matcher& m) {
+        const auto& pattern_map = m.get_pattern_value_map();
+        auto this_dimof =
+            std::dynamic_pointer_cast<ov::intel_cpu::DimOfNode>(pattern_map.at(dimof).get_node_shared_ptr());
+        auto rank = pattern_map.at(src).get_partial_shape().rank().get_length();
+
+        auto this_output_scalar = this_dimof->get_output_scalar();
+        auto this_axis = this_dimof->get_axis();
+        if (this_axis < 0)
+            this_axis += rank;
+
+        std::shared_ptr<ov::Node> replacement_dimof;
+        for (auto& other_input : this_dimof->input_value(0).get_target_inputs()) {
+            auto other_dimof = dynamic_cast<ov::intel_cpu::DimOfNode*>(other_input.get_node());
+            if (!other_dimof || other_dimof == this_dimof.get())
+                continue;
+            if (this_output_scalar != other_dimof->get_output_scalar())
+                continue;
+
+            auto other_axis = other_dimof->get_axis();
+            if (other_axis < 0)
+                other_axis += rank;
+
+            if (this_axis != other_axis)
+                continue;
+
+            replacement_dimof = other_dimof->shared_from_this();
+            break;
+        }
+
+        if (replacement_dimof) {
+            ngraph::replace_node(this_dimof, replacement_dimof);
+            return true;
+        }
+
+        return false;
+    };
+
+    auto m = std::make_shared<ngraph::pattern::Matcher>(dimof, matcher_name);
     this->register_matcher(m, callback);
 }

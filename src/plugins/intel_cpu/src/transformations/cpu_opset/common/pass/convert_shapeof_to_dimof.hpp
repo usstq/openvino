@@ -21,12 +21,19 @@ public:
     RemoveReshapeTailOfDimOfSubgraph();
 };
 
+class EliminateDuplicateDimOf: public ngraph::pass::MatcherPass {
+public:
+    OPENVINO_RTTI("EliminateDuplicateDimOf", "0");
+    EliminateDuplicateDimOf();
+};
+
 class ConvertShapeOfToDimOf : public ngraph::pass::GraphRewrite {
 public:
     OPENVINO_RTTI("FullyConnectedBiasFusion", "0");
     ConvertShapeOfToDimOf() {
         add_matcher<ConvertShapeOfToDimOf1>();
         add_matcher<RemoveReshapeTailOfDimOfSubgraph>();
+        add_matcher<EliminateDuplicateDimOf>();
     }
 };
 
