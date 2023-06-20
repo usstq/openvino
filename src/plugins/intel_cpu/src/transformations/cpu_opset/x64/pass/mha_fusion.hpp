@@ -49,13 +49,6 @@ public:
     MHAQuantFusion2();
 };
 
-// some MHA pattern using torch.baddbmm introduces redundant broadcast
-class EliminateBcastAfterMatmul: public ngraph::pass::MatcherPass {
-public:
-    OPENVINO_RTTI("EliminateBcastAfterMatmul", "0");
-    EliminateBcastAfterMatmul();
-};
-
 // recognize different CausalMask operations and fuse them into 1
 class CausalMaskFusion: public ngraph::pass::MatcherPass {
 public:
@@ -67,7 +60,6 @@ class MHADynamicFloatFusion: public ngraph::pass::GraphRewrite {
 public:
     OPENVINO_RTTI("MHADynamicFloatFusion", "0");
     MHADynamicFloatFusion() {
-        add_matcher<EliminateBcastAfterMatmul>();
         add_matcher<CausalMaskFusion>();
     }
 };

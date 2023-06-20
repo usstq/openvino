@@ -21,6 +21,8 @@
 #include "transformations/common_optimizations/reshape_sequence_fusion.hpp"
 #include "common/pass/ngram_fusion.hpp"
 #include "common/pass/convert_shapeof_to_dimof.hpp"
+#include "common/pass/eliminate_futile_bcast.hpp"
+
 #include "x64/pass/mha_fusion.hpp"
 
 #include "transformations/defs.hpp"
@@ -52,6 +54,8 @@ inline void ConvertToCPUSpecificOpset(std::shared_ptr<ngraph::Function> &nGraphF
     CPU_REGISTER_PASS_COMMON(manager, ov::pass::ConvertPrecision, precisions_map {{ ngraph::element::i64, ngraph::element::i32 }});
     CPU_REGISTER_PASS_COMMON(manager, NgramFusion);
     CPU_REGISTER_PASS_COMMON(manager, ConvertShapeOfToDimOf);
+    CPU_REGISTER_PASS_COMMON(manager, EliminateFutileBcasts);
+
     CPU_REGISTER_PASS_X64(manager, DumpModel, "before_MHA.txt");
 
     CPU_REGISTER_PASS_X64(manager, MHADynamicFloatFusion);

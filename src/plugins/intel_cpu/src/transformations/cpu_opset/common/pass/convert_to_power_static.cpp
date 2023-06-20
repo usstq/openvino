@@ -13,6 +13,7 @@
 #include "transformations/cpu_opset/common/op/power_static.hpp"
 #include "transformations/cpu_opset/common/op/fully_connected.hpp"
 #include "utils/general_utils.h"
+#include "utils/env.hpp"
 
 #include "itt.hpp"
 
@@ -76,13 +77,9 @@ std::shared_ptr<ngraph::Node> convert(const std::shared_ptr<BaseOp> &node) {
     std::shared_ptr<ngraph::opset1::Constant> powerNode = std::dynamic_pointer_cast<ngraph::opset1::Constant>(node->get_input_node_shared_ptr(constPort));
     const float value = powerNode->cast_vector<float>()[0];
     if (std::is_same<BaseOp, ngraph::opset1::Power>::value) {
-        if (value == 1.0f)
-            return nullptr;
         return std::make_shared<ov::intel_cpu::PowerStaticNode>(node->input(nonConstPort).get_source_output(), value, 1.0f, 0.0f,
                                                                node->output(0).get_element_type());
     } else if (std::is_same<BaseOp, ngraph::opset1::Add>::value) {
-        if (value == 0.0f)
-            return nullptr;
         return std::make_shared<ov::intel_cpu::PowerStaticNode>(node->input(nonConstPort).get_source_output(), 1.0f, 1.0f, value,
                                                                node->output(0).get_element_type());
     } else if (std::is_same<BaseOp, ngraph::opset1::Subtract>::value) {
@@ -93,13 +90,9 @@ std::shared_ptr<ngraph::Node> convert(const std::shared_ptr<BaseOp> &node) {
         } else {
             shift *= -1.0f;
         }
-        if (scale == 1.0f && shift == 0.0f)
-            return nullptr;
         return std::make_shared<ov::intel_cpu::PowerStaticNode>(node->input(nonConstPort).get_source_output(), 1.0f, scale, shift,
                                                                node->output(0).get_element_type());
     } else if (std::is_same<BaseOp, ngraph::opset1::Multiply>::value) {
-        if (value == 1.0f)
-            return nullptr;
         return std::make_shared<ov::intel_cpu::PowerStaticNode>(node->input(nonConstPort).get_source_output(), 1.f, value, 0.0f,
                                                                node->output(0).get_element_type());
     } else {
@@ -108,6 +101,8 @@ std::shared_ptr<ngraph::Node> convert(const std::shared_ptr<BaseOp> &node) {
 }
 
 } // namespace
+
+ov::intel_cpu::EnvInt OPT_POWERSTATIC("OPT_POWERSTATIC", 1);
 
 ov::intel_cpu::ConvertToPowerStatic::ConvertToPowerStatic() {
     MATCHER_SCOPE(ConvertToPowerStatic);
@@ -143,11 +138,12 @@ ov::intel_cpu::ConvertToPowerStatic::ConvertToPowerStatic() {
             OPENVINO_THROW("ConvertToPowerStatic: op type is not supported");
         }
 
-        if (!toReplace) {
+        auto pnode = std::dynamic_pointer_cast<ov::intel_cpu::PowerStaticNode>(toReplace);
+        if (OPT_POWERSTATIC && pnode && pnode->get_power() == 1.0f && pnode->get_scale() == 1.0f && pnode->get_shift() == 0.0f) {
             const int constPort = getConstPort(node);
             const int nonConstPort = 1 - constPort;
             // remove the node instead of convert
-            std::cout << node->get_friendly_name() << " is removed" << std::endl;
+            std::cout << "<OPT_POWERSTATIC>: " << node->get_friendly_name() << " is removed" << std::endl;
             ngraph::replace_node(node, {node->input_value(nonConstPort)});
             return true;
         }
