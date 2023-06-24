@@ -56,11 +56,18 @@ public:
     CausalMaskFusion();
 };
 
+class RoPEFusion: public ngraph::pass::MatcherPass {
+public:
+    OPENVINO_RTTI("RoPEFusion", "0");
+    RoPEFusion();
+};
+
 class MHADynamicFloatFusion: public ngraph::pass::GraphRewrite {
 public:
     OPENVINO_RTTI("MHADynamicFloatFusion", "0");
     MHADynamicFloatFusion() {
         add_matcher<CausalMaskFusion>();
+        add_matcher<RoPEFusion>();
     }
 };
 

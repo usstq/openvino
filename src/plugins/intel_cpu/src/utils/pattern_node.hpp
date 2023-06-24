@@ -3,13 +3,21 @@
 //
 #pragma once
 
-#include <string>
 #include <cstdlib>
-#include <sstream>
 #include <iostream>
 #include <memory>
-#include <openvino/opsets/opset1.hpp>
+#include "openvino/opsets/opset1.hpp"
+#include "openvino/opsets/opset2.hpp"
+#include "openvino/opsets/opset3.hpp"
+#include "openvino/opsets/opset4.hpp"
+#include "openvino/opsets/opset5.hpp"
+#include "openvino/opsets/opset6.hpp"
+#include "openvino/opsets/opset7.hpp"
 #include <openvino/opsets/opset8.hpp>
+#include <sstream>
+#include <string>
+#include <cassert>
+
 #include "transformations/cpu_opset/common/op/dimof.hpp"
 //#include "ngraph/pattern/op/pattern.hpp"
 #include "ngraph/pattern/op/label.hpp"
@@ -18,16 +26,118 @@
 namespace ov {
 namespace intel_cpu {
 
-struct PatternNode;
+// inspired by https://www.fluentcpp.com/2018/12/14/named-arguments-cpp/
 
-PatternNode operator*(PatternNode lhs, PatternNode rhs);
-PatternNode operator+(PatternNode lhs, PatternNode rhs);
+inline std::vector<std::string> split_string(const std::string & s, const std::string & delimiter) {
+    std::vector<std::string> ret;
+    size_t pos = 0, pos_next;
+    std::string token;
+    while ((pos_next = s.find(delimiter, pos)) != std::string::npos) {
+        token = s.substr(pos, pos_next);
+        ret.push_back(token);
+        pos = pos_next + 1;
+    }
+    // return whole string if no delimiter if found
+    token = s.substr(pos, pos_next);
+    ret.push_back(token);
+    return ret;
+}
 
+struct vtype {
+    vtype(const char* pattern = nullptr) {
+        if (pattern == nullptr || pattern[0] == 0) {
+            ele_type = ov::element::dynamic;
+            pshape = ov::PartialShape::dynamic(ov::Dimension::dynamic());
+            return;
+        }
+        // both ele_type & pshape can be built from string representation!
+        if (pattern[0] == '[') {
+            ele_type = ov::element::dynamic;
+            pshape = ov::PartialShape(pattern);
+            return;
+        }
+
+        auto v_patterns = split_string(pattern, "[");
+        assert(v_patterns.size() == 2);
+        ele_type = ov::element::Type(v_patterns[0]);
+        pshape = ov::PartialShape("[" + v_patterns[1]);
+    }
+
+    bool predicate(const ov::Output<ov::Node>& value) const {
+        if (!ele_type.compatible(value.get_element_type()) ||
+            !pshape.compatible(value.get_partial_shape())) {
+            std::cout << "               " << ele_type << pshape << " vs " << value.get_element_type() << value.get_partial_shape() << std::endl;
+            return false;
+        }
+        return true;
+    }
+    ov::element::Type ele_type;
+    ov::PartialShape pshape;
+};
+
+struct attr {
+    attr() = default;
+    attr(const char* name, const char* v) : name(name) {
+        type = 0;
+        value.str = v;
+    }
+    attr(const char* name, int v) : name(name) {
+        type = 1;
+        value.i32 = v;
+    }
+    attr(const char* name, float v) : name(name) {
+        type = 2;
+        value.f32 = v;
+    }
+    attr(const char* name, double v) : name(name) {
+        type = 2;
+        value.f32 = v;
+    }
+    bool predicate(int v) const {
+        bool ret = (type == 1 && v == value.i32);
+        return ret;
+    }
+    bool predicate(int64_t v) const {
+        bool ret = (type == 1 && v == value.i32);
+        return ret;
+    }
+    bool predicate(float v) const {
+        bool ret = (type == 2 && v == value.f32);
+        return ret;
+    }
+    bool predicate(double v) const {
+        bool ret = (type == 2 && v == value.f32);
+        return ret;
+    }
+    bool predicate(const std::string& v) const {
+        bool ret = (type == 0 && v == value.str);
+        return ret;
+    }
+
+    std::string to_string() const {
+        std::stringstream ss;
+        ss << name << ":";
+        if (type == 0) ss << value.str;
+        if (type == 1) ss << value.i32;
+        if (type == 2) ss << value.f32;
+        return ss.str();
+    }
+    const char * name;
+    union {
+        const char* str;
+        int i32;
+        float f32;
+    } value;
+    int type;
+};
+
+bool attr_compatible(ov::Node& node, const std::vector<attr>& attr);
+
+extern const int _matcher_verbose;
 
 template<typename ... Args>
-void MatcherVerbose(Args&& ... args) {
-    static bool MATCHER_VERBOSE = std::getenv("MATCHER_VERBOSE") ? atoi(std::getenv("MATCHER_VERBOSE")) : false;
-    if (!MATCHER_VERBOSE) return;
+static inline void verbose_log(Args&& ... args) {
+    if (!_matcher_verbose) return;
     std::stringstream ss;
     int dummy[] = {(ss << std::forward<Args>(args) << " ", 0)...};
     (void)(dummy);
@@ -35,195 +145,113 @@ void MatcherVerbose(Args&& ... args) {
     std::cout << ss.str();
 }
 
-struct PatternNode {
+inline std::shared_ptr<Node> GenInput(vtype vt = nullptr) {
+    return ov::pass::pattern::any_input([vt](const Output<Node>& value) {
+        if (!vt.predicate(value)) {
+            verbose_log("*mismatched GenInput ", value);
+            return false;
+        }
+        verbose_log(" matched GenInput ", value);
+        return true;
+    });
+}
+
+// A glue type which allows more types to be used as input to GenPattern()
+struct GenPatternNode {
     std::shared_ptr<Node> node;
 
-    operator std::shared_ptr<Node>() {
-        return node;
-    }
-
-    template <class... Args>
-    static std::shared_ptr<Node> node_type(const OutputVector& inputs) {
-        return ov::pass::pattern::wrap_type<Args...>(inputs, [](const Output<Node>& output) {
-            MatcherVerbose("\tmatched : ", output);
+    GenPatternNode(vtype vt) {
+        node = ov::pass::pattern::any_input([vt](const Output<Node>& value) {
+            if (!vt.predicate(value)) {
+                verbose_log("*mismatched GenPatternNode ", value);
+                return false;
+            }
+            verbose_log(" matched GenPatternNode ", value);
             return true;
         });
     }
+    GenPatternNode(const std::shared_ptr<Node> & node) : node(node) {}
 
-    template <class... Args>
-    static std::shared_ptr<Node> node_type(const OutputVector& inputs,
-                                           const std::function<bool(const Output<Node>&)>& pred) {
-        return ov::pass::pattern::wrap_type<Args...>(inputs, [pred](const Output<Node>& output) {
-            auto ret = pred(output);
-            MatcherVerbose(ret ? "\tmatched : " : "******* failed", output);
-            return ret;
-        });
+    GenPatternNode(int v) {
+        node = ConstVector(std::vector<int>{v}, "i32[]");
+    }
+    GenPatternNode(float v) {
+        node = ConstVector(std::vector<float>{v}, "f32[]");
     }
 
-    PatternNode() {
-        node = ov::pass::pattern::any_input();
+    GenPatternNode(std::initializer_list<int> v) {
+        node = ConstVector(std::vector<int>(v), nullptr);
+    }
+    GenPatternNode(std::initializer_list<float> v) {
+        node = ConstVector(std::vector<float>(v), nullptr);
     }
 
-    // any input with given partial shape
-    PatternNode(const ov::PartialShape& pshape, const element::Type& dtype = element::undefined) {
-        node = ov::pass::pattern::any_input([pshape, dtype](const Output<Node>& value) {
-            auto ret = pshape.compatible(value.get_partial_shape());
-            if (ret && dtype != element::undefined)
-                ret = (value.get_element_type() == dtype);
-            MatcherVerbose(ret ? "\tmatched : " : "******* failed", value);
-            return ret;
-        });
+    template <typename T, typename std::enable_if<std::is_arithmetic<T>::value, bool>::type = true>
+    GenPatternNode(std::initializer_list<T> v, vtype vt) {
+        node = ConstVector(std::vector<T>(v), vt);
     }
-
-    PatternNode(const ov::Rank& rank, const element::Type& dtype = element::undefined) {
-        node = ov::pass::pattern::any_input([rank, dtype](const Output<Node>& value) {
-            auto ret = rank.compatible(value.get_partial_shape().rank());
-            if (ret && dtype != element::undefined)
-                ret = (value.get_element_type() == dtype);
-            MatcherVerbose(ret ? "\tmatched : " : "******* failed", value);
-            return ret;
-        });
-    }
-
-    // implict conversion from std::shared_ptr<Node>
-    PatternNode(const std::shared_ptr<Node>& node) : node(node) {}
 
     // 1d const tensor or scalar
     template <typename T, typename std::enable_if<std::is_arithmetic<T>::value, bool>::type = true>
-    static std::shared_ptr<Node> ConstVector(const std::vector<T>& vec, bool must_be_scalar = false) {
-        auto pred = [vec, must_be_scalar](const Output<Node>& value) {
-            auto s1 = as_type_ptr<opset1::Constant>(value.get_node_shared_ptr());
-            auto shape = s1->get_output_shape(0);
-            if (must_be_scalar && shape.size() != 0)
+    static std::shared_ptr<Node> ConstVector(const std::vector<T>& vec, vtype vt) {
+        auto pred = [vec, vt](const Output<Node>& value) {
+            if (!vt.predicate(value)) {
+                verbose_log("*mismatched ConstVector ", value);
                 return false;
-            if (shape.size() > 1)
-                return false;
-            if (shape_size(shape) != vec.size())
-                return false;
-            std::vector<T> actual = s1->cast_vector<T>();
-            return actual == vec;
-        };
-        return node_type<opset1::Constant>({}, pred);
-    }
-
-    // constant scalar pattern with v as value, of shape [], [1], [1,1], ...
-    template <typename T, typename std::enable_if<std::is_arithmetic<T>::value, bool>::type = true>
-    static std::shared_ptr<Node> ConstScalar(const T v) {
-        return ConstVector(std::vector<T>{v}, true);
-    }
-
-    PatternNode(const int v) {
-        node = ConstVector(std::vector<int>{v});
-    }
-
-    PatternNode(const float v) {
-        node = ConstVector(std::vector<float>{v});
-    }
-
-    PatternNode(const std::vector<int>& vec) {
-        node = ConstVector(vec);
-    }
-
-    static inline PatternNode ShapeOf(const PatternNode& in) {
-        return node_type<opset1::ShapeOf>({in.node});
-    }
-
-    PatternNode DimOf(int axis, bool output_scalar) const {
-        return node_type<ov::intel_cpu::DimOfNode>({node}, [axis, output_scalar](const Output<Node>& value) {
-            auto s1 = as_type_ptr<ov::intel_cpu::DimOfNode>(value.get_node_shared_ptr());
-            return s1->get_axis() == axis && s1->get_output_scalar() == output_scalar;
-        });
-    }
-
-    PatternNode Convert(const element::Type& dst_type) const {
-        return node_type<opset1::Convert>({node->output(0)}, [dst_type](const Output<Node>& value) {
-            auto s1 = as_type_ptr<opset1::Convert>(value.get_node_shared_ptr());
-            return s1->get_convert_element_type() == dst_type;
-        });
-    }
-
-    static inline PatternNode Softmax(const PatternNode& in, int axis) {
-        return node_type<opset1::Softmax, opset8::Softmax>({in.node->output(0)}, [axis](const Output<Node>& value) {
-            auto s1 = as_type_ptr<opset1::Softmax>(value.get_node_shared_ptr());
-            if (s1)
-                return s1->get_axis() == axis;
-            auto s8 = as_type_ptr<opset8::Softmax>(value.get_node_shared_ptr());
-            if (s8)
-                return s8->get_axis() == axis;
-            return false;
-        });
-    }
-
-    PatternNode Slice(const PatternNode& start,
-                      const PatternNode& stop,
-                      const PatternNode& step,
-                      const PatternNode& axis) {
-        return node_type<opset8::Slice>({node, start.node, stop.node, step.node, axis.node});
-    }
-
-    static inline PatternNode Select(const PatternNode& cond, const PatternNode& n_then, const PatternNode& n_else) {
-        return node_type<opset1::Select>({cond.node, n_then.node, n_else.node});
-    }
-
-    static inline PatternNode MatMul(const PatternNode& query_3d, const PatternNode& key_3d, bool transa, bool transb) {
-        return node_type<opset1::MatMul>({query_3d.node, key_3d.node}, [transa, transb](const Output<Node>& value) {
-            auto s1 = as_type_ptr<opset1::MatMul>(value.get_node_shared_ptr());
-            return s1->get_transpose_a() == transa && s1->get_transpose_b() == transb;
-        });
-    }
-
-    static inline PatternNode Maximum(const PatternNode& a, const PatternNode& b) {
-        return node_type<opset1::Maximum>({a.node, b.node});
-    }
-
-    static inline PatternNode Reshape(const PatternNode& in, const PatternNode& shape) {
-        return node_type<opset1::Reshape>({in.node, shape.node});
-    }
-
-    static inline PatternNode Broadcast(const PatternNode& data,
-                                        const PatternNode& taget_shape,
-                                        const PatternNode& axes_mapping) {
-        return node_type<opset1::Broadcast>({data.node, taget_shape.node, axes_mapping.node});
-    }
-
-    static inline PatternNode Concat(std::initializer_list<PatternNode> inputs, int64_t axis) {
-        OutputVector outputs;
-        for (auto& i : inputs) {
-            outputs.push_back(i.node->get_default_output());
-        }
-        return node_type<opset1::Concat>(outputs, [axis](const Output<Node>& value) {
-            auto s1 = as_type_ptr<opset1::Concat>(value.get_node_shared_ptr());
-            return s1->get_axis() == axis;
-        });
-    }
-
-    // lower triangular part of a matrix
-    template <element::Type_t ET>
-    static PatternNode tril() {
-        using T = typename element_type_traits<ET>::value_type;
-        return node_type<opset1::Constant>({}, [](const Output<Node>& value) {
-            auto s1 = as_type_ptr<opset1::Constant>(value.get_node_shared_ptr());
-            if (s1->get_output_element_type(0) != element::u8)
-                return false;
-            auto shape = s1->get_output_shape(0);
-            if (shape.size() != 4)
-                return false;
-            if (shape[0] != 1 || shape[1] != 1 || shape[2] != shape[3])
-                return false;
-            // NxN const matrix
-            auto max_positions = shape[2];
-            std::vector<T> output_vector = s1->cast_vector<T>();
-            // check if it's unit lower triangular matrix
-            for (int i = 0; i < max_positions; i++) {
-                for (int j = 0; j < max_positions; j++) {
-                    if (static_cast<bool>(output_vector[i * max_positions + j]) != static_cast<bool>(j <= i))
-                        return false;
-                }
             }
+            auto s1 = as_type_ptr<opset1::Constant>(value.get_node_shared_ptr());
+            auto shape = s1->get_output_shape(0);
+            if (shape_size(shape) != vec.size()) {
+                verbose_log("*mismatched ConstVector ", value);
+                return false;
+            }
+            std::vector<T> actual = s1->cast_vector<T>();
+            if (actual != vec) {
+                verbose_log("*mismatched ConstVector ", value);
+                return false;
+            }
+            verbose_log(" matched ConstVector ", value);
             return true;
-        });
+        };
+        return ov::pass::pattern::wrap_type<opset1::Constant>({}, pred);
     }
 };
 
-}   // namespace intel_cpu
-}   // namespace ov
+template <typename T, typename std::enable_if<std::is_arithmetic<T>::value, bool>::type = true>
+std::shared_ptr<Node> GenConst(std::initializer_list<T> v, vtype vt = nullptr) {
+    GenPatternNode g(v, vt);
+    return g.node;
+}
+
+template <class... Args>
+std::shared_ptr<Node> GenPattern(const std::vector<GenPatternNode>& inputs, vtype vt, const std::vector<attr>& attrs = {}) {
+    OutputVector ovs;
+    for (auto & i : inputs) {
+        ovs.push_back(i.node);
+    }
+    return ov::pass::pattern::wrap_type<Args...>(ovs, [vt, attrs](const Output<Node>& value) {
+        if (!vt.predicate(value)) {
+            verbose_log("*mismatched GenPattern vt ", value);
+            return false;
+        }
+
+        // match parent node with attribute a0/a1/...
+        if (!attr_compatible(*value.get_node_shared_ptr(), attrs)) {
+            verbose_log("*mismatched GenPattern attr ", value);
+            return false;
+        }
+        verbose_log(" matched GenPattern ", value);
+        return true;
+    });
+}
+
+// TODO
+// for better performance, pattern matching is done in 2 steps
+//  1. match topology based on type of nodes and their inter-connections
+//  2. detailed validation on individual node's attributes
+//
+// but for clear description of the pattern, all information about
+// each node is described in the pattern description part.
+
+}  // namespace intel_cpu
+}  // namespace ov

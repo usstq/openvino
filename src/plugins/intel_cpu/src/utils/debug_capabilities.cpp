@@ -351,6 +351,7 @@ std::ostream & operator<<(std::ostream & os, const Node &c_node) {
 
 class OstreamAttributeVisitor : public ngraph::AttributeVisitor {
     std::ostream & os;
+    const char * sep = "";
 
 public:
     OstreamAttributeVisitor(std::ostream & os) : os(os) {}
@@ -362,25 +363,36 @@ public:
         } else if (auto a = ov::as_type<ov::AttributeAdapter<std::vector<ov::element::Type>>>(&adapter)) {
             const auto& value = join(a->get());
             append_attribute(name.c_str(), value.c_str());
+        } else if (auto a = ov::as_type<ov::AttributeAdapter<ov::PartialShape>>(&adapter)) {
+            const auto& value = a->get();
+            append_attribute(name.c_str(), value.to_string().c_str());
         } else {
             append_attribute(name.c_str(), "?");
         }
     }
 
     void on_adapter(const std::string& name, ngraph::ValueAccessor<bool>& adapter) override {
-        append_attribute(name.c_str(), std::to_string(adapter.get()).c_str());
+        append_attribute(name.c_str(), adapter.get());
     }
 
     void on_adapter(const std::string& name, ngraph::ValueAccessor<std::string>& adapter) override {
-        append_attribute(name.c_str(), adapter.get().c_str());
+        append_attribute(name.c_str(), adapter.get());
     }
 
     void on_adapter(const std::string& name, ngraph::ValueAccessor<int64_t>& adapter) override {
-        append_attribute(name.c_str(), std::to_string(adapter.get()).c_str());
+        append_attribute(name.c_str(), adapter.get());
     }
 
     void on_adapter(const std::string& name, ngraph::ValueAccessor<double>& adapter) override {
-        append_attribute(name.c_str(), std::to_string(adapter.get()).c_str());
+        append_attribute(name.c_str(), adapter.get());
+    }
+
+    void on_adapter(const std::string& name, ngraph::ValueAccessor<int32_t>& adapter) override {
+        append_attribute(name.c_str(), adapter.get());
+    }
+
+    void on_adapter(const std::string& name, ngraph::ValueAccessor<float>& adapter) override {
+        append_attribute(name.c_str(), adapter.get());
     }
 
     void on_adapter(const std::string& name, ngraph::ValueAccessor<std::vector<int>>& adapter) override {
@@ -408,9 +420,35 @@ public:
         append_attribute(name.c_str(), value.c_str());
     }
 
-    void append_attribute(const char * name, const char * value) {
-        os << " " << name << "=" << value;
+    void append_attribute(const char * name, const std::string& value) {
+        os << sep << "{\"" << name << "\", \"" << value << "\"}";
+        sep = ", ";
     }
+
+    void append_attribute(const char * name, const char * value) {
+        os << sep << "{\"" << name << "\", \"" << value << "\"}";
+        sep = ", ";
+    }
+
+    template<typename T, typename std::enable_if<std::is_arithmetic<T>::value, bool>::type = true>
+    void append_attribute(const char * name, const T& value) {
+        os << sep << "{\"" << name << "\", ";
+        if (std::is_floating_point<T>::value) {
+            std::stringstream ss;
+            ss << value;
+            auto strv = ss.str();
+            os << strv;
+            if (strv.find(".") == std::string::npos)
+                os << ".0";
+            if (std::is_same<T, float>::value)
+                os << "f";
+        } else {
+            os << value;
+        }
+        os << "}";
+        sep = ", ";
+    }
+
     void on_adapter(const std::string& name, ngraph::ValueAccessor<std::shared_ptr<ov::Model>>& adapter) override {
         append_attribute(name.c_str(), "Model");
     }
@@ -462,7 +500,7 @@ std::ostream & operator<<(std::ostream & os, const PrintableModel& model) {
     }
 
     for (auto op : f.get_ordered_ops()) {
-        if (literal_consts.count(op)) continue;
+        //if (literal_consts.count(op)) continue;
 
         const auto & type_info = op->get_type_info();
         auto type = std::string(type_info.get_version()) + "::" + type_info.name;
@@ -608,13 +646,136 @@ std::ostream & operator<<(std::ostream & os, const dnnl::memory::format_tag form
 DumpModel::DumpModel(const std::string& file_name) : file_name(file_name) {
 }
 
+void DumpModel::dump_cpp_style(std::ostream & os, const std::shared_ptr<ov::Model>& model) {
+    const ov::Model& f = *model;
+    std::string prefix = "";
+    std::string tag = "";
+    std::string sep = "";
+    os << prefix;
+    for (auto op : f.get_results()) {
+        os << sep << op->get_name();
+        sep = ",";
+    }
+    os << " " << f.get_friendly_name() << "(\n" << prefix;
+    for (auto op : f.get_parameters()) {
+        os << "\t" << tag << op->get_friendly_name() << ",\n" << prefix;
+    }
+    os << ") {\n";
+
+    // collect all scalar & short 1D vectors for literal-style display
+    std::map<std::shared_ptr<ov::Node>, std::string> literal_consts;
+    for (auto op : f.get_ordered_ops()) {
+        const auto & type_info = op->get_type_info();
+        if (auto constop = std::dynamic_pointer_cast<op::v0::Constant>(op)) {
+            // only i32/f32 type const literal can be parsed by C++ compiler
+            if (constop->get_output_element_type(0) != ov::element::i32 &&
+                constop->get_output_element_type(0) != ov::element::f32)
+                continue;
+            auto shape = constop->get_shape();
+            if (shape.size() > 1) continue;
+            auto is_scalar = shape.size() == 0;
+            if (shape_size(constop->get_shape()) > 8) continue;
+            // literal construct
+            std::stringstream ss;
+            sep = "";
+            //ss << op->get_output_element_type(0) << "(";
+            ss << (is_scalar? "" : "{");
+            for (auto v : constop->get_value_strings()) {
+                ss << sep << v;
+                sep = ",";
+            }
+            ss << (is_scalar? "" : "}");
+            //literal_consts[op] = ss.str();
+        }
+    }
+
+    auto get_output_values_info = [](std::shared_ptr<ov::Node> & op) {
+        std::stringstream ss;
+        if (op->get_output_size() > 1)
+            ss << "{";
+        const char *sep = "";
+        for (int i = 0; i < op->get_output_size(); i++) {
+            ss << sep << op->get_output_element_type(i) << op->get_output_partial_shape(i);
+            sep = " ";
+        }
+        if (op->get_output_size() > 1)
+            ss << "}";
+        return ss.str();
+    };
+
+    for (auto op : f.get_ordered_ops()) {
+        if (literal_consts.count(op)) continue;
+
+        const auto & type_info = op->get_type_info();
+        auto type = std::string(type_info.get_version()) + "::" + type_info.name;
+        auto name = op->get_friendly_name();
+        os << prefix << "\t";
+
+        if (auto constop = std::dynamic_pointer_cast<op::v0::Constant>(op)) {
+            os << "    auto " << name << " = GenConst({";
+            if (constop->get_element_type() == element::Type_t::f32) {
+                os << PrintableVector<float>(constop->get_vector<float>());
+            } else if (constop->get_element_type() == element::Type_t::i8) {
+                os << PrintableVector<int8_t>(constop->get_vector<int8_t>());
+            } else if (constop->get_element_type() == element::Type_t::u8) {
+                os << PrintableVector<uint8_t>(constop->get_vector<uint8_t>());
+            } else {
+                auto sz = shape_size(constop->get_shape());
+                if (sz < 9) {
+                    sep = "";
+                    for (auto v : constop->get_value_strings()) {
+                        os << sep << v;
+                        sep = ",";
+                    }
+                } else {
+                    os << "...";
+                }
+            }
+            os << "}, \"" << get_output_values_info(op) << "\");" << std::endl;
+        } else {
+            os << "    auto " << name << " = GenPattern<" << type << ">({";
+            sep = "";
+            for (int i = 0; i < op->get_input_size(); i++) {
+                auto vout = op->get_input_source_output(i);
+                auto iop = vout.get_node_shared_ptr();
+                if (iop->get_output_size() > 1) {
+                    auto out_port = vout.get_index();
+                    os << sep << tag << iop->get_friendly_name() << "[" << out_port << "]";
+                } else {
+                    if (literal_consts.count(iop))
+                        os << sep << tag << literal_consts[iop];
+                    else
+                        os << sep << tag << iop->get_friendly_name();
+                }
+                sep = ",";
+            }
+            // attributes are passed in using dict
+            os << "}, \"" << get_output_values_info(op) << "\", {";
+            OstreamAttributeVisitor osvis(os);
+            op->visit_attributes(osvis);
+            os << "});" << std::endl;
+        }
+
+        // recursively output subgraphs
+        if (auto msubgraph = std::dynamic_pointer_cast<op::util::MultiSubGraphOp>(op)) {
+            auto cnt = msubgraph->get_internal_subgraphs_size();
+            for (int i = 0; i < cnt; i++) {
+                os << "\t\t MultiSubGraphOp " << tag << msubgraph->get_friendly_name() << "[" << i << "]" << std::endl;
+                os << PrintableModel(*msubgraph->get_function(i).get(), tag, prefix + "\t\t");
+            }
+        }
+    }
+    os << prefix << "}\n";
+}
+
 bool DumpModel::run_on_model(const std::shared_ptr<ov::Model>& model) {
     std::ofstream ofs(file_name);
     if (!ofs) {
         std::cout << "Error opening file " << file_name << " for output" << std::endl;
         return false;
     }
-    ofs << PrintableModel(*model);
+    dump_cpp_style(ofs, model);
+    //ofs << PrintableModel(*model);
     ofs.close();
 
     ov::serialize(model, file_name+".xml", "/dev/null");

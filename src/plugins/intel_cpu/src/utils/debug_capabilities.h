@@ -106,6 +106,7 @@ class DumpModel : public ov::pass::ModelPass {
 public:
     OPENVINO_RTTI("DumpModel");
     DumpModel(const std::string& file_name);
+    void dump_cpp_style(std::ostream & os, const std::shared_ptr<ov::Model>& model);
     bool run_on_model(const std::shared_ptr<ov::Model>& model) override;
 protected:
     std::string file_name;
