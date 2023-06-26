@@ -658,7 +658,7 @@ void DumpModel::dump_cpp_style(std::ostream & os, const std::shared_ptr<ov::Mode
     }
     os << " " << f.get_friendly_name() << "(\n" << prefix;
     for (auto op : f.get_parameters()) {
-        os << "\t" << tag << op->get_friendly_name() << ",\n" << prefix;
+        os << "    " << tag << op->get_friendly_name() << ",\n" << prefix;
     }
     os << ") {\n";
 
@@ -682,10 +682,10 @@ void DumpModel::dump_cpp_style(std::ostream & os, const std::shared_ptr<ov::Mode
             ss << (is_scalar? "" : "{");
             for (auto v : constop->get_value_strings()) {
                 ss << sep << v;
-                sep = ",";
+                sep = ", ";
             }
             ss << (is_scalar? "" : "}");
-            //literal_consts[op] = ss.str();
+            literal_consts[op] = ss.str();
         }
     }
 
@@ -709,7 +709,7 @@ void DumpModel::dump_cpp_style(std::ostream & os, const std::shared_ptr<ov::Mode
         const auto & type_info = op->get_type_info();
         auto type = std::string(type_info.get_version()) + "::" + type_info.name;
         auto name = op->get_friendly_name();
-        os << prefix << "\t";
+        os << prefix << "    ";
 
         if (auto constop = std::dynamic_pointer_cast<op::v0::Constant>(op)) {
             os << "    auto " << name << " = GenConst({";
@@ -725,7 +725,7 @@ void DumpModel::dump_cpp_style(std::ostream & os, const std::shared_ptr<ov::Mode
                     sep = "";
                     for (auto v : constop->get_value_strings()) {
                         os << sep << v;
-                        sep = ",";
+                        sep = ", ";
                     }
                 } else {
                     os << "...";
@@ -747,20 +747,25 @@ void DumpModel::dump_cpp_style(std::ostream & os, const std::shared_ptr<ov::Mode
                     else
                         os << sep << tag << iop->get_friendly_name();
                 }
-                sep = ",";
+                sep = ", ";
             }
             // attributes are passed in using dict
-            os << "}, \"" << get_output_values_info(op) << "\", {";
-            OstreamAttributeVisitor osvis(os);
+            os << "}, \"" << get_output_values_info(op) << "\"";
+
+            std::stringstream ss2;
+            OstreamAttributeVisitor osvis(ss2);
             op->visit_attributes(osvis);
-            os << "});" << std::endl;
+            auto str_attr = ss2.str();
+            if (str_attr.size())
+                os << ", {" << str_attr << "}";
+            os << ");" << std::endl;
         }
 
         // recursively output subgraphs
         if (auto msubgraph = std::dynamic_pointer_cast<op::util::MultiSubGraphOp>(op)) {
             auto cnt = msubgraph->get_internal_subgraphs_size();
             for (int i = 0; i < cnt; i++) {
-                os << "\t\t MultiSubGraphOp " << tag << msubgraph->get_friendly_name() << "[" << i << "]" << std::endl;
+                os << "        MultiSubGraphOp " << tag << msubgraph->get_friendly_name() << "[" << i << "]" << std::endl;
                 os << PrintableModel(*msubgraph->get_function(i).get(), tag, prefix + "\t\t");
             }
         }

@@ -56,10 +56,14 @@ inline void ConvertToCPUSpecificOpset(std::shared_ptr<ngraph::Function> &nGraphF
     CPU_REGISTER_PASS_COMMON(manager, ConvertShapeOfToDimOf);
     CPU_REGISTER_PASS_COMMON(manager, EliminateFutileBcasts);
 
+    CPU_REGISTER_PASS_X64(manager, MHADynamicVNodeIn);
+
     CPU_REGISTER_PASS_X64(manager, DumpModel, "before_MHA.txt");
 
     CPU_REGISTER_PASS_X64(manager, MHADynamicFloatFusion);
     CPU_REGISTER_PASS_COMMON(manager, ov::pass::Validate);
+
+    CPU_REGISTER_PASS_X64(manager, MHADynamicVNodeOut);
 
     CPU_REGISTER_PASS_X64(manager, DumpModel, "final_MHA.txt");
 

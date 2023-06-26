@@ -11,6 +11,7 @@
 #include "transformations/cpu_opset/x64/op/mha.hpp"
 #include "simplify_fakequantize.hpp"
 #include "transformations/cpu_opset/common/op/dimof.hpp"
+#include "transformations/cpu_opset/common/op/vnode.hpp"
 #include "transformations/cpu_opset/common/op/power_static.hpp"
 #include "utils/env.hpp"
 #include "utils/pattern_node.hpp"
@@ -582,87 +583,356 @@ ov::intel_cpu::MHAQuantFusion2::MHAQuantFusion2() {
     this->register_matcher(m, callback);
 }
 
-ov::intel_cpu::RoPEFusion::RoPEFusion() {
-    MATCHER_SCOPE(RoPEFusion);
+namespace ov {
+namespace intel_cpu {
 
-    // auto rope_Slice_1_cur_key = GenPattern<opset8::Slice>({/gpt_neox/layers.1/attention/Reshape,{64},{128},{1},{3}}, "f32[?,?,8,64]", {});
-    //auto rotary_emb_Constant = GenPattern<opset1::Constant>({1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0.540302,0.950415,0.995004,0.9995,0.99995,0.999995,...},
-    //            "f32[1,1,2048,16]", {{"element_type", "f32"}, {"shape", "[1,1,2048,16]"}, {"value", "?"}});
-    //auto rotary_emb_Constant_5 = GenPattern<opset1::Constant>({0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0.841471,0.310984,0.0998334,0.0316175,0.00999983,...},
-    //            "f32[1,1,2048,16]", {{"element_type", "f32"}, {"shape", "[1,1,2048,16]"}, {"value", "?"}});
+#if 0
 
-    auto rotary_emb_Constant =
-        GenPattern<opset1::Constant>({}, "f32[1,1,2048,16]", {{"element_type", "f32"}, {"shape", "[1,1,2048,16]"}});
-    auto rotary_emb_Constant_5 =
-        GenPattern<opset1::Constant>({}, "f32[1,1,2048,16]", {{"element_type", "f32"}, {"shape", "[1,1,2048,16]"}});
-    auto rope_Slice_1_cur_key = GenInput("f32[?,?,8,64]");
-    auto past_key_values_key = GenInput("f32[?,8,?,64]");
-    auto rope_Unsqueeze_3 = GenInput("i32[?,1,?,1]");
+struct PatternRoPE {
+    // position_ids [bs,1,seq_len,1] : position id of each token in inputs
+    // when postion ids are continous, the RoPE can be performed very efficiently
+    std::shared_ptr<ov::Node> input_ids, past_key_values_key;
 
-    auto rope_Transpose_1_cur_key =
-        GenPattern<opset1::Transpose>({rope_Slice_1_cur_key, {0, 2, 1, 3}}, "f32[?,8,?,64]", {});
+    // cos/sin table
+    std::shared_ptr<ov::Node> rope_cos_tab, rope_sin_tab;
 
-    // rope_Transpose_1_cur_key : [B, H, Length, S]
-    auto rope_Slice_5 =
-        GenPattern<opset8::Slice>({rope_Transpose_1_cur_key, {0}, {16}, {1}, {3}}, "f32[?,8,?,16]", {});
-    auto cur_key_length = GenPattern<ov::intel_cpu::DimOfNode>({rope_Transpose_1_cur_key},
-                                                               "i32[1]",
-                                                               {{"axis", 2}, {"output_scalar", 0}});
-    auto past_key_length =
-        GenPattern<ov::intel_cpu::DimOfNode>({past_key_values_key}, "i32[1]", {{"axis", 2}, {"output_scalar", 0}});
-    auto rope_Add =
-        GenPattern<opset1::Add>({cur_key_length, past_key_length}, "i32[1]", {{"auto_broadcast", "numpy"}});
-    auto rope_rotary_emb_Slice =
-        GenPattern<opset8::Slice>({rotary_emb_Constant, {0}, rope_Add, {1}, {0}}, "f32[..1,1,2048,16]", {});
-    auto Constant_46607 = GenConst({1}, "i32[1,1,1,1]");
-    auto rope_Expand = GenPattern<opset1::Multiply>({rope_Unsqueeze_3, Constant_46607},
-                                                    "i32[?,1,?,1]",
-                                                    {{"auto_broadcast", "numpy"}});
-    auto rope_Tile = GenPattern<opset1::Tile>({rope_Expand, {1, 1, 1, 16}}, "i32[?,1,?,16]", {});
-    auto rope_Tile_shape0 =
-        GenPattern<ov::intel_cpu::DimOfNode>({rope_Tile}, "i32[1]", {{"axis", 0}, {"output_scalar", 0}});
-    auto rope_Concat_4 = GenPattern<opset1::Concat>({rope_Tile_shape0, {1}, {1}, {1}}, "i32[4]", {{"axis", 0}});
-    auto rope_Tile_1 = GenPattern<opset1::Tile>({rope_rotary_emb_Slice, rope_Concat_4}, "f32[?,1,2048,16]", {});
-    auto rope_GatherElements =
-        GenPattern<opset6::GatherElements>({rope_Tile_1, rope_Tile}, "f32[?,1,?,16]", {{"axis", 2}});
-    auto rope_Mul_2 = GenPattern<opset1::Multiply>({rope_Slice_5, rope_GatherElements},
-                                                   "f32[?,8,?,16]",
-                                                   {{"auto_broadcast", "numpy"}});
+    // the query_key_value projection from current embedding of input tokens
+    std::shared_ptr<ov::Node> rope_Reshape;
+    // the past keys from past_key_values
+    std::shared_ptr<ov::Node> past_key;
 
-    auto rope_Slice_10 = GenPattern<opset8::Slice>({rope_Slice_5, {8}, {2147483647}, {1}, {3}}, "f32[?,8,?,8]", {});
-    auto rope_Neg_1 =
-        GenPattern<ov::intel_cpu::PowerStaticNode>({rope_Slice_10},
-                                                  "f32[?,8,?,8]",
-                                                  {{"scale", -1.0}, {"power", 1.0}, {"shift", 0.0}, {"out-type", "f32"}});
-    auto rope_Slice_9 = GenPattern<opset8::Slice>({rope_Slice_5, {0}, {8}, {1}, {3}}, "f32[?,8,?,8]", {});
-    auto rope_Concat_8 = GenPattern<opset1::Concat>({rope_Neg_1, rope_Slice_9}, "f32[?,8,?,16]", {{"axis", -1}});
-    auto rope_rotary_emb_Slice_1 =
-        GenPattern<opset8::Slice>({rotary_emb_Constant_5, {0}, rope_Add, {1}, {0}}, "f32[..1,1,2048,16]", {});
-    auto rope_Concat_6 = GenPattern<opset1::Concat>({rope_Tile_shape0, {1}, {1}, {1}}, "i32[4]", {{"axis", 0}});
-    auto rope_Tile_2 = GenPattern<opset1::Tile>({rope_rotary_emb_Slice_1, rope_Concat_6}, "f32[?,1,2048,16]", {});
-    auto rope_GatherElements_1 =
-        GenPattern<opset6::GatherElements>({rope_Tile_2, rope_Tile}, "f32[?,1,?,16]", {{"axis", 2}});
-    auto rope_Mul_3 = GenPattern<opset1::Multiply>({rope_Concat_8, rope_GatherElements_1},
-                                                   "f32[?,8,?,16]",
-                                                   {{"auto_broadcast", "numpy"}});
-    auto rope_Add_2 =
-        GenPattern<opset1::Add>({rope_Mul_2, rope_Mul_3}, "f32[?,8,?,16]", {{"auto_broadcast", "numpy"}});
-    auto rope_Slice_6 =
-        GenPattern<opset8::Slice>({rope_Transpose_1_cur_key, {16}, {2147483647}, {1}, {3}}, "f32[?,8,?,48]", {});
-    auto rope_Concat_10 = GenPattern<opset1::Concat>({rope_Add_2, rope_Slice_6}, "f32[?,8,?,64]", {{"axis", -1}});
+    // result
+    std::shared_ptr<ov::Node> present_key, rope_query;
 
-    auto present_key = GenPattern<opset1::Concat>({past_key_values_key, rope_Concat_10}, "f32[?,8,?,64]", {{"axis", -2}});
+    PatternRoPE() {
+        input_ids = GenInput("i32[?,?]");
+        rope_cos_tab = GenInput("f32[1,1,2048,16]");
+        rope_sin_tab = GenInput("f32[1,1,2048,16]");
+        past_key = GenInput("f32[?,8,?,64]");
+        rope_Reshape = GenInput("f32[?,?,8,192]");
+        past_key_values_key = GenInput("f32[?,8,?,64]");
 
+        range_start = GenInput("i32[]");
+        range_stop = GenInput("i32[]");
+
+        auto past_key_length1 =
+                GenPattern<DimOfNode>({past_key_values_key}, "i32[]", {{"axis", -2}, {"output_scalar", 1}});
+        auto input_ids_seq_len0 = GenPattern<DimOfNode>({input_ids}, "i32[]", {{"axis", 1}, {"output_scalar", 1}});
+        auto gpt_neox_Add =
+            GenPattern<opset1::Add>({input_ids_seq_len0, past_key_length1}, "i32[]", {{"auto_broadcast", "numpy"}});
+
+        auto gpt_neox_Range =
+            GenPattern<opset4::Range>({range_start, range_stop, 1}, "i32[?]", {{"output_type", "i32"}});
+        auto gpt_neox_Unsqueeze =
+            GenPattern<opset1::Reshape>({gpt_neox_Range, {1, -1}}, "i32[1,?]", {{"special_zero", 0}});
+        auto input_ids_seq_len = GenPattern<DimOfNode>({input_ids}, "i32[1]", {{"axis", 1}, {"output_scalar", 0}});
+        auto gpt_neox_Concat = GenPattern<opset1::Concat>({{-1}, input_ids_seq_len}, "i32[2]", {{"axis", 0}});
+        auto gpt_neox_Reshape =
+            GenPattern<opset1::Reshape>({gpt_neox_Unsqueeze, gpt_neox_Concat}, "i32[?,?]", {{"special_zero", 1}});
+        auto rope_Unsqueeze_3 = GenPattern<opset1::Unsqueeze>({gpt_neox_Reshape, {1, 3}}, "i32[?,1,?,1]");
+
+        // cur key projection
+        auto rope_Slice_1 = GenPattern<opset8::Slice>({rope_Reshape, {64}, {128}, {1}, {3}}, "f32[?,?,8,64]");
+        auto rope_key_Transpose_1 = GenPattern<opset1::Transpose>({rope_Slice_1, {0, 2, 1, 3}}, "f32[?,8,?,64]");
+        auto rope_Slice_5 = GenPattern<opset8::Slice>({rope_key_Transpose_1, {0}, {16}, {1}, {3}}, "f32[?,8,?,16]");
+
+        auto rope_key_length =
+            GenPattern<DimOfNode>({rope_key_Transpose_1}, "i32[1]", {{"axis", 2}, {"output_scalar", 0}});
+        auto past_key_length = GenPattern<DimOfNode>({past_key}, "i32[1]", {{"axis", 2}, {"output_scalar", 0}});
+        auto rope_Add =
+            GenPattern<opset1::Add>({rope_key_length, past_key_length}, "i32[1]", {{"auto_broadcast", "numpy"}});
+        auto rope_cos_tab_slice =
+            GenPattern<opset8::Slice>({rope_cos_tab, {0}, rope_Add, {1}, {0}}, "f32[..1,1,2048,16]");
+
+        auto Constant_46597 = GenConst({1}, "i32[1,1,1,1]");
+        auto rope_Expand = GenPattern<opset1::Multiply>({rope_Unsqueeze_3, Constant_46597},
+                                                        "i32[?,1,?,1]",
+                                                        {{"auto_broadcast", "numpy"}});
+        auto rope_Tile = GenPattern<opset1::Tile>({rope_Expand, {1, 1, 1, 16}}, "i32[?,1,?,16]");
+        auto rope_Tile_dimof0 = GenPattern<DimOfNode>({rope_Tile}, "i32[1]", {{"axis", 0}, {"output_scalar", 0}});
+
+        auto rope_Concat_4 = GenPattern<opset1::Concat>({rope_Tile_dimof0, {1}, {1}, {1}}, "i32[4]", {{"axis", 0}});
+        auto rope_cos = GenPattern<opset1::Tile>({rope_cos_tab_slice, rope_Concat_4}, "f32[?,1,2048,16]");
+        auto rope_GatherCos = GenPattern<opset6::GatherElements>({rope_cos, rope_Tile}, "f32[?,1,?,16]", {{"axis", 2}});
+
+        auto rope_sin_tab_slice =
+            GenPattern<opset8::Slice>({rope_sin_tab, {0}, rope_Add, {1}, {0}}, "f32[..1,1,2048,16]");
+        auto rope_Concat_6 = GenPattern<opset1::Concat>({rope_Tile_dimof0, {1}, {1}, {1}}, "i32[4]", {{"axis", 0}});
+        auto rope_sin = GenPattern<opset1::Tile>({rope_sin_tab_slice, rope_Concat_6}, "f32[?,1,2048,16]");
+        auto rope_GatherSin = GenPattern<opset6::GatherElements>({rope_sin, rope_Tile}, "f32[?,1,?,16]", {{"axis", 2}});
+
+        auto rope_Mul_2 = GenPattern<opset1::Multiply>({rope_Slice_5, rope_GatherCos},
+                                                       "f32[?,8,?,16]",
+                                                       {{"auto_broadcast", "numpy"}});
+
+        // rotate_half
+        auto rope_Slice_10 = GenPattern<opset8::Slice>({rope_Slice_5, {8}, {2147483647}, {1}, {3}}, "f32[?,8,?,8]");
+        auto rope_Neg_1 =
+            GenPattern<PowerStaticNode>({rope_Slice_10},
+                                        "f32[?,8,?,8]",
+                                        {{"scale", -1.0}, {"power", 1.0}, {"shift", 0.0}, {"out-type", "f32"}});
+        auto rope_Slice_9 = GenPattern<opset8::Slice>({rope_Slice_5, {0}, {8}, {1}, {3}}, "f32[?,8,?,8]");
+        auto rope_Concat_8 = GenPattern<opset1::Concat>({rope_Neg_1, rope_Slice_9}, "f32[?,8,?,16]", {{"axis", -1}});
+
+        //
+        auto rope_Mul_3 = GenPattern<opset1::Multiply>({rope_Concat_8, rope_GatherSin},
+                                                       "f32[?,8,?,16]",
+                                                       {{"auto_broadcast", "numpy"}});
+        auto rope_Add_2 =
+            GenPattern<opset1::Add>({rope_Mul_2, rope_Mul_3}, "f32[?,8,?,16]", {{"auto_broadcast", "numpy"}});
+        auto rope_Slice_6 =
+            GenPattern<opset8::Slice>({rope_key_Transpose_1, {16}, {2147483647}, {1}, {3}}, "f32[?,8,?,48]");
+        auto rope_Concat_10 = GenPattern<opset1::Concat>({rope_Add_2, rope_Slice_6}, "f32[?,8,?,64]", {{"axis", -1}});
+
+        present_key = GenPattern<opset1::Concat>({past_key, rope_Concat_10}, "f32[?,8,?,64]", {{"axis", -2}});
+
+        // query: rope_Reshape[:, :, :, 0:64]
+        auto rope_Slice = GenPattern<opset8::Slice>({rope_Reshape, {0}, {64}, {1}, {3}}, "f32[?,?,8,64]");
+        auto rope_Transpose = GenPattern<opset1::Transpose>({rope_Slice, {0, 2, 1, 3}}, "f32[?,8,?,64]");
+        auto rope_Slice_3 = GenPattern<opset8::Slice>({rope_Transpose, {0}, {16}, {1}, {3}}, "f32[?,8,?,16]");
+        auto rope_Mul = GenPattern<opset1::Multiply>({rope_Slice_3, rope_GatherCos},
+                                                     "f32[?,8,?,16]",
+                                                     {{"auto_broadcast", "numpy"}});
+
+        auto rope_Slice_8 = GenPattern<opset8::Slice>({rope_Slice_3, {8}, {2147483647}, {1}, {3}}, "f32[?,8,?,8]");
+        auto rope_Neg =
+            GenPattern<PowerStaticNode>({rope_Slice_8},
+                                        "f32[?,8,?,8]",
+                                        {{"scale", -1.0}, {"power", 1.0}, {"shift", 0.0}, {"out-type", "f32"}});
+        auto rope_Slice_7 = GenPattern<opset8::Slice>({rope_Slice_3, {0}, {8}, {1}, {3}}, "f32[?,8,?,8]");
+        auto rope_Concat_7 = GenPattern<opset1::Concat>({rope_Neg, rope_Slice_7}, "f32[?,8,?,16]", {{"axis", -1}});
+
+        auto rope_Mul_1 = GenPattern<opset1::Multiply>({rope_Concat_7, rope_GatherSin},
+                                                       "f32[?,8,?,16]",
+                                                       {{"auto_broadcast", "numpy"}});
+        auto rope_Add_1 =
+            GenPattern<opset1::Add>({rope_Mul, rope_Mul_1}, "f32[?,8,?,16]", {{"auto_broadcast", "numpy"}});
+        auto rope_Slice_4 = GenPattern<opset8::Slice>({rope_Transpose, {16}, {2147483647}, {1}, {3}}, "f32[?,8,?,48]");
+        rope_query = GenPattern<opset1::Concat>({rope_Add_1, rope_Slice_4}, "f32[?,8,?,64]", {{"axis", -1}});
+    }
+};
+
+
+ov::intel_cpu::RoPEFusionQuery::RoPEFusionQuery() {
+    MATCHER_SCOPE(RoPEFusionQuery);
+    PatternRoPE rope;
     matcher_pass_callback callback = [=](ngraph::pattern::Matcher& m) {
         auto& pattern_to_output = m.get_pattern_value_map();
         // auto node_src = pattern_to_output.at(select.node).get_node_shared_ptr();
         auto root_value = m.get_match_value();
-        std::cout << "RoPEFusion::callback " << root_value << std::endl;
+        std::cout << "RoPEFusionQuery::callback " << root_value << std::endl;
         return false;
     };
-    auto m = std::make_shared<ngraph::pattern::Matcher>(present_key, matcher_name);
+    auto m = std::make_shared<ngraph::pattern::Matcher>(rope.rope_query, matcher_name);
     this->register_matcher(m, callback);
 }
+
+ov::intel_cpu::RoPEFusionKey::RoPEFusionKey() {
+    MATCHER_SCOPE(RoPEFusionKey);
+    PatternRoPE rope;
+    matcher_pass_callback callback = [=](ngraph::pattern::Matcher& m) {
+        auto& pattern_to_output = m.get_pattern_value_map();
+        // auto node_src = pattern_to_output.at(select.node).get_node_shared_ptr();
+        auto root_value = m.get_match_value();
+        std::cout << "RoPEFusionKey::callback " << root_value << std::endl;
+        return false;
+    };
+    auto m = std::make_shared<ngraph::pattern::Matcher>(rope.present_key, matcher_name);
+    this->register_matcher(m, callback);
+}
+
+#endif
+
+class VNodeIn : public ngraph::pass::MatcherPass {
+public:
+    OPENVINO_RTTI("VNodeIn", "0");
+
+    int get_all_labels(const Output<Node>& value, OutputVector& all_labels) {
+        auto node = value.get_node_shared_ptr();
+        if (dynamic_cast<ov::pass::pattern::op::Label*>(node.get())) {
+            all_labels.push_back(node);
+            return 1;
+        }
+        int ret = 0;
+        for (int i = 0; i < node->get_input_size(); i++) {
+            ret += get_all_labels(node->input_value(i), all_labels);
+        }
+        return ret;
+    }
+
+    template <typename F>
+    VNodeIn(const char* vtype, F func) {
+        MATCHER_SCOPE(VNodeIn);
+        OutputVector fake_inputs;
+        for (int i = 0; i < 32; i++) {
+            fake_inputs.push_back(GenInput());
+        }
+        auto pattern_value = func(fake_inputs);
+        matcher_pass_callback callback = [=](ngraph::pattern::Matcher& m) {
+            auto& pattern_to_output = m.get_pattern_value_map();
+            // auto node_src = pattern_to_output.at(select.node).get_node_shared_ptr();
+            auto root_value = m.get_match_value();
+            std::cout << "VNodeIn::callback " << root_value << std::endl;
+
+            OutputVector real_inputs;
+            for (auto& in : fake_inputs) {
+                auto it = pattern_to_output.find(in.get_node_shared_ptr());
+                if (it == pattern_to_output.end())
+                    break;
+                real_inputs.push_back(it->second);
+            }
+
+            auto vnode = std::make_shared<VNode>(real_inputs, root_value, vtype);
+            ngraph::replace_node(root_value.get_node_shared_ptr(), vnode);
+            return true;
+        };
+        auto m = std::make_shared<ngraph::pattern::Matcher>(pattern_value, matcher_name);
+        this->register_matcher(m, callback);
+    }
+};
+
+MHADynamicVNodeIn::MHADynamicVNodeIn() {
+    auto gptneox_rotate_half = [](const OutputVector& inputs) {
+        auto Slice_5 = inputs[0];   // f32[?,8,?,16]
+        auto Slice_10 = GenPattern<opset8::Slice>({Slice_5, {8}, {2147483647}, {1}, {3}}, "f32[?,8,?,8]");
+        auto Neg_1 =
+            GenPattern<PowerStaticNode>({Slice_10},
+                                        "f32[?,8,?,8]",
+                                        {{"scale", -1.0}, {"power", 1.0}, {"shift", 0.0}, {"out-type", "f32"}});
+        auto Slice_9 = GenPattern<opset8::Slice>({Slice_5, {0}, {8}, {1}, {3}}, "f32[?,8,?,8]");
+        auto Concat_8 = GenPattern<opset1::Concat>({Neg_1, Slice_9}, "f32[?,8,?,16]", {{"axis", -1}});
+        return Concat_8;
+    };
+
+    //add_matcher<VNodeIn>("rotate_half", gptneox_rotate_half);
+
+    auto gptneox_rope_cos = [](const OutputVector& inputs) {
+        auto input_ids = inputs[0];
+        auto past_key_values_key = inputs[1];   //
+        auto Slice_1 = inputs[2];               // from qkv projection
+        auto rotary_emb_Constant = inputs[3];   // const table "f32[1,1,2048,16]"
+
+        auto Transpose_1 = GenPattern<opset1::Transpose>({Slice_1, {0, 2, 1, 3}}, "f32[?,8,?,64]");
+
+        auto key_length = GenPattern<DimOfNode>({Transpose_1}, "i32[1]", {{"axis", 2}, {"output_scalar", 0}});
+        auto past_key_length1 = GenPattern<DimOfNode>({past_key_values_key}, "i32[1]", {{"axis", 2}, {"output_scalar", 0}});
+        auto Add = GenPattern<opset1::Add>({key_length, past_key_length1}, "i32[1]", {{"auto_broadcast", "numpy"}});
+
+        auto past_key_length0 = GenPattern<DimOfNode>({past_key_values_key}, "i32[]", {{"axis", -2}, {"output_scalar", 1}});
+        auto input_ids_seq_len = GenPattern<DimOfNode>({input_ids}, "i32[]", {{"axis", 1}, {"output_scalar", 1}});
+        auto gpt_neox_Add = GenPattern<opset1::Add>({input_ids_seq_len, past_key_length0}, "i32[]", {{"auto_broadcast", "numpy"}});
+
+        auto gpt_neox_Range = GenPattern<opset4::Range>({past_key_length0, gpt_neox_Add, 1}, "i32[?]", {{"output_type", "i32"}});
+        auto gpt_neox_Unsqueeze = GenPattern<opset1::Reshape>({gpt_neox_Range, {1, -1}}, "i32[1,?]", {{"special_zero", 0}});
+        auto input_ids_seq_len1 = GenPattern<DimOfNode>({input_ids}, "i32[1]", {{"axis", 1}, {"output_scalar", 0}});
+        auto gpt_neox_Concat = GenPattern<opset1::Concat>({{-1}, input_ids_seq_len1}, "i32[2]", {{"axis", 0}});
+        auto gpt_neox_Reshape = GenPattern<opset1::Reshape>({gpt_neox_Unsqueeze, gpt_neox_Concat}, "i32[?,?]", {{"special_zero", 1}});
+        auto Unsqueeze_3 = GenPattern<opset1::Unsqueeze>({gpt_neox_Reshape, {1, 3}}, "i32[?,1,?,1]");
+        auto Constant_46597 = GenConst({1}, "i32[1,1,1,1]");
+        auto Expand = GenPattern<opset1::Multiply>({Unsqueeze_3, Constant_46597}, "i32[?,1,?,1]", {{"auto_broadcast", "numpy"}});
+        auto Tile = GenPattern<opset1::Tile>({Expand, {1, 1, 1, 16}}, "i32[?,1,?,16]");
+        auto Tile_size0 = GenPattern<DimOfNode>({Tile}, "i32[1]", {{"axis", 0}, {"output_scalar", 0}});
+        auto Concat_4 = GenPattern<opset1::Concat>({Tile_size0, {1}, {1}, {1}}, "i32[4]", {{"axis", 0}});
+
+        auto rotary_emb_Slice = GenPattern<opset8::Slice>({rotary_emb_Constant, {0}, Add, {1}, {0}}, "f32[..1,1,2048,16]");
+        auto Tile_1 = GenPattern<opset1::Tile>({rotary_emb_Slice, Concat_4}, "f32[?,1,2048,16]");
+
+        auto GatherElements = GenPattern<opset6::GatherElements>({Tile_1, Tile}, "f32[?,1,?,16]", {{"axis", 2}});
+        return GatherElements;
+    };
+
+
+    auto gptneox_rope_cos_sin = [](const OutputVector& inputs) {
+        auto past_key_length0 = inputs[0];    // "i32[]"    range_start
+        auto gpt_neox_Add = inputs[1];        // "i32[]"    range_stop
+        auto input_ids = inputs[2];  // must == (range_stop - range_start)
+        auto Add = inputs[3];                 // i32[1]   must be some value > 0 at runtime
+        auto rotary_emb_Constant = inputs[4]; // const table "f32[1,1,2048,16]"
+
+        //auto Transpose_1 = GenPattern<opset1::Transpose>({Slice_1, {0, 2, 1, 3}}, "f32[?,8,?,64]");
+
+        //auto key_length = GenPattern<DimOfNode>({Transpose_1}, "i32[1]", {{"axis", 2}, {"output_scalar", 0}});
+        //auto past_key_length1 = GenPattern<DimOfNode>({past_key_values_key}, "i32[1]", {{"axis", 2}, {"output_scalar", 0}});
+        //auto Add = GenPattern<opset1::Add>({key_length, past_key_length1}, "i32[1]", {{"auto_broadcast", "numpy"}});
+
+        //auto past_key_length0 = GenPattern<DimOfNode>({past_key_values_key}, "i32[]", {{"axis", -2}, {"output_scalar", 1}});
+        //auto input_ids_seq_len = GenPattern<DimOfNode>({input_ids}, "i32[]", {{"axis", 1}, {"output_scalar", 1}});
+        //auto gpt_neox_Add = GenPattern<opset1::Add>({input_ids_seq_len, past_key_length0}, "i32[]", {{"auto_broadcast", "numpy"}});
+
+        auto gpt_neox_Range = GenPattern<opset4::Range>({past_key_length0, gpt_neox_Add, 1}, "i32[?]", {{"output_type", "i32"}});
+        auto gpt_neox_Unsqueeze = GenPattern<opset1::Reshape>({gpt_neox_Range, {1, -1}}, "i32[1,?]", {{"special_zero", 0}});
+        auto input_ids_seq_len1 = GenPattern<DimOfNode>({input_ids}, "i32[1]", {{"axis", 1}, {"output_scalar", 0}});
+        auto gpt_neox_Concat = GenPattern<opset1::Concat>({{-1}, input_ids_seq_len1}, "i32[2]", {{"axis", 0}});
+        auto gpt_neox_Reshape = GenPattern<opset1::Reshape>({gpt_neox_Unsqueeze, gpt_neox_Concat}, "i32[?,?]", {{"special_zero", 1}});
+        auto Unsqueeze_3 = GenPattern<opset1::Unsqueeze>({gpt_neox_Reshape, {1, 3}}, "i32[?,1,?,1]");
+        auto Constant_46597 = GenConst({1}, "i32[1,1,1,1]");
+        auto Expand = GenPattern<opset1::Multiply>({Unsqueeze_3, Constant_46597}, "i32[?,1,?,1]", {{"auto_broadcast", "numpy"}});
+        auto Tile = GenPattern<opset1::Tile>({Expand, {1, 1, 1, 16}}, "i32[?,1,?,16]");
+        auto Tile_size0 = GenPattern<DimOfNode>({Tile}, "i32[1]", {{"axis", 0}, {"output_scalar", 0}});
+        auto Concat_4 = GenPattern<opset1::Concat>({Tile_size0, {1}, {1}, {1}}, "i32[4]", {{"axis", 0}});
+
+        auto rotary_emb_Slice = GenPattern<opset8::Slice>({rotary_emb_Constant, {0}, Add, {1}, {0}}, "f32[..1,1,2048,16]");
+        auto Tile_1 = GenPattern<opset1::Tile>({rotary_emb_Slice, Concat_4}, "f32[?,1,2048,16]");
+
+        auto GatherElements = GenPattern<opset6::GatherElements>({Tile_1, Tile}, "f32[?,1,?,16]", {{"axis", 2}});
+        return GatherElements;
+    };
+
+    //add_matcher<VNodeIn>("rope_cos_sin", gptneox_rope_cos_sin);
+
+    auto gptneox_rope_neox = [=](const OutputVector& inputs) {
+        auto Transpose_1 = inputs[0];   // "f32[?,8,?,64]"
+
+        auto past_key_length0 = inputs[1];    // "i32[]"    range_start
+        auto gpt_neox_Add = inputs[2];        // "i32[]"    range_stop
+        auto input_ids = inputs[3];
+        auto Add = inputs[4];                 // i32[1]   must be some value > 0 at runtime
+        auto rotary_emb_Cos = inputs[5]; // const table "f32[1,1,2048,16]"
+        auto rotary_emb_Sin = inputs[6]; // const table "f32[1,1,2048,16]"
+
+        auto cos = gptneox_rope_cos_sin({past_key_length0, gpt_neox_Add, input_ids, Add, rotary_emb_Cos});
+        auto sin = gptneox_rope_cos_sin({past_key_length0, gpt_neox_Add, input_ids, Add, rotary_emb_Sin});
+
+        auto Slice_5 = GenPattern<opset8::Slice>({Transpose_1, {0}, {16}, {1}, {3}}, "f32[?,8,?,16]");
+        auto Mul_2 = GenPattern<opset1::Multiply>({Slice_5, cos}, "f32[?,8,?,16]", {{"auto_broadcast", "numpy"}});
+        //auto VNode_59309 = GenPattern<VNode>({Slice_5}, "f32[?,8,?,16]", {{"vtype", "rotate_half"}});
+        auto VNode_59309 = gptneox_rotate_half({Slice_5});
+        auto Mul_3 = GenPattern<opset1::Multiply>({VNode_59309, sin}, "f32[?,8,?,16]", {{"auto_broadcast", "numpy"}});
+        auto Add_2 = GenPattern<opset1::Add>({Mul_2, Mul_3}, "f32[?,8,?,16]", {{"auto_broadcast", "numpy"}});
+
+        auto Slice_6 = GenPattern<opset8::Slice>({Transpose_1, {16}, {2147483647}, {1}, {3}}, "f32[?,8,?,48]");
+        auto Concat_10 = GenPattern<opset1::Concat>({Add_2, Slice_6}, "f32[?,8,?,64]", {{"axis", -1}});
+        return Concat_10;
+    };
+
+    add_matcher<VNodeIn>("rope_neox", gptneox_rope_neox);
+}
+
+MHADynamicVNodeOut::MHADynamicVNodeOut() {
+    MATCHER_SCOPE(MHADynamicVNodeOut);
+    auto vnode = ov::pass::pattern::wrap_type<VNode>();
+
+    matcher_pass_callback callback = [=](ngraph::pattern::Matcher& m) {
+        auto& pattern_to_output = m.get_pattern_value_map();
+        auto root_value = m.get_match_value();
+        std::cout << "MHADynamicVNodeOut::callback " << root_value << std::endl;
+        auto vnode = std::dynamic_pointer_cast<VNode>(root_value.get_node_shared_ptr());
+
+        // all nodes inside vnode may contain vnodes
+        ov::NodeVector nv;
+        vnode->get_internal_vnodes(nv, vnode->get_org());
+        for (auto & n : nv) {
+            register_new_node(n);
+        }
+        ngraph::replace_node(root_value.get_node_shared_ptr(), {vnode->get_org()});
+        return true;
+    };
+    auto m = std::make_shared<ngraph::pattern::Matcher>(vnode, matcher_name);
+    this->register_matcher(m, callback);
+}
+
+}   // namespace intel_cpu
+}   // namespace ov
 
 ov::intel_cpu::CausalMaskFusion::CausalMaskFusion() {
     MATCHER_SCOPE(CausalMaskFusion);

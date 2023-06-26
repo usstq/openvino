@@ -55,11 +55,29 @@ public:
     OPENVINO_RTTI("CausalMaskFusion", "0");
     CausalMaskFusion();
 };
-
-class RoPEFusion: public ngraph::pass::MatcherPass {
+/*
+class RoPEFusionQuery: public ngraph::pass::MatcherPass {
 public:
-    OPENVINO_RTTI("RoPEFusion", "0");
-    RoPEFusion();
+    OPENVINO_RTTI("RoPEFusionQuery", "0");
+    RoPEFusionQuery();
+};
+
+class RoPEFusionKey: public ngraph::pass::MatcherPass {
+public:
+    OPENVINO_RTTI("RoPEFusionKey", "0");
+    RoPEFusionKey();
+};
+*/
+
+class MHADynamicVNodeIn: public ngraph::pass::GraphRewrite {
+public:
+    OPENVINO_RTTI("MHADynamicVNodeIn", "0");
+    MHADynamicVNodeIn();
+};
+class MHADynamicVNodeOut: public ngraph::pass::MatcherPass {
+public:
+    OPENVINO_RTTI("MHADynamicVNodeOut", "0");
+    MHADynamicVNodeOut();
 };
 
 class MHADynamicFloatFusion: public ngraph::pass::GraphRewrite {
@@ -67,7 +85,8 @@ public:
     OPENVINO_RTTI("MHADynamicFloatFusion", "0");
     MHADynamicFloatFusion() {
         add_matcher<CausalMaskFusion>();
-        add_matcher<RoPEFusion>();
+        //add_matcher<RoPEFusionQuery>();
+        //add_matcher<RoPEFusionKey>();
     }
 };
 

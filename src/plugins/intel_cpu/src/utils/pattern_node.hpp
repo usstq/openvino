@@ -26,7 +26,17 @@
 namespace ov {
 namespace intel_cpu {
 
-// inspired by https://www.fluentcpp.com/2018/12/14/named-arguments-cpp/
+extern const int _matcher_verbose;
+
+template<typename ... Args>
+static inline void verbose_log(Args&& ... args) {
+    if (!_matcher_verbose) return;
+    std::stringstream ss;
+    int dummy[] = {(ss << std::forward<Args>(args) << " ", 0)...};
+    (void)(dummy);
+    ss << std::endl;
+    std::cout << ss.str();
+}
 
 inline std::vector<std::string> split_string(const std::string & s, const std::string & delimiter) {
     std::vector<std::string> ret;
@@ -66,7 +76,6 @@ struct vtype {
     bool predicate(const ov::Output<ov::Node>& value) const {
         if (!ele_type.compatible(value.get_element_type()) ||
             !pshape.compatible(value.get_partial_shape())) {
-            std::cout << "               " << ele_type << pshape << " vs " << value.get_element_type() << value.get_partial_shape() << std::endl;
             return false;
         }
         return true;
@@ -133,18 +142,6 @@ struct attr {
 
 bool attr_compatible(ov::Node& node, const std::vector<attr>& attr);
 
-extern const int _matcher_verbose;
-
-template<typename ... Args>
-static inline void verbose_log(Args&& ... args) {
-    if (!_matcher_verbose) return;
-    std::stringstream ss;
-    int dummy[] = {(ss << std::forward<Args>(args) << " ", 0)...};
-    (void)(dummy);
-    ss << std::endl;
-    std::cout << ss.str();
-}
-
 inline std::shared_ptr<Node> GenInput(vtype vt = nullptr) {
     return ov::pass::pattern::any_input([vt](const Output<Node>& value) {
         if (!vt.predicate(value)) {
@@ -171,7 +168,7 @@ struct GenPatternNode {
         });
     }
     GenPatternNode(const std::shared_ptr<Node> & node) : node(node) {}
-
+    GenPatternNode(const Output<Node>& out) : node(out.get_node_shared_ptr()) {}
     GenPatternNode(int v) {
         node = ConstVector(std::vector<int>{v}, "i32[]");
     }
