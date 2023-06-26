@@ -768,6 +768,7 @@ public:
             fake_inputs.push_back(GenInput());
         }
         auto pattern_value = func(fake_inputs);
+
         matcher_pass_callback callback = [=](ngraph::pattern::Matcher& m) {
             auto& pattern_to_output = m.get_pattern_value_map();
             // auto node_src = pattern_to_output.at(select.node).get_node_shared_ptr();
@@ -791,7 +792,12 @@ public:
     }
 };
 
+
+#include "gptneox_attention.txt"
+
 MHADynamicVNodeIn::MHADynamicVNodeIn() {
+    add_matcher<VNodeIn>("gptneox_attention", gptneox_attention);
+#if 0
     auto gptneox_rotate_half = [](const OutputVector& inputs) {
         auto Slice_5 = inputs[0];   // f32[?,8,?,16]
         auto Slice_10 = GenPattern<opset8::Slice>({Slice_5, {8}, {2147483647}, {1}, {3}}, "f32[?,8,?,8]");
@@ -906,6 +912,7 @@ MHADynamicVNodeIn::MHADynamicVNodeIn() {
     };
 
     add_matcher<VNodeIn>("rope_neox", gptneox_rope_neox);
+#endif
 }
 
 MHADynamicVNodeOut::MHADynamicVNodeOut() {

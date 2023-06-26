@@ -13,6 +13,8 @@
 #include "node.h"
 #include "edge.h"
 #include <iomanip>
+#include <cfloat>
+#include <climits>
 #include "nodes/input.h"
 #include "nodes/eltwise.h"
 #include "snippets/op/subgraph.hpp"
@@ -349,6 +351,36 @@ std::ostream & operator<<(std::ostream & os, const Node &c_node) {
     return os;
 }
 
+template <typename T>
+void stream_output_scalar(std::ostream& os, const T& value) {
+    if (std::is_floating_point<T>::value) {
+        if (std::isnan(value)) {
+            os << "NAN";
+        } else if (std::isinf(value)) {
+            os << (value > 0 ? "INFINITY" : "-INFINITY");
+        } else if (value == FLT_MIN) {
+                os << "FLT_MIN";
+        } else if (value == -FLT_MIN) {
+                os << "-FLT_MIN";
+        } else if (value == FLT_MAX) {
+                os << "FLT_MAX";
+        } else if (value == -FLT_MAX) {
+                os << "-FLT_MAX";
+        } else {
+            std::stringstream ss;
+            ss << value;
+            auto strv = ss.str();
+            os << strv;
+            if (strv.find(".") == std::string::npos && strv.find("e") == std::string::npos)
+            os << ".0";
+            if (std::is_same<T, float>::value)
+            os << "f";
+        }
+    } else {
+        os << value;
+    }
+}
+
 class OstreamAttributeVisitor : public ngraph::AttributeVisitor {
     std::ostream & os;
     const char * sep = "";
@@ -433,18 +465,7 @@ public:
     template<typename T, typename std::enable_if<std::is_arithmetic<T>::value, bool>::type = true>
     void append_attribute(const char * name, const T& value) {
         os << sep << "{\"" << name << "\", ";
-        if (std::is_floating_point<T>::value) {
-            std::stringstream ss;
-            ss << value;
-            auto strv = ss.str();
-            os << strv;
-            if (strv.find(".") == std::string::npos)
-                os << ".0";
-            if (std::is_same<T, float>::value)
-                os << "f";
-        } else {
-            os << value;
-        }
+        stream_output_scalar(os, value);
         os << "}";
         sep = ", ";
     }
@@ -646,6 +667,28 @@ std::ostream & operator<<(std::ostream & os, const dnnl::memory::format_tag form
 DumpModel::DumpModel(const std::string& file_name) : file_name(file_name) {
 }
 
+void stream_output_constant(std::ostream & os, op::v0::Constant * constop) {
+    auto shape = constop->get_shape();
+    auto is_scalar = shape.size() == 0;
+    auto total_size = shape_size(shape);
+    auto eletype = constop->get_output_element_type(0);
+    const char * sep = "";
+    os << (is_scalar? "" : "{");
+    if (eletype == ov::element::f32) {
+        for (float value : constop->get_vector<float>()) {
+            os << sep;
+            stream_output_scalar(os, value);
+            sep = ", ";
+        }
+    } else {
+        for (auto v : constop->get_value_strings()) {
+            os << sep << v;
+            sep = ", ";
+        }
+    }
+    os << (is_scalar? "" : "}");
+}
+
 void DumpModel::dump_cpp_style(std::ostream & os, const std::shared_ptr<ov::Model>& model) {
     const ov::Model& f = *model;
     std::string prefix = "";
@@ -675,16 +718,10 @@ void DumpModel::dump_cpp_style(std::ostream & os, const std::shared_ptr<ov::Mode
             if (shape.size() > 1) continue;
             auto is_scalar = shape.size() == 0;
             if (shape_size(constop->get_shape()) > 8) continue;
+
             // literal construct
             std::stringstream ss;
-            sep = "";
-            //ss << op->get_output_element_type(0) << "(";
-            ss << (is_scalar? "" : "{");
-            for (auto v : constop->get_value_strings()) {
-                ss << sep << v;
-                sep = ", ";
-            }
-            ss << (is_scalar? "" : "}");
+            stream_output_constant(ss, constop.get());
             literal_consts[op] = ss.str();
         }
     }
@@ -703,25 +740,63 @@ void DumpModel::dump_cpp_style(std::ostream & os, const std::shared_ptr<ov::Mode
         return ss.str();
     };
 
+    // change name convension
+    std::map<ov::Node*, std::string> opname;
+    std::map<std::string, int> opname_count;
+    for (auto op : f.get_ordered_ops()) {
+        auto name = op->get_friendly_name();
+        std::replace(name.begin(), name.end(), '\\', '_');
+        std::replace(name.begin(), name.end(), '/', '_');
+        std::replace(name.begin(), name.end(), '.', '_');
+        std::replace(name.begin(), name.end(), '[', '_');
+        std::replace(name.begin(), name.end(), ']', '_');
+        std::replace(name.begin(), name.end(), '-', 'n');
+
+        int idx = 0;
+        if (opname_count.count(name)) {
+            idx = opname_count[name] + 1;
+        }
+        opname_count[name] = idx;
+
+        if (idx)
+            name += std::to_string(idx);
+
+        opname[op.get()] = name;
+    }
+
     for (auto op : f.get_ordered_ops()) {
         if (literal_consts.count(op)) continue;
 
         const auto & type_info = op->get_type_info();
-        auto type = std::string(type_info.get_version()) + "::" + type_info.name;
-        auto name = op->get_friendly_name();
+        auto version_info = std::string(type_info.get_version());
+        auto type = version_info + "::" + type_info.name;
+        // fix name for cpu custom name
+        if (version_info == "cpu_plugin_opset") {
+            type = type_info.name;
+            type += "Node";
+        }
+        auto name = opname[op.get()];
         os << prefix << "    ";
 
         if (auto constop = std::dynamic_pointer_cast<op::v0::Constant>(op)) {
-            os << "    auto " << name << " = GenConst({";
-            if (constop->get_element_type() == element::Type_t::f32) {
+            auto ele_size = shape_size(constop->get_shape());
+            auto ele_type = constop->get_element_type();
+            bool use_comment = false;
+            if (ele_type.is_integral_number() && ele_size < 9) {
+                use_comment = false;
+                os << "    auto " << name << " = GenConst({";
+            } else {
+                use_comment = true;
+                os << "    auto " << name << " = GenPattern<" << type << ">({/*";
+            }
+            if (ele_type == element::Type_t::f32) {
                 os << PrintableVector<float>(constop->get_vector<float>());
-            } else if (constop->get_element_type() == element::Type_t::i8) {
+            } else if (ele_type == element::Type_t::i8) {
                 os << PrintableVector<int8_t>(constop->get_vector<int8_t>());
-            } else if (constop->get_element_type() == element::Type_t::u8) {
+            } else if (ele_type == element::Type_t::u8) {
                 os << PrintableVector<uint8_t>(constop->get_vector<uint8_t>());
             } else {
-                auto sz = shape_size(constop->get_shape());
-                if (sz < 9) {
+                if (ele_size < 9) {
                     sep = "";
                     for (auto v : constop->get_value_strings()) {
                         os << sep << v;
@@ -731,6 +806,7 @@ void DumpModel::dump_cpp_style(std::ostream & os, const std::shared_ptr<ov::Mode
                     os << "...";
                 }
             }
+            if (use_comment) os << "*/";
             os << "}, \"" << get_output_values_info(op) << "\");" << std::endl;
         } else {
             os << "    auto " << name << " = GenPattern<" << type << ">({";
@@ -740,12 +816,12 @@ void DumpModel::dump_cpp_style(std::ostream & os, const std::shared_ptr<ov::Mode
                 auto iop = vout.get_node_shared_ptr();
                 if (iop->get_output_size() > 1) {
                     auto out_port = vout.get_index();
-                    os << sep << tag << iop->get_friendly_name() << "[" << out_port << "]";
+                    os << sep << tag << opname[iop.get()] << "[" << out_port << "]";
                 } else {
                     if (literal_consts.count(iop))
                         os << sep << tag << literal_consts[iop];
                     else
-                        os << sep << tag << iop->get_friendly_name();
+                        os << sep << tag << opname[iop.get()];
                 }
                 sep = ", ";
             }
