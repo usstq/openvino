@@ -1,4 +1,5 @@
-std::shared_ptr<Node> gptneox_attention(const OutputVector& inputs) {
+OutputVector gptneox_attention(const OutputVector& inputs) {
+    OutputVector all_outputs;
     int ii = 0;
     auto input_ids = inputs[ii++]; //GenInput("i32[?,?]");
     auto attention_mask = inputs[ii++];// GenPattern<opset1::Parameter>({}, "i32[?,?]", {{"shape", "[?,?]"}, {"element_type", "i32"}});
@@ -94,5 +95,7 @@ std::shared_ptr<Node> gptneox_attention(const OutputVector& inputs) {
     auto _gpt_neox_layers_1_attention_MatMul_1 = GenPattern<opset1::MatMul>({_gpt_neox_layers_1_attention_Softmax, present_1_value}, "f32[?,8,?,64]", {{"transpose_a", 0}, {"transpose_b", 0}});
     auto _gpt_neox_layers_1_attention_Transpose_4 = GenPattern<opset1::Transpose>({_gpt_neox_layers_1_attention_MatMul_1, {0, 2, 1, 3}}, "f32[?,?,8,64]");
     auto _gpt_neox_layers_1_attention_Reshape_4 = GenPattern<opset1::Reshape>({_gpt_neox_layers_1_attention_Transpose_4, {0, 0, 512}}, "f32[?,?,512]", {{"special_zero", 1}});
-    return _gpt_neox_layers_1_attention_Reshape_4;
+
+
+    return {_gpt_neox_layers_1_attention_Reshape_4, present_1_key, present_1_value};
 }

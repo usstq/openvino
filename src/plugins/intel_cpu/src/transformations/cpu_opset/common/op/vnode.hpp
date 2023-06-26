@@ -16,7 +16,7 @@ public:
 
     VNode() = default;
 
-    VNode(const ngraph::OutputVector& new_args, const ngraph::Output<Node> &org, const std::string& vtype);
+    VNode(const ngraph::OutputVector& new_args, const ngraph::OutputVector& org_outputs, const std::string& vtype);
 
     bool visit_attributes(ngraph::AttributeVisitor &visitor) override;
 
@@ -25,11 +25,11 @@ public:
     std::shared_ptr<Node> clone_with_new_inputs(const ngraph::OutputVector& new_args) const override;
 
     std::string get_vtype() const { return m_vtype; }
-    ngraph::Output<Node> get_org() { return m_org; }
+    ngraph::OutputVector get_org() { return m_org_outputs; }
 
     void get_internal_vnodes(ov::NodeVector & nv, ngraph::Output<Node> base);
 private:
-    ngraph::Output<Node> m_org;
+    ngraph::OutputVector m_org_outputs;
     std::string m_vtype;
     ov::NodeVector m_nodes;
 };

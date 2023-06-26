@@ -767,152 +767,43 @@ public:
         for (int i = 0; i < 32; i++) {
             fake_inputs.push_back(GenInput());
         }
-        auto pattern_value = func(fake_inputs);
+        auto pattern_values = func(fake_inputs);
 
         matcher_pass_callback callback = [=](ngraph::pattern::Matcher& m) {
-            auto& pattern_to_output = m.get_pattern_value_map();
-            // auto node_src = pattern_to_output.at(select.node).get_node_shared_ptr();
+            auto& pvmap = m.get_pattern_value_map();
+            // auto node_src = pvmap.at(select.node).get_node_shared_ptr();
             auto root_value = m.get_match_value();
             std::cout << "VNodeIn::callback " << root_value << std::endl;
 
             OutputVector real_inputs;
             for (auto& in : fake_inputs) {
-                auto it = pattern_to_output.find(in.get_node_shared_ptr());
-                if (it == pattern_to_output.end())
+                auto it = pvmap.find(in.get_node_shared_ptr());
+                if (it == pvmap.end())
                     break;
                 real_inputs.push_back(it->second);
             }
+            OutputVector real_outputs;
+            for (int i = 0; i < pattern_values.size(); i++) {
+                real_outputs.push_back(pvmap[pattern_values[i].get_node_shared_ptr()]);
+            }
 
-            auto vnode = std::make_shared<VNode>(real_inputs, root_value, vtype);
-            ngraph::replace_node(root_value.get_node_shared_ptr(), vnode);
+            auto vnode = std::make_shared<VNode>(real_inputs, real_outputs, vtype);
+
+            for (int i = 0; i < pattern_values.size(); i++) {
+                auto out = pvmap[pattern_values[i].get_node_shared_ptr()];
+                ngraph::replace_node(out.get_node_shared_ptr(), {vnode->output(i)});
+            }
             return true;
         };
-        auto m = std::make_shared<ngraph::pattern::Matcher>(pattern_value, matcher_name);
+        auto m = std::make_shared<ngraph::pattern::Matcher>(pattern_values[0], matcher_name);
         this->register_matcher(m, callback);
     }
 };
-
 
 #include "gptneox_attention.txt"
 
 MHADynamicVNodeIn::MHADynamicVNodeIn() {
     add_matcher<VNodeIn>("gptneox_attention", gptneox_attention);
-#if 0
-    auto gptneox_rotate_half = [](const OutputVector& inputs) {
-        auto Slice_5 = inputs[0];   // f32[?,8,?,16]
-        auto Slice_10 = GenPattern<opset8::Slice>({Slice_5, {8}, {2147483647}, {1}, {3}}, "f32[?,8,?,8]");
-        auto Neg_1 =
-            GenPattern<PowerStaticNode>({Slice_10},
-                                        "f32[?,8,?,8]",
-                                        {{"scale", -1.0}, {"power", 1.0}, {"shift", 0.0}, {"out-type", "f32"}});
-        auto Slice_9 = GenPattern<opset8::Slice>({Slice_5, {0}, {8}, {1}, {3}}, "f32[?,8,?,8]");
-        auto Concat_8 = GenPattern<opset1::Concat>({Neg_1, Slice_9}, "f32[?,8,?,16]", {{"axis", -1}});
-        return Concat_8;
-    };
-
-    //add_matcher<VNodeIn>("rotate_half", gptneox_rotate_half);
-
-    auto gptneox_rope_cos = [](const OutputVector& inputs) {
-        auto input_ids = inputs[0];
-        auto past_key_values_key = inputs[1];   //
-        auto Slice_1 = inputs[2];               // from qkv projection
-        auto rotary_emb_Constant = inputs[3];   // const table "f32[1,1,2048,16]"
-
-        auto Transpose_1 = GenPattern<opset1::Transpose>({Slice_1, {0, 2, 1, 3}}, "f32[?,8,?,64]");
-
-        auto key_length = GenPattern<DimOfNode>({Transpose_1}, "i32[1]", {{"axis", 2}, {"output_scalar", 0}});
-        auto past_key_length1 = GenPattern<DimOfNode>({past_key_values_key}, "i32[1]", {{"axis", 2}, {"output_scalar", 0}});
-        auto Add = GenPattern<opset1::Add>({key_length, past_key_length1}, "i32[1]", {{"auto_broadcast", "numpy"}});
-
-        auto past_key_length0 = GenPattern<DimOfNode>({past_key_values_key}, "i32[]", {{"axis", -2}, {"output_scalar", 1}});
-        auto input_ids_seq_len = GenPattern<DimOfNode>({input_ids}, "i32[]", {{"axis", 1}, {"output_scalar", 1}});
-        auto gpt_neox_Add = GenPattern<opset1::Add>({input_ids_seq_len, past_key_length0}, "i32[]", {{"auto_broadcast", "numpy"}});
-
-        auto gpt_neox_Range = GenPattern<opset4::Range>({past_key_length0, gpt_neox_Add, 1}, "i32[?]", {{"output_type", "i32"}});
-        auto gpt_neox_Unsqueeze = GenPattern<opset1::Reshape>({gpt_neox_Range, {1, -1}}, "i32[1,?]", {{"special_zero", 0}});
-        auto input_ids_seq_len1 = GenPattern<DimOfNode>({input_ids}, "i32[1]", {{"axis", 1}, {"output_scalar", 0}});
-        auto gpt_neox_Concat = GenPattern<opset1::Concat>({{-1}, input_ids_seq_len1}, "i32[2]", {{"axis", 0}});
-        auto gpt_neox_Reshape = GenPattern<opset1::Reshape>({gpt_neox_Unsqueeze, gpt_neox_Concat}, "i32[?,?]", {{"special_zero", 1}});
-        auto Unsqueeze_3 = GenPattern<opset1::Unsqueeze>({gpt_neox_Reshape, {1, 3}}, "i32[?,1,?,1]");
-        auto Constant_46597 = GenConst({1}, "i32[1,1,1,1]");
-        auto Expand = GenPattern<opset1::Multiply>({Unsqueeze_3, Constant_46597}, "i32[?,1,?,1]", {{"auto_broadcast", "numpy"}});
-        auto Tile = GenPattern<opset1::Tile>({Expand, {1, 1, 1, 16}}, "i32[?,1,?,16]");
-        auto Tile_size0 = GenPattern<DimOfNode>({Tile}, "i32[1]", {{"axis", 0}, {"output_scalar", 0}});
-        auto Concat_4 = GenPattern<opset1::Concat>({Tile_size0, {1}, {1}, {1}}, "i32[4]", {{"axis", 0}});
-
-        auto rotary_emb_Slice = GenPattern<opset8::Slice>({rotary_emb_Constant, {0}, Add, {1}, {0}}, "f32[..1,1,2048,16]");
-        auto Tile_1 = GenPattern<opset1::Tile>({rotary_emb_Slice, Concat_4}, "f32[?,1,2048,16]");
-
-        auto GatherElements = GenPattern<opset6::GatherElements>({Tile_1, Tile}, "f32[?,1,?,16]", {{"axis", 2}});
-        return GatherElements;
-    };
-
-
-    auto gptneox_rope_cos_sin = [](const OutputVector& inputs) {
-        auto past_key_length0 = inputs[0];    // "i32[]"    range_start
-        auto gpt_neox_Add = inputs[1];        // "i32[]"    range_stop
-        auto input_ids = inputs[2];  // must == (range_stop - range_start)
-        auto Add = inputs[3];                 // i32[1]   must be some value > 0 at runtime
-        auto rotary_emb_Constant = inputs[4]; // const table "f32[1,1,2048,16]"
-
-        //auto Transpose_1 = GenPattern<opset1::Transpose>({Slice_1, {0, 2, 1, 3}}, "f32[?,8,?,64]");
-
-        //auto key_length = GenPattern<DimOfNode>({Transpose_1}, "i32[1]", {{"axis", 2}, {"output_scalar", 0}});
-        //auto past_key_length1 = GenPattern<DimOfNode>({past_key_values_key}, "i32[1]", {{"axis", 2}, {"output_scalar", 0}});
-        //auto Add = GenPattern<opset1::Add>({key_length, past_key_length1}, "i32[1]", {{"auto_broadcast", "numpy"}});
-
-        //auto past_key_length0 = GenPattern<DimOfNode>({past_key_values_key}, "i32[]", {{"axis", -2}, {"output_scalar", 1}});
-        //auto input_ids_seq_len = GenPattern<DimOfNode>({input_ids}, "i32[]", {{"axis", 1}, {"output_scalar", 1}});
-        //auto gpt_neox_Add = GenPattern<opset1::Add>({input_ids_seq_len, past_key_length0}, "i32[]", {{"auto_broadcast", "numpy"}});
-
-        auto gpt_neox_Range = GenPattern<opset4::Range>({past_key_length0, gpt_neox_Add, 1}, "i32[?]", {{"output_type", "i32"}});
-        auto gpt_neox_Unsqueeze = GenPattern<opset1::Reshape>({gpt_neox_Range, {1, -1}}, "i32[1,?]", {{"special_zero", 0}});
-        auto input_ids_seq_len1 = GenPattern<DimOfNode>({input_ids}, "i32[1]", {{"axis", 1}, {"output_scalar", 0}});
-        auto gpt_neox_Concat = GenPattern<opset1::Concat>({{-1}, input_ids_seq_len1}, "i32[2]", {{"axis", 0}});
-        auto gpt_neox_Reshape = GenPattern<opset1::Reshape>({gpt_neox_Unsqueeze, gpt_neox_Concat}, "i32[?,?]", {{"special_zero", 1}});
-        auto Unsqueeze_3 = GenPattern<opset1::Unsqueeze>({gpt_neox_Reshape, {1, 3}}, "i32[?,1,?,1]");
-        auto Constant_46597 = GenConst({1}, "i32[1,1,1,1]");
-        auto Expand = GenPattern<opset1::Multiply>({Unsqueeze_3, Constant_46597}, "i32[?,1,?,1]", {{"auto_broadcast", "numpy"}});
-        auto Tile = GenPattern<opset1::Tile>({Expand, {1, 1, 1, 16}}, "i32[?,1,?,16]");
-        auto Tile_size0 = GenPattern<DimOfNode>({Tile}, "i32[1]", {{"axis", 0}, {"output_scalar", 0}});
-        auto Concat_4 = GenPattern<opset1::Concat>({Tile_size0, {1}, {1}, {1}}, "i32[4]", {{"axis", 0}});
-
-        auto rotary_emb_Slice = GenPattern<opset8::Slice>({rotary_emb_Constant, {0}, Add, {1}, {0}}, "f32[..1,1,2048,16]");
-        auto Tile_1 = GenPattern<opset1::Tile>({rotary_emb_Slice, Concat_4}, "f32[?,1,2048,16]");
-
-        auto GatherElements = GenPattern<opset6::GatherElements>({Tile_1, Tile}, "f32[?,1,?,16]", {{"axis", 2}});
-        return GatherElements;
-    };
-
-    //add_matcher<VNodeIn>("rope_cos_sin", gptneox_rope_cos_sin);
-
-    auto gptneox_rope_neox = [=](const OutputVector& inputs) {
-        auto Transpose_1 = inputs[0];   // "f32[?,8,?,64]"
-
-        auto past_key_length0 = inputs[1];    // "i32[]"    range_start
-        auto gpt_neox_Add = inputs[2];        // "i32[]"    range_stop
-        auto input_ids = inputs[3];
-        auto Add = inputs[4];                 // i32[1]   must be some value > 0 at runtime
-        auto rotary_emb_Cos = inputs[5]; // const table "f32[1,1,2048,16]"
-        auto rotary_emb_Sin = inputs[6]; // const table "f32[1,1,2048,16]"
-
-        auto cos = gptneox_rope_cos_sin({past_key_length0, gpt_neox_Add, input_ids, Add, rotary_emb_Cos});
-        auto sin = gptneox_rope_cos_sin({past_key_length0, gpt_neox_Add, input_ids, Add, rotary_emb_Sin});
-
-        auto Slice_5 = GenPattern<opset8::Slice>({Transpose_1, {0}, {16}, {1}, {3}}, "f32[?,8,?,16]");
-        auto Mul_2 = GenPattern<opset1::Multiply>({Slice_5, cos}, "f32[?,8,?,16]", {{"auto_broadcast", "numpy"}});
-        //auto VNode_59309 = GenPattern<VNode>({Slice_5}, "f32[?,8,?,16]", {{"vtype", "rotate_half"}});
-        auto VNode_59309 = gptneox_rotate_half({Slice_5});
-        auto Mul_3 = GenPattern<opset1::Multiply>({VNode_59309, sin}, "f32[?,8,?,16]", {{"auto_broadcast", "numpy"}});
-        auto Add_2 = GenPattern<opset1::Add>({Mul_2, Mul_3}, "f32[?,8,?,16]", {{"auto_broadcast", "numpy"}});
-
-        auto Slice_6 = GenPattern<opset8::Slice>({Transpose_1, {16}, {2147483647}, {1}, {3}}, "f32[?,8,?,48]");
-        auto Concat_10 = GenPattern<opset1::Concat>({Add_2, Slice_6}, "f32[?,8,?,64]", {{"axis", -1}});
-        return Concat_10;
-    };
-
-    add_matcher<VNodeIn>("rope_neox", gptneox_rope_neox);
-#endif
 }
 
 MHADynamicVNodeOut::MHADynamicVNodeOut() {
@@ -926,12 +817,14 @@ MHADynamicVNodeOut::MHADynamicVNodeOut() {
         auto vnode = std::dynamic_pointer_cast<VNode>(root_value.get_node_shared_ptr());
 
         // all nodes inside vnode may contain vnodes
+        OutputVector org_outputs = vnode->get_org();
         ov::NodeVector nv;
-        vnode->get_internal_vnodes(nv, vnode->get_org());
+        vnode->get_internal_vnodes(nv, org_outputs[0]);
         for (auto & n : nv) {
             register_new_node(n);
         }
-        ngraph::replace_node(root_value.get_node_shared_ptr(), {vnode->get_org()});
+
+        ngraph::replace_node(vnode, org_outputs);
         return true;
     };
     auto m = std::make_shared<ngraph::pattern::Matcher>(vnode, matcher_name);
