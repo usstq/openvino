@@ -13,6 +13,9 @@
 
 #include "itt.hpp"
 #include "transformations/cpu_opset/common/op/dimof.hpp"
+#include "utils/env.hpp"
+
+ov::intel_cpu::EnvInt OPT_DIMOF("OPT_DIMOF", 1);
 
 ov::intel_cpu::ConvertShapeOfToDimOf1::ConvertShapeOfToDimOf1() {
     MATCHER_SCOPE(ConvertShapeOfToDimOf1);
@@ -156,9 +159,10 @@ ov::intel_cpu::ConvertShapeOfToDimOf1::ConvertShapeOfToDimOf1() {
 
         return false;
     };
-
-    auto m = std::make_shared<ngraph::pattern::Matcher>(final_output, matcher_name);
-    this->register_matcher(m, callback);
+    if (OPT_DIMOF) {
+        auto m = std::make_shared<ngraph::pattern::Matcher>(final_output, matcher_name);
+        this->register_matcher(m, callback);
+    }
 }
 
 /*
@@ -303,8 +307,10 @@ ov::intel_cpu::RemoveReshapeTailOfDimOfSubgraph::RemoveReshapeTailOfDimOfSubgrap
         }
         return false;
     };
-    auto m = std::make_shared<ngraph::pattern::Matcher>(reshape, matcher_name);
-    this->register_matcher(m, callback);
+    if (OPT_DIMOF) {
+        auto m = std::make_shared<ngraph::pattern::Matcher>(reshape, matcher_name);
+        this->register_matcher(m, callback);
+    }
 }
 
 ov::intel_cpu::EliminateDuplicateDimOf::EliminateDuplicateDimOf() {
@@ -342,7 +348,8 @@ ov::intel_cpu::EliminateDuplicateDimOf::EliminateDuplicateDimOf() {
 
         return replaced;
     };
-
-    auto m = std::make_shared<ngraph::pattern::Matcher>(dimof, matcher_name);
-    this->register_matcher(m, callback);
+    if (OPT_DIMOF) {
+        auto m = std::make_shared<ngraph::pattern::Matcher>(dimof, matcher_name);
+        this->register_matcher(m, callback);
+    }
 }
