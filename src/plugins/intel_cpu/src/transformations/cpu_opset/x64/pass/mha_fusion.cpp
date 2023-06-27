@@ -795,6 +795,8 @@ public:
             for (int i = 0; i < pattern_values.size(); i++) {
                 auto out = pvmap[pattern_values[i].get_node_shared_ptr()];
                 ngraph::replace_node(out.get_node_shared_ptr(), {vnode->output(i)});
+                auto name = out.get_node_shared_ptr()->get_friendly_name();
+                vnode->output(i).set_names({name});
             }
             return true;
         };
@@ -863,8 +865,11 @@ MHADynamicVNodeOut::MHADynamicVNodeOut() {
         std::cout << "MHADynamicVNodeOut::callback " << root_value << std::endl;
         auto vnode = std::dynamic_pointer_cast<VNode>(root_value.get_node_shared_ptr());
 
-        //if (vnode->get_vtype() == "gptneox_attention")
-        //    return false;
+        if (vnode->get_vtype() == "gptneox_attention") {
+            // leave this VNode, clear it's internal references to original subgraph
+            vnode->clear_org();
+            return false;
+        }
 
         // all nodes inside vnode may contain vnodes
         OutputVector org_outputs = vnode->get_org();

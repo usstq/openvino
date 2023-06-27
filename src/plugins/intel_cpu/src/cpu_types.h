@@ -112,7 +112,8 @@ enum class Type {
     MHA,
     Unique,
     Ngram,
-    DimOf
+    DimOf,
+    VNode
 };
 
 enum class Algorithm {

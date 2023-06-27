@@ -26,8 +26,9 @@ public:
 
     std::string get_vtype() const { return m_vtype; }
     ngraph::OutputVector get_org() { return m_org_outputs; }
-
+    void clear_org() { m_org_outputs.clear(); }
     void get_internal_vnodes(ov::NodeVector & nv, ngraph::Output<Node> base);
+
 private:
     ngraph::OutputVector m_org_outputs;
     std::string m_vtype;

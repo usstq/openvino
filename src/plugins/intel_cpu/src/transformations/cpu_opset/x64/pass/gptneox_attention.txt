@@ -1,5 +1,4 @@
 OutputVector gptneox_attention(const OutputVector& inputs) {
-    OutputVector all_outputs;
     int ii = 0;
     auto input_ids = inputs[ii++]; //GenInput("i32[?,?]");
     auto attention_mask = inputs[ii++];// GenPattern<opset1::Parameter>({}, "i32[?,?]", {{"shape", "[?,?]"}, {"element_type", "i32"}});
