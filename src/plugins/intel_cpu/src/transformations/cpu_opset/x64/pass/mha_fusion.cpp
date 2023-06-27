@@ -761,7 +761,7 @@ public:
     }
 
     template <typename F>
-    VNodeIn(const char* vtype, F func) {
+    VNodeIn(const char* vtype, F func, std::function<bool(OutputVector&)> pred) {
         MATCHER_SCOPE(VNodeIn);
         OutputVector fake_inputs;
         for (int i = 0; i < 32; i++) {
@@ -787,6 +787,9 @@ public:
                 real_outputs.push_back(pvmap[pattern_values[i].get_node_shared_ptr()]);
             }
 
+            if (!pred(real_inputs))
+                return false;
+
             auto vnode = std::make_shared<VNode>(real_inputs, real_outputs, vtype);
 
             for (int i = 0; i < pattern_values.size(); i++) {
@@ -801,9 +804,53 @@ public:
 };
 
 #include "gptneox_attention.txt"
+static bool tril_4d(const Output<Node>& value) {
+    vtype vt("u8[1,1,?,?]");
+    if (!vt.predicate(value))
+        return false;
+    auto s1 = as_type_ptr<opset1::Constant>(value.get_node_shared_ptr());
+    auto shape = s1->get_output_shape(0);
+    if (shape[2] != shape[3])
+        return false;
+    // NxN const matrix
+    auto max_positions = shape[2];
+    std::vector<uint8_t> output_vector = s1->cast_vector<uint8_t>();
+    // check if it's unit lower triangular matrix
+    for (int i = 0; i < max_positions; i++) {
+        for (int j = 0; j < max_positions; j++) {
+            if (static_cast<bool>(output_vector[i * max_positions + j]) != static_cast<bool>(j <= i))
+                return false;
+        }
+    }
+    return true;
+}
 
 MHADynamicVNodeIn::MHADynamicVNodeIn() {
-    add_matcher<VNodeIn>("gptneox_attention", gptneox_attention);
+    add_matcher<VNodeIn>("gptneox_attention", gptneox_attention, [](OutputVector& inputs) {
+        int ii = 0;
+        auto input_ids = inputs[ii++]; //GenInput("i32[?,?]");
+        auto attention_mask = inputs[ii++];// GenPattern<opset1::Parameter>({}, "i32[?,?]", {{"shape", "[?,?]"}, {"element_type", "i32"}});
+        auto past_key_values_1_key = inputs[ii++]; //GenPattern<opset1::Parameter>({}, "f32[?,8,?,64]", {{"shape", "[?,8,?,64]"}, {"element_type", "f32"}});
+        auto past_key_values_1_value = inputs[ii++]; //GenPattern<opset1::Parameter>({}, "f32[?,8,?,64]", {{"shape", "[?,8,?,64]"}, {"element_type", "f32"}});
+        auto past_key_values_0_key = inputs[ii++];
+        //GenPattern<FullyConnectedNode>({_gpt_neox_layers_1_input_layernorm_Add_1, Constant_40943, Constant_53989},
+        // "f32[?,?,1536]", {{"out-rank", "?"}, {"out-type", "f32"}});
+        auto _gpt_neox_layers_1_attention_query_key_value_Add = inputs[ii++];
+        //GenPattern<opset1::Constant>({/*1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,...4194304in total*/},
+        // "u8[1,1,2048,2048]");
+        auto gpt_neox_layers_1_attention_bias = inputs[ii++];
+        //GenPattern<opset1::Constant>({/*1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0.540302,0.950415,0.995004,0.9995,0.99995,0.999995,...32768in total*/},
+        // "f32[1,1,2048,16]");
+        auto _gpt_neox_layers_0_attention_rotary_emb_Constant = inputs[ii++];
+        // GenPattern<opset1::Constant>({/*0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0.841471,0.310984,0.0998334,0.0316175,0.00999983,...32768in total*/},
+        //  "f32[1,1,2048,16]");
+        auto _gpt_neox_layers_0_attention_rotary_emb_Constant_5 = inputs[ii++];
+
+        // check if gpt_neox_layers_1_attention_bias is lower triangular
+        if (!tril_4d(gpt_neox_layers_1_attention_bias))
+            return false;
+        return true;
+    });
 }
 
 MHADynamicVNodeOut::MHADynamicVNodeOut() {
@@ -815,6 +862,9 @@ MHADynamicVNodeOut::MHADynamicVNodeOut() {
         auto root_value = m.get_match_value();
         std::cout << "MHADynamicVNodeOut::callback " << root_value << std::endl;
         auto vnode = std::dynamic_pointer_cast<VNode>(root_value.get_node_shared_ptr());
+
+        //if (vnode->get_vtype() == "gptneox_attention")
+        //    return false;
 
         // all nodes inside vnode may contain vnodes
         OutputVector org_outputs = vnode->get_org();
