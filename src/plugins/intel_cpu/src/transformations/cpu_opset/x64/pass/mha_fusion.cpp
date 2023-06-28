@@ -858,6 +858,7 @@ MHADynamicVNodeIn::MHADynamicVNodeIn() {
 MHADynamicVNodeOut::MHADynamicVNodeOut() {
     MATCHER_SCOPE(MHADynamicVNodeOut);
     auto vnode = ov::pass::pattern::wrap_type<VNode>();
+    std::string vnode_whitelist = std::getenv("VNODE_WLIST") ? std::getenv("VNODE_WLIST") : "";
 
     matcher_pass_callback callback = [=](ngraph::pattern::Matcher& m) {
         auto& pattern_to_output = m.get_pattern_value_map();
@@ -865,8 +866,8 @@ MHADynamicVNodeOut::MHADynamicVNodeOut() {
         std::cout << "MHADynamicVNodeOut::callback " << root_value << std::endl;
         auto vnode = std::dynamic_pointer_cast<VNode>(root_value.get_node_shared_ptr());
 
-        if (vnode->get_vtype() == "gptneox_attention") {
-            // leave this VNode, clear it's internal references to original subgraph
+        if (vnode_whitelist.find(vnode->get_vtype() + ",") != std::string::npos) {
+            // leave this VNode since it's in the white-list, clear it's internal references to original subgraph
             vnode->clear_org();
             return false;
         }

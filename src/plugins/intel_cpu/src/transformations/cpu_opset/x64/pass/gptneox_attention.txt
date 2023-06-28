@@ -1,7 +1,7 @@
 OutputVector gptneox_attention(const OutputVector& inputs) {
     int ii = 0;
     auto input_ids = inputs[ii++]; //GenInput("i32[?,?]");
-    auto attention_mask = inputs[ii++];// GenPattern<opset1::Parameter>({}, "i32[?,?]", {{"shape", "[?,?]"}, {"element_type", "i32"}});
+    auto _gpt_neox_Mul = inputs[ii++];// GenPattern<PowerStaticNode>({Multiply_42419}, "f32[?,1,1,?]", {{"scale", 1.0}, {"power", 1.0}, {"shift", -FLT_MAX}, {"out-type", "f32"}});
     auto past_key_values_1_key = inputs[ii++]; //GenPattern<opset1::Parameter>({}, "f32[?,8,?,64]", {{"shape", "[?,8,?,64]"}, {"element_type", "f32"}});
     auto past_key_values_1_value = inputs[ii++]; //GenPattern<opset1::Parameter>({}, "f32[?,8,?,64]", {{"shape", "[?,8,?,64]"}, {"element_type", "f32"}});
     auto past_key_values_0_key = inputs[ii++];
@@ -19,14 +19,6 @@ OutputVector gptneox_attention(const OutputVector& inputs) {
     auto _gpt_neox_Concat = GenPattern<opset1::Concat>({{-1}, input_ids_shape__1__}, "i32[2]", {{"axis", 0}});
     auto _gpt_neox_Reshape = GenPattern<opset1::Reshape>({_gpt_neox_Unsqueeze, _gpt_neox_Concat}, "i32[?,?]", {{"special_zero", 1}});
     auto _gpt_neox_layers_0_attention_Unsqueeze_3 = GenPattern<opset1::Unsqueeze>({_gpt_neox_Reshape, {1, 3}}, "i32[?,1,?,1]");
-
-    auto input_ids_shape__0__ = GenPattern<DimOfNode>({input_ids}, "i32[1]", {{"axis", 0}, {"output_scalar", 0}});
-    auto _gpt_neox_Concat_1 = GenPattern<opset1::Concat>({input_ids_shape__0__, {-1}}, "i32[2]", {{"axis", 0}});
-    auto _gpt_neox_Reshape_1 = GenPattern<opset1::Reshape>({attention_mask, _gpt_neox_Concat_1}, "i32[?,?]", {{"special_zero", 1}});
-    auto _gpt_neox_Unsqueeze_4 = GenPattern<opset1::Unsqueeze>({_gpt_neox_Reshape_1, {1, 2}}, "i32[?,1,1,?]");
-    auto _gpt_neox_Cast_2 = GenPattern<opset1::Convert>({_gpt_neox_Unsqueeze_4}, "f32[?,1,1,?]", {{"destination_type", "f32"}});
-    auto Multiply_42419 = GenPattern<PowerStaticNode>({_gpt_neox_Cast_2}, "f32[?,1,1,?]", {{"scale", FLT_MAX}, {"power", 1.0}, {"shift", 0.0}, {"out-type", "f32"}});
-    auto _gpt_neox_Mul = GenPattern<PowerStaticNode>({Multiply_42419}, "f32[?,1,1,?]", {{"scale", 1.0}, {"power", 1.0}, {"shift", -FLT_MAX}, {"out-type", "f32"}});
 
     auto _gpt_neox_layers_1_attention_Reshape = GenPattern<opset1::Reshape>({_gpt_neox_layers_1_attention_query_key_value_Add, {0, 0, 8, 192}}, "f32[?,?,8,192]", {{"special_zero", 1}});
     auto _gpt_neox_layers_1_attention_Slice_1 = GenPattern<opset8::Slice>({_gpt_neox_layers_1_attention_Reshape, {64}, {128}, {1}, {3}}, "f32[?,?,8,64]");
