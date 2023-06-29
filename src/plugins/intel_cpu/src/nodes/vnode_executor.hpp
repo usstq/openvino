@@ -9,6 +9,7 @@
 #include <node.h>
 
 #include <algorithm>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -76,6 +77,11 @@ inline void accumulate(float* acc, const T* v, int len, float weight = 1.0f) {
 struct vnode_executor {
     std::vector<PlainTensorBase*> inputs;
     std::vector<PlainTensorBase*> outputs;
+    int use_ref;
+
+    vnode_executor() {
+        use_ref = std::getenv("USE_REF") ? atoi(std::getenv("USE_REF")) : 0;
+    }
 
     void register_inputs() {}
     template <typename T0, typename... Ts>
@@ -108,6 +114,50 @@ struct vnode_executor {
     virtual void exec(Node* node, dnnl::stream strm) = 0;
 };
 
+struct gpt2_attention_executor : public vnode_executor {
+    PlainTensor<bfloat16> qkv_input;    // "f32[?,?,2304]"
+    PlainTensor<bfloat16> past_value;   // "f32[?,12,?,64]"
+    PlainTensor<bfloat16> past_key;     // "f32[?,12,?,64]"
+    PlainTensor<uint8_t> Constant_174;  // "u8[1,1,1024,1024]"
+    PlainTensor<float> attention_mask;  // "f32[?,1,1,?]"
+
+    PlainTensor<ov::bfloat16> output_emb;     // f32[B, L1, 512]
+    PlainTensor<ov::bfloat16> present_key;    // f32[B, H, L0+L1, 64]
+    PlainTensor<ov::bfloat16> present_value;  // f32[B, H, L0+L1, 64]
+
+    gpt2_attention_executor() {
+        register_inputs(qkv_input, past_value, past_key, Constant_174, attention_mask);
+        register_outputs(output_emb, present_key, present_value);
+    }
+
+    void exec(Node* node, dnnl::stream strm) override {
+        update_inputs(node);
+
+        auto& dims_past = past_key.get_dims();
+        auto& dims_cur = qkv_input.get_dims();
+        auto B = dims_past[0];
+        auto H = dims_past[1];   // 12
+        auto L0 = dims_past[2];  // number of tokens have been encoded
+        auto S = dims_past[3];   // 64
+        auto L1 = dims_cur[1];
+
+        std::vector<VectorDims> outputShapes;
+        outputShapes.push_back(VectorDims{B, L1, H * S});
+        outputShapes.push_back(VectorDims{B, H, L0 + L1, S});
+        outputShapes.push_back(VectorDims{B, H, L0 + L1, S});
+        node->redefineOutputMemory(outputShapes);
+
+        update_outputs(node);
+
+        attention_mask.assert_dims({B, 1, 1, L0 + L1});
+        past_key.assert_dims({B, H, L0, S});
+        past_value.assert_dims({B, H, L0, S});
+        qkv_input.assert_dims({B, L1, H * 3 * S});
+
+        DEBUG_LOG(" B=", B, " H=", H, " S=", S, " L0=", L0, " L1=", L1);
+    }
+};
+
 struct gptneox_attention_executor : public vnode_executor {
     PlainTensor<int32_t> input_ids;       // i32[B, L1]
     PlainTensor<float> attention_mask;    // f32[B, 1, 1, L0 + L1]
@@ -123,8 +173,6 @@ struct gptneox_attention_executor : public vnode_executor {
     PlainTensor<ov::bfloat16> present_key;    // f32[B, H, L0+L1, 64]
     PlainTensor<ov::bfloat16> present_value;  // f32[B, H, L0+L1, 64]
 
-    int use_ref;
-
     gptneox_attention_executor() {
         register_inputs(input_ids,
                         attention_mask,
@@ -136,7 +184,6 @@ struct gptneox_attention_executor : public vnode_executor {
                         rotary_emb_cos,
                         rotary_emb_sin);
         register_outputs(output_emb, present_key, present_value);
-        use_ref = std::getenv("USE_REF") ? atoi(std::getenv("USE_REF")) : 0;
     }
 
     bool m_kernel_initialized;
@@ -194,7 +241,8 @@ struct gptneox_attention_executor : public vnode_executor {
                         .num_heads = H,
                         .head_size = S,
                         .head_size_aligned = S,  // better to aligned to 64 bytes for best performance, apply for qkv
-                        .max_seq_len = max_position_embeddings,     // max seq length for computing the size of matmul tmp result
+                        .max_seq_len =
+                            max_position_embeddings,  // max seq length for computing the size of matmul tmp result
                         .qkv_precision = llmdnn::data_type_t::dnnl_bf16,
                         .dst_precision = llmdnn::data_type_t::dnnl_bf16,
                         .rotary_emb_base = 10000,
@@ -210,8 +258,9 @@ struct gptneox_attention_executor : public vnode_executor {
                         .num_heads = H,
                         .head_size = S,
                         .head_size_aligned = S,  // better to aligned to 64 bytes for best performance, apply for qkv
-                        .max_seq_len = max_position_embeddings,     // max seq length for computing the size of matmul tmp result
-                        .normal_factor = 1.0f/sqrt(S),
+                        .max_seq_len =
+                            max_position_embeddings,  // max seq length for computing the size of matmul tmp result
+                        .normal_factor = 1.0f / sqrt(S),
                         .qkv_precision = llmdnn::data_type_t::dnnl_bf16,
                         .dst_precision = llmdnn::data_type_t::dnnl_bf16,
                     })) {
@@ -221,7 +270,7 @@ struct gptneox_attention_executor : public vnode_executor {
             m_kernel_initialized = true;
         }
 
-        //exec_ref_rope(); exec_ref_mha(); return;
+        // exec_ref_rope(); exec_ref_mha(); return;
         auto batched_ptrs_key = present_key.get_batched_ptrs<ov::bfloat16>();
         auto batched_ptrs_value = present_value.get_batched_ptrs<ov::bfloat16>();
         if (use_ref & 1) {
@@ -235,12 +284,13 @@ struct gptneox_attention_executor : public vnode_executor {
                 .query_dst = m_query_emb.data<uint8_t>(),                             // rotary embbeding dst
                 .layer_past_key_src = past_key.get_batched_ptrs<ov::bfloat16>(),      // past key src
                 .layer_past_value_src = past_value.get_batched_ptrs<ov::bfloat16>(),  // past value src
-                .layer_past_key_dst = batched_ptrs_key,  // past key dst, if layer_past_key_src!=layer_past_key_dst, will
-                                                        // copy layer_past_key_src to layer_past_key_dst
-                .layer_past_value_dst = batched_ptrs_value,  // past value dst, if layer_past_value!=layer_past_value_dst,
-                                                            // will copy layer_past_value to layer_past_value_dst
-                .position2d_ids = nullptr,                   // shape: [batch, 2, query_seq_len]
-                .head_stride_in_kv = (L0 + L1) * S           // kv stride for next head; kv may be preallocated a big buffer
+                .layer_past_key_dst = batched_ptrs_key,  // past key dst, if layer_past_key_src!=layer_past_key_dst,
+                                                         // will copy layer_past_key_src to layer_past_key_dst
+                .layer_past_value_dst =
+                    batched_ptrs_value,             // past value dst, if layer_past_value!=layer_past_value_dst,
+                                                    // will copy layer_past_value to layer_past_value_dst
+                .position2d_ids = nullptr,          // shape: [batch, 2, query_seq_len]
+                .head_stride_in_kv = (L0 + L1) * S  // kv stride for next head; kv may be preallocated a big buffer
             });
         }
 
@@ -253,18 +303,19 @@ struct gptneox_attention_executor : public vnode_executor {
                 .batch = B,
                 .query_seq_len = L1,
                 .key_seq_len = L0 + L1,
-                .is_causal_in_attention = false,   // causal mask is fused in attention mask: chatglm uses it.
-                .q = m_query_emb.data<uint8_t>(),  // q buffer, compact, shape: [batch, num_heads, query_seq_len, head_size]
-                .k = batched_ptrs_key,             // k buffer, k[N] stands different batch which may be discreted
-                                                //      k[0] shape: [batch, num_heads, key_seq_len, head_size]
-                .v = batched_ptrs_value,           // v buffer, v[N] stands different batch which may be discreted
-                                                //      v[0] shape: [batch, num_heads, value_seq_len, head_size]
-                .attention_mask =
-                    attention_mask.data<float>(),  // attention mask, attention_mask[0] shape:
-                                                //      [batch, 1, 1, key_seq_len], when is_causal_in_attention is false
+                .is_causal_in_attention = false,  // causal mask is fused in attention mask: chatglm uses it.
+                .q = m_query_emb
+                         .data<uint8_t>(),  // q buffer, compact, shape: [batch, num_heads, query_seq_len, head_size]
+                .k = batched_ptrs_key,      // k buffer, k[N] stands different batch which may be discreted
+                                            //      k[0] shape: [batch, num_heads, key_seq_len, head_size]
+                .v = batched_ptrs_value,    // v buffer, v[N] stands different batch which may be discreted
+                                            //      v[0] shape: [batch, num_heads, value_seq_len, head_size]
+                .attention_mask = attention_mask.data<float>(),  // attention mask, attention_mask[0] shape:
+                                                                 //      [batch, 1, 1, key_seq_len], when
+                                                                 //      is_causal_in_attention is false
                 //      [batch, 1, query_seq_len, key_seq_len], when is_causal_in_attention is true
-                .attn_output =
-                    output_emb.data<uint8_t>(),  // output, compact, shape: [batch, query_seq_len, num_heads * head_size]
+                .attn_output = output_emb.data<uint8_t>(),  // output, compact, shape: [batch, query_seq_len, num_heads
+                                                            // * head_size]
                 .head_stride_in_kv =
                     (L0 + L1) * S,  // kv stride for next head; kv may be preallocated a big buffer
                                     // expected quant schema:
@@ -298,7 +349,7 @@ struct gptneox_attention_executor : public vnode_executor {
         ref_q_emb.resize({B, H, L1, S});  // bfloat16[1,8,6,64]
 
         // calculate reference
-        auto half_rotary_dims = rotary_dims/2;
+        auto half_rotary_dims = rotary_dims / 2;
         auto rotate_half = [&](bfloat16* q, int s) -> float {
             if (s < half_rotary_dims)
                 return static_cast<float>(-q[s + half_rotary_dims]);
@@ -382,6 +433,20 @@ struct gptneox_attention_executor : public vnode_executor {
         }
     }
 };
+
+inline std::function<std::shared_ptr<vnode_executor>()> vnode_executor_creator(std::string name) {
+    if (name == "gpt2_attention") {
+        return []() {
+            return std::make_shared<gpt2_attention_executor>();
+        };
+    }
+    if (name == "gptneox_attention") {
+        return []() {
+            return std::make_shared<gptneox_attention_executor>();
+        };
+    }
+    return nullptr;
+}
 
 }  // namespace intel_cpu
 }  // namespace ov

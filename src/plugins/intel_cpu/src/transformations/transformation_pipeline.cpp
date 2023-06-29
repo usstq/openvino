@@ -608,6 +608,14 @@ void Transformations::PostLpt() {
 
     // Execute before snippets. Otherwise FQ will be converted to Subgraph
     CPU_REGISTER_PASS_COMMON(postLPTPassManager, ConvertFqRnnToQuantizedRnn);
+
+    CPU_REGISTER_PASS_X64(postLPTPassManager, DumpModel, "VNode0.txt");
+    CPU_REGISTER_PASS_X64(postLPTPassManager, MHADynamicVNodeIn);
+    CPU_REGISTER_PASS_X64(postLPTPassManager, DumpModel, "VNode1.txt");
+    //CPU_REGISTER_PASS_COMMON(manager, ov::pass::Validate);
+    CPU_REGISTER_PASS_X64(postLPTPassManager, MHADynamicVNodeOut);
+    CPU_REGISTER_PASS_X64(postLPTPassManager, DumpModel, "VNode2.txt");
+
     postLPTPassManager.run_passes(model);
 }
 

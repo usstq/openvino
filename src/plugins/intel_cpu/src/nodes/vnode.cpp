@@ -34,7 +34,6 @@ namespace ov {
 namespace intel_cpu {
 namespace node {
 
-
 bool VNode::isSupportedOperation(const std::shared_ptr<const ngraph::Node>& op, std::string& errorMessage) noexcept {
     const auto vnode = std::dynamic_pointer_cast<const ov::intel_cpu::VNode>(op);
     if (!vnode) {
@@ -43,7 +42,7 @@ bool VNode::isSupportedOperation(const std::shared_ptr<const ngraph::Node>& op, 
     }
 
     auto vtype = vnode->get_vtype();
-    if (vtype != "gptneox_attention") {
+    if (!vnode_executor_creator(vtype)) {
         errorMessage = vtype + " is not supported!";
         return false;
     }
@@ -70,7 +69,7 @@ void VNode::getSupportedDescriptors() {
 
     if (getParentEdges().size() != m_vnode->get_input_size())
         IE_THROW() << errorPrefix << "has incorrect number of input edges: " << getParentEdges().size();
-    if (getChildEdges().size() != m_vnode->get_output_size())
+    if (getChildEdges().size() < m_vnode->get_output_size())
         IE_THROW() << errorPrefix << "has incorrect number of output edges: " << getChildEdges().size();
 }
 
@@ -78,28 +77,18 @@ void VNode::initSupportedPrimitiveDescriptors() {
     if (!supportedPrimitiveDescriptors.empty())
         return;
 
-#if 0
-    PlainTensor<int32_t> input_ids(getParentEdgeAt(ii++)->getMemoryPtr());       // i32[B, L1]
-    PlainTensor<float> attention_mask(getParentEdgeAt(ii++)->getMemoryPtr());  // f32[B, 1, 1, L0 + L1]
-    PlainTensor<bfloat16> past_key(getParentEdgeAt(ii++)->getMemoryPtr());        // f32[B, H, L0, S]
-    PlainTensor<bfloat16> past_value(getParentEdgeAt(ii++)->getMemoryPtr());      // f32[B, H, L0, S]
-    PlainTensor<bfloat16> past_0_key(getParentEdgeAt(ii++)->getMemoryPtr());      // f32[B, H, L0, S]
-    PlainTensor<bfloat16> qkv_input(getParentEdgeAt(ii++)->getMemoryPtr());       // f32[B, L1, H*3*S] => [B, L1, H, 3, S]
-    PlainTensor<float> attention_bias(getParentEdgeAt(ii++)->getMemoryPtr());  // u8[1,1,2048,2048]
-    PlainTensor<float> rotary_emb_cos(getParentEdgeAt(ii++)->getMemoryPtr());  // f32[1,1,2048,16]
-    PlainTensor<float> rotary_emb_sin(getParentEdgeAt(ii++)->getMemoryPtr());  // f32[1,1,2048,16]
-#endif
-    if (m_vtype == "gptneox_attention") {
-        m_executor = std::make_shared<gptneox_attention_executor>();
+    auto creator = vnode_executor_creator(m_vtype);
+    if (creator) {
+        m_executor = creator();
     } else {
         IE_THROW() << errorPrefix << " unsupported vnode type " << m_vtype;
     }
     std::vector<ov::intel_cpu::PortConfigurator> inPortConfigs;
     std::vector<ov::intel_cpu::PortConfigurator> outPortConfigs;
-    for (auto * p : m_executor->inputs) {
+    for (auto* p : m_executor->inputs) {
         inPortConfigs.emplace_back(LayoutType::ncsp, p->get_precision());
     }
-    for (auto * p : m_executor->outputs) {
+    for (auto* p : m_executor->outputs) {
         outPortConfigs.emplace_back(LayoutType::ncsp, p->get_precision());
     }
     addSupportedPrimDesc(inPortConfigs, outPortConfigs, impl_desc_type::ref);

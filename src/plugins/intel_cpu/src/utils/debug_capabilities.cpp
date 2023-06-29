@@ -728,15 +728,11 @@ void DumpModel::dump_cpp_style(std::ostream & os, const std::shared_ptr<ov::Mode
 
     auto get_output_values_info = [](std::shared_ptr<ov::Node> & op) {
         std::stringstream ss;
-        if (op->get_output_size() > 1)
-            ss << "{";
         const char *sep = "";
         for (int i = 0; i < op->get_output_size(); i++) {
             ss << sep << op->get_output_element_type(i) << op->get_output_partial_shape(i);
             sep = " ";
         }
-        if (op->get_output_size() > 1)
-            ss << "}";
         return ss.str();
     };
 
@@ -816,7 +812,7 @@ void DumpModel::dump_cpp_style(std::ostream & os, const std::shared_ptr<ov::Mode
                 auto iop = vout.get_node_shared_ptr();
                 if (iop->get_output_size() > 1) {
                     auto out_port = vout.get_index();
-                    os << sep << tag << opname[iop.get()] << "[" << out_port << "]";
+                    os << sep << tag << opname[iop.get()] << "->output(" << out_port << ")";
                 } else {
                     if (literal_consts.count(iop))
                         os << sep << tag << literal_consts[iop];
@@ -834,7 +830,12 @@ void DumpModel::dump_cpp_style(std::ostream & os, const std::shared_ptr<ov::Mode
             auto str_attr = ss2.str();
             if (str_attr.size())
                 os << ", {" << str_attr << "}";
-            os << ");" << std::endl;
+            os << ");   //  " << op->get_friendly_name() << std::endl;
+
+            //auto op_output_size = op->get_output_size();
+            //if (op_output_size > 1) {
+            //    os << "    " << name << "->set_output_size(" << op_output_size << ");" << std::endl;
+            //}
         }
 
         // recursively output subgraphs
@@ -842,7 +843,8 @@ void DumpModel::dump_cpp_style(std::ostream & os, const std::shared_ptr<ov::Mode
             auto cnt = msubgraph->get_internal_subgraphs_size();
             for (int i = 0; i < cnt; i++) {
                 os << "        MultiSubGraphOp " << tag << msubgraph->get_friendly_name() << "[" << i << "]" << std::endl;
-                os << PrintableModel(*msubgraph->get_function(i).get(), tag, prefix + "\t\t");
+                dump_cpp_style(os, msubgraph->get_function(i));
+                //os << PrintableModel(, tag, prefix + "\t\t");
             }
         }
     }
