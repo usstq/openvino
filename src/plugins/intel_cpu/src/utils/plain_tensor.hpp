@@ -11,6 +11,7 @@
 #include <dnnl_extension_utils.h>
 #include <cassert>
 #include <cstdint>
+#include <iostream>
 
 namespace ov {
 namespace intel_cpu {
@@ -45,8 +46,54 @@ inline void assert_dt<int32_t>(dnnl::memory::data_type dt) {
     IE_ASSERT(dt == dnnl::memory::data_type::s32);
 }
 
-template<typename DT>
-struct PlainTensor {
+template<typename T>
+struct data_type_name {
+    static constexpr char * value = "?";
+};
+
+template<>
+struct data_type_name<float> {
+    static constexpr char * value = "float";
+};
+
+template<>
+struct data_type_name<bfloat16> {
+    static constexpr char * value = "bfloat16";
+};
+
+template<>
+struct data_type_name<uint8_t> {
+    static constexpr char * value = "uint8_t";
+};
+
+
+template<typename T>
+struct precision_of {
+    static constexpr InferenceEngine::Precision::ePrecision value = InferenceEngine::Precision::ePrecision::UNSPECIFIED;
+};
+
+template<>
+struct precision_of<float> {
+    static constexpr InferenceEngine::Precision::ePrecision value = InferenceEngine::Precision::ePrecision::FP32;
+};
+
+template<>
+struct precision_of<int32_t> {
+    static constexpr InferenceEngine::Precision::ePrecision value = InferenceEngine::Precision::ePrecision::I32;
+};
+
+template<>
+struct precision_of<bfloat16> {
+    static constexpr InferenceEngine::Precision::ePrecision value = InferenceEngine::Precision::ePrecision::BF16;
+};
+
+template<>
+struct precision_of<uint8_t> {
+    static constexpr InferenceEngine::Precision::ePrecision value = InferenceEngine::Precision::ePrecision::U8;
+};
+
+struct PlainTensorBase {
+    VectorDims m_strides;
     VectorDims m_dims;
     std::shared_ptr<void> m_ptr;
     size_t m_capacity = 0;
@@ -58,12 +105,27 @@ struct PlainTensor {
         return m_dims;
     }
 
+    virtual InferenceEngine::Precision::ePrecision get_precision(void) = 0;
+    virtual void reset(MemoryPtr mem) = 0;
+};
+
+template<typename DT>
+struct PlainTensor : public PlainTensorBase {
     PlainTensor(MemoryPtr mem) {
         assert_dt<DT>(mem->GetDataType());
         resize<DT>(mem->getStaticDims(), reinterpret_cast<DT*>(mem->GetPtr()));
     }
 
     PlainTensor() = default;
+
+    void reset(MemoryPtr mem) override {
+        assert_dt<DT>(mem->GetDataType());
+        resize<DT>(mem->getStaticDims(), reinterpret_cast<DT*>(mem->GetPtr()));
+    }
+
+    InferenceEngine::Precision::ePrecision get_precision(void) override {
+        return precision_of<DT>::value;
+    }
 
     template<typename T = DT>
     void resize(const VectorDims& new_dims, T* data = nullptr) {
@@ -84,7 +146,7 @@ struct PlainTensor {
     }
 
     template <typename T = DT>
-    T* data() {
+    T* data() const {
         return reinterpret_cast<T*>(m_ptr.get());
     }
 
@@ -100,9 +162,24 @@ struct PlainTensor {
         return reinterpret_cast<T*>(m_ptr.get())[off];
     }
 
+    template <typename T = DT>
+    T& operator()(const std::initializer_list<size_t>& index) {
+        return at<T>(index);
+    }
+
     void assert_dims(const std::initializer_list<size_t>& expect_dims) {
         IE_ASSERT(m_dims.size() == expect_dims.size());
-        IE_ASSERT(std::equal(m_dims.begin(), m_dims.end(), expect_dims.begin()));
+        if (!std::equal(m_dims.begin(), m_dims.end(), expect_dims.begin())) {
+            std::stringstream ss;
+            ss << "m_dims=[";
+            for (auto& i : m_dims)
+                ss << i << ",";
+            ss << "] expect_dims=[";
+            for (auto& i : expect_dims)
+                ss << i << ",";
+            ss << "]";
+            IE_ASSERT(false) << ss.str();
+        }
     }
 
     template<typename T = DT>
@@ -118,7 +195,48 @@ struct PlainTensor {
         }
         return ret_ptrs;
     }
+
+    template <typename U>
+    friend std::ostream& operator<<(std::ostream& os, const PlainTensor<U>& dt);
 };
+
+template<typename DT>
+std::ostream& operator<<(std::ostream& os, const PlainTensor<DT>& dt) {
+    DT * p = dt.data();
+    auto rank = dt.m_dims.size();
+    const char * sep = "";
+    os << data_type_name<DT>::value << "[";
+    sep = "";
+    for (auto& d : dt.m_dims) {
+        os << sep << d;
+        sep = ",";
+    }
+    os << "] {";
+
+    if (rank > 1) os << "\n\t";
+
+    auto last_dim_size = dt.m_dims[dt.m_dims.size() - 1];
+
+    auto sz = shape_size(dt.m_dims);
+    std::stringstream ss;
+    int lines = 0;
+    for (size_t i = 0; i < sz; i++) {
+        if (ss.tellp() < 256)
+            ss << p[i] << ",";
+
+        if ((i % last_dim_size) == (last_dim_size - 1)) {
+            os << lines << " : " <<  ss.str() << "...\n\t";
+            ss.str("");
+            lines++;
+            if (lines > 16) {
+                os << "... ... ... ... \n\t";
+                break;
+            }
+        }
+    }
+    os << "}";
+    return os;
+}
 
 }   // namespace intel_cpu
 }   // namespace ov

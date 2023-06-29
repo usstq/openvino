@@ -21,8 +21,8 @@ ov::intel_cpu::EliminateFutileBcasts::EliminateFutileBcasts() {
     auto B = GenInput("i32[1]");
     auto Ka = GenInput("i32[1]");
     auto Kb = GenInput("i32[1]");
-    auto mA4d = GenInput("f32[?,8,?,64]");
-    auto mB4d = GenInput("f32[?,8,?,64]");
+    auto mA4d = GenInput("f32[?,?,?,?]");
+    auto mB4d = GenInput("f32[?,?,?,?]");
 
     auto shapeA = GenPattern<opset1::Concat>({B, M, Kb}, "i32[3]", {{"axis", 0}});
     auto mA = GenPattern<opset1::Reshape>({mA4d, shapeA}, "", {{"special_zero", 1}});
