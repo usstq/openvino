@@ -271,7 +271,7 @@ ov::intel_cpu::RemoveReshapeTailOfDimOfSubgraph::RemoveReshapeTailOfDimOfSubgrap
         auto reshape_node = pattern_map.at(reshape).get_node_shared_ptr();
 
         // collect all sibling nodes, make sure they are all
-        // all other sibling reshape nodes are also to 1ele
+        // all other sibling reshape nodes are also to 1-element
         std::vector<std::shared_ptr<Node>> all_reshapes;
         all_reshapes.push_back(reshape_node);
         for (auto& other_input : reshape_node->input_value(0).get_target_inputs()) {
@@ -288,6 +288,8 @@ ov::intel_cpu::RemoveReshapeTailOfDimOfSubgraph::RemoveReshapeTailOfDimOfSubgrap
 
         auto last_output = reshape_node->input_value(0);
         bool found = collect_scalar_subgraph(all_dimof, all_nodes, last_output, true);
+        if (!found)
+            return false;
 
         for (auto& dimof : all_dimof) {
             if (dimof->get_output_scalar()) {
