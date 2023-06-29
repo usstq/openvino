@@ -805,9 +805,11 @@ public:
     }
 };
 
-#include "gptneox_attention.txt"
+#include "vnode_pythia_1b.txt"
+#include "vnode_gpt2.txt"
+
 static bool tril_4d(const Output<Node>& value) {
-    vtype vt("u8[1,1,?,?]");
+    values_info vt("u8[1,1,?,?]");
     if (!vt.predicate(value))
         return false;
     auto s1 = as_type_ptr<opset1::Constant>(value.get_node_shared_ptr());
@@ -828,7 +830,7 @@ static bool tril_4d(const Output<Node>& value) {
 }
 
 MHADynamicVNodeIn::MHADynamicVNodeIn() {
-    add_matcher<VNodeIn>("gptneox_attention", gptneox_attention, [](OutputVector& inputs) {
+    add_matcher<VNodeIn>("gptneox_attention", vnode_pythia_1b, [](OutputVector& inputs) {
         int ii = 0;
         auto input_ids = inputs[ii++]; //GenInput("i32[?,?]");
         auto attention_mask = inputs[ii++];// GenPattern<opset1::Parameter>({}, "i32[?,?]", {{"shape", "[?,?]"}, {"element_type", "i32"}});
@@ -853,6 +855,19 @@ MHADynamicVNodeIn::MHADynamicVNodeIn() {
             return false;
         return true;
     });
+
+    add_matcher<VNodeIn>("gpt2_attention", vnode_gpt2, [](OutputVector& inputs) {
+        int ii = 0;
+        auto _transformer_h_1_ln_1_Add_1 = inputs[ii++];
+        auto past_key_values_1_value = inputs[ii++];
+        auto past_key_values_1_key = inputs[ii++];
+        // GenPattern<opset1::Constant>({}, "u8[1,1,1024,1024]");
+        auto Constant_174 = inputs[ii++];
+        auto _transformer_Mul = inputs[ii++];
+        if (!tril_4d(Constant_174))
+            return false;
+        return true;
+    });
 }
 
 MHADynamicVNodeOut::MHADynamicVNodeOut() {
@@ -863,11 +878,11 @@ MHADynamicVNodeOut::MHADynamicVNodeOut() {
     matcher_pass_callback callback = [=](ngraph::pattern::Matcher& m) {
         auto& pattern_to_output = m.get_pattern_value_map();
         auto root_value = m.get_match_value();
-        std::cout << "MHADynamicVNodeOut::callback " << root_value << std::endl;
         auto vnode = std::dynamic_pointer_cast<VNode>(root_value.get_node_shared_ptr());
 
         if (vnode_whitelist.find(vnode->get_vtype() + ",") != std::string::npos) {
             // leave this VNode since it's in the white-list, clear it's internal references to original subgraph
+            std::cout << "MHADynamicVNodeOut::callback kept " << root_value << std::endl;
             vnode->clear_org();
             return false;
         }

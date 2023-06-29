@@ -7,6 +7,7 @@
 #include <iostream>
 #include <memory>
 #include <cfloat>
+#include <utility>
 #include "openvino/opsets/opset1.hpp"
 #include "openvino/opsets/opset2.hpp"
 #include "openvino/opsets/opset3.hpp"
@@ -44,7 +45,7 @@ inline std::vector<std::string> split_string(const std::string & s, const std::s
     size_t pos = 0, pos_next;
     std::string token;
     while ((pos_next = s.find(delimiter, pos)) != std::string::npos) {
-        token = s.substr(pos, pos_next);
+        token = s.substr(pos, pos_next - pos);
         ret.push_back(token);
         pos = pos_next + 1;
     }
@@ -54,35 +55,39 @@ inline std::vector<std::string> split_string(const std::string & s, const std::s
     return ret;
 }
 
-struct vtype {
-    vtype(const char* pattern = nullptr) {
-        if (pattern == nullptr || pattern[0] == 0) {
-            ele_type = ov::element::dynamic;
-            pshape = ov::PartialShape::dynamic(ov::Dimension::dynamic());
+struct values_info {
+    values_info(const char* pattern_list = nullptr) {
+        if (pattern_list == nullptr || pattern_list[0] == 0) {
+            all_type_pshape.emplace_back(ov::element::dynamic, ov::PartialShape::dynamic(ov::Dimension::dynamic()));
             return;
         }
-        // both ele_type & pshape can be built from string representation!
-        if (pattern[0] == '[') {
-            ele_type = ov::element::dynamic;
-            pshape = ov::PartialShape(pattern);
-            return;
+        auto pattern_vector = split_string(pattern_list, " ");
+        for (auto& pattern : pattern_vector) {
+            if (pattern[0] == '[') {
+                all_type_pshape.emplace_back(ov::element::dynamic, ov::PartialShape(pattern));
+            } else {
+                auto sep = pattern.find("[");
+                assert(sep != std::string::npos);
+                all_type_pshape.emplace_back(ov::element::Type(pattern.substr(0, sep)),
+                                             ov::PartialShape(pattern.substr(sep)));
+            }
         }
-
-        auto v_patterns = split_string(pattern, "[");
-        assert(v_patterns.size() == 2);
-        ele_type = ov::element::Type(v_patterns[0]);
-        pshape = ov::PartialShape("[" + v_patterns[1]);
     }
 
     bool predicate(const ov::Output<ov::Node>& value) const {
-        if (!ele_type.compatible(value.get_element_type()) ||
-            !pshape.compatible(value.get_partial_shape())) {
+        auto index = value.get_index();
+        auto& item = all_type_pshape[index];
+        if (!item.first.compatible(value.get_element_type()) || !item.second.compatible(value.get_partial_shape())) {
             return false;
         }
         return true;
     }
-    ov::element::Type ele_type;
-    ov::PartialShape pshape;
+
+    size_t get_output_size() {
+        return all_type_pshape.size();
+    }
+
+    std::vector<std::pair<ov::element::Type, ov::PartialShape>> all_type_pshape;
 };
 
 struct attr {
@@ -143,7 +148,7 @@ struct attr {
 
 bool attr_compatible(ov::Node& node, const std::vector<attr>& attr);
 
-inline std::shared_ptr<Node> GenInput(vtype vt = nullptr) {
+inline std::shared_ptr<Node> GenInput(values_info vt = nullptr) {
     return ov::pass::pattern::any_input([vt](const Output<Node>& value) {
         if (!vt.predicate(value)) {
             verbose_log("*mismatched GenInput ", value);
@@ -158,7 +163,7 @@ inline std::shared_ptr<Node> GenInput(vtype vt = nullptr) {
 struct GenPatternNode {
     std::shared_ptr<Node> node;
 
-    GenPatternNode(vtype vt) {
+    GenPatternNode(values_info vt) {
         node = ov::pass::pattern::any_input([vt](const Output<Node>& value) {
             if (!vt.predicate(value)) {
                 verbose_log("*mismatched GenPatternNode ", value);
@@ -185,13 +190,13 @@ struct GenPatternNode {
     }
 
     template <typename T, typename std::enable_if<std::is_arithmetic<T>::value, bool>::type = true>
-    GenPatternNode(std::initializer_list<T> v, vtype vt) {
+    GenPatternNode(std::initializer_list<T> v, values_info vt) {
         node = ConstVector(std::vector<T>(v), vt);
     }
 
     // 1d const tensor or scalar
     template <typename T, typename std::enable_if<std::is_arithmetic<T>::value, bool>::type = true>
-    static std::shared_ptr<Node> ConstVector(const std::vector<T>& vec, vtype vt) {
+    static std::shared_ptr<Node> ConstVector(const std::vector<T>& vec, values_info vt) {
         auto pred = [vec, vt](const Output<Node>& value) {
             if (!vt.predicate(value)) {
                 verbose_log("*mismatched ConstVector ", value);
@@ -216,18 +221,19 @@ struct GenPatternNode {
 };
 
 template <typename T, typename std::enable_if<std::is_arithmetic<T>::value, bool>::type = true>
-std::shared_ptr<Node> GenConst(std::initializer_list<T> v, vtype vt = nullptr) {
+std::shared_ptr<Node> GenConst(std::initializer_list<T> v, values_info vt = nullptr) {
     GenPatternNode g(v, vt);
     return g.node;
 }
 
 template <class... Args>
-std::shared_ptr<Node> GenPattern(const std::vector<GenPatternNode>& inputs, vtype vt, const std::vector<attr>& attrs = {}) {
+std::shared_ptr<Node> GenPattern(const std::vector<GenPatternNode>& inputs, values_info vt, const std::vector<attr>& attrs = {}) {
     OutputVector ovs;
     for (auto & i : inputs) {
         ovs.push_back(i.node);
     }
-    return ov::pass::pattern::wrap_type<Args...>(ovs, [vt, attrs](const Output<Node>& value) {
+
+    auto pattern_node = ov::pass::pattern::wrap_type<Args...>(ovs, [vt, attrs](const Output<Node>& value) {
         if (!vt.predicate(value)) {
             verbose_log("*mismatched GenPattern vt ", value);
             return false;
@@ -241,6 +247,12 @@ std::shared_ptr<Node> GenPattern(const std::vector<GenPatternNode>& inputs, vtyp
         verbose_log(" matched GenPattern ", value);
         return true;
     });
+
+    auto output_size = vt.get_output_size();
+    if (output_size > 1)
+        pattern_node->set_output_size(output_size);
+
+    return pattern_node;
 }
 
 // TODO
