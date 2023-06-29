@@ -79,7 +79,7 @@ void VNode::initSupportedPrimitiveDescriptors() {
 
     auto creator = vnode_executor_creator(m_vtype);
     if (creator) {
-        m_executor = creator();
+        m_executor = creator(this);
     } else {
         IE_THROW() << errorPrefix << " unsupported vnode type " << m_vtype;
     }
