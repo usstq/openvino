@@ -131,4 +131,8 @@ function(ov_add_onednn)
     endif()
 endfunction()
 
+if(ENABLE_MLAS)
+    add_subdirectory(mlas)
+endif()
+
 ov_add_onednn()
