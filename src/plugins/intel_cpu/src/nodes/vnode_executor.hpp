@@ -164,8 +164,8 @@ struct vnode_executor {
 
 struct gpt2_attention_executor : public vnode_executor {
     PlainTensor<bfloat16> qkv_input;    // "f32[?,?,2304]"
-    PlainTensor<bfloat16> past_value;   // "f32[?,12,?,64]"
     PlainTensor<bfloat16> past_key;     // "f32[?,12,?,64]"
+    PlainTensor<bfloat16> past_value;   // "f32[?,12,?,64]"
     PlainTensor<uint8_t> Constant_174;  // "u8[1,1,1024,1024]"
     PlainTensor<float> attention_mask;  // "f32[?,1,1,?]"
 
@@ -175,7 +175,7 @@ struct gpt2_attention_executor : public vnode_executor {
 
     gpt2_attention_executor(Node* node) {
         std::cout << node->getName() << " creates gpt2_attention_executor" << std::endl;
-        register_inputs(qkv_input, past_value, past_key, Constant_174, attention_mask);
+        register_inputs(qkv_input, past_key, past_value, Constant_174, attention_mask);
         register_outputs(output_emb, present_key, present_value);
     }
 
@@ -192,10 +192,10 @@ struct gpt2_attention_executor : public vnode_executor {
         auto S = dims_past[3];   // 64
         auto L1 = dims_qkv[1];
 
-        attention_mask.assert_dims({B, 1, 1, L0 + L1});
+        qkv_input.assert_dims({B, L1, 3*(H*S)});
         past_key.assert_dims({B, H, L0, S});
         past_value.assert_dims({B, H, L0, S});
-        qkv_input.assert_dims({B, L1, H * 3 * S});
+        attention_mask.assert_dims({B, 1, 1, L0 + L1});
 
         std::vector<VectorDims> outputShapes;
         outputShapes.push_back(VectorDims{B, L1, H * S});
@@ -209,22 +209,22 @@ struct gpt2_attention_executor : public vnode_executor {
 
         DEBUG_LOG(" B=", B, " H=", H, " S=", S, " L0=", L0, " L1=", L1);
 
+        //qkv_input.max_repr_len = 99999;
+        DEBUG_LOG("qkv_input=", qkv_input.repr(256, 8));
+
         // concat pask_key/value & k/v into present_key/value
         for (size_t b = 0; b < B; b++) {
             for (size_t h = 0; h < H; h++) {
-                for (size_t p = 0; p < L0; p++)
-                    memcpy(&present_key.at({b, h, p, 0}), &past_key.at({b, h, p, 0}), sizeof(bfloat16) * S);
-                for (size_t p = 0; p < L0; p++)
-                    memcpy(&present_value.at({b, h, p, 0}), &past_value.at({b, h, p, 0}), sizeof(bfloat16) * S);
+                memcpy(&present_key.at({b, h, 0, 0}), &past_key.at({b, h, 0, 0}), sizeof(bfloat16) * L0 * S);
+                memcpy(&present_value.at({b, h, 0, 0}), &past_value.at({b, h, 0, 0}), sizeof(bfloat16) * L0 * S);
 
                 for (size_t p = 0; p < L1; p++) {
-                    memcpy(&query.at({b, h, p, 0}), &qkv_input.at({b, p, (h * 3 + 0) * S}), sizeof(bfloat16) * S);
-                    memcpy(&present_key.at({b, h, L0 + p, 0}),
-                           &qkv_input.at({b, p, (h * 3 + 1) * S}),
-                           sizeof(bfloat16) * S);
-                    memcpy(&present_value.at({b, h, L0 + p, 0}),
-                           &qkv_input.at({b, p, (h * 3 + 2) * S}),
-                           sizeof(bfloat16) * S);
+                    auto * q = &qkv_input.at({b, p, h*S});
+                    auto * k = &qkv_input.at({b, p, (H + h)*S});
+                    auto * v = &qkv_input.at({b, p, (2*H + h)*S});
+                    memcpy(&query.at({b, h, p, 0}), q, sizeof(bfloat16) * S);
+                    memcpy(&present_key.at({b, h, L0 + p, 0}), k, sizeof(bfloat16) * S);
+                    memcpy(&present_value.at({b, h, L0 + p, 0}), v, sizeof(bfloat16) * S);
                 }
             }
         }
@@ -435,10 +435,8 @@ struct gptneox_attention_executor : public vnode_executor {
         // copy past kv into present
         for (size_t b = 0; b < B; b++) {
             for (size_t h = 0; h < H; h++) {
-                for (size_t p = 0; p < L0; p++) {
-                    memcpy(&present_key.at({b, h, p, 0}), &past_key.at({b, h, p, 0}), sizeof(bfloat16) * S);
-                    memcpy(&present_value.at({b, h, p, 0}), &past_value.at({b, h, p, 0}), sizeof(bfloat16) * S);
-                }
+                memcpy(&present_key.at({b, h, 0, 0}), &past_key.at({b, h, 0, 0}), sizeof(bfloat16) * L0 * S);
+                memcpy(&present_value.at({b, h, 0, 0}), &past_value.at({b, h, 0, 0}), sizeof(bfloat16) * L0 * S);
             }
         }
 

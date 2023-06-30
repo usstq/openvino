@@ -141,6 +141,61 @@ std::ostream & operator<<(std::ostream & os, const Edge& edge) {
     return os;
 }
 
+template<typename DT>
+void dump_tensor(std::ostream& os, void * ptr, const VectorDims& dims) {
+    DT * p = reinterpret_cast<DT*>(ptr);
+    auto rank = dims.size();
+    const char * sep = "";
+    os << "{";
+
+    if (rank > 1) os << "\n\t";
+
+    auto last_dim_size = dims[rank - 1];
+
+    auto sz = shape_size(dims);
+    std::stringstream ss;
+    int lines = 0;
+    for (size_t i = 0; i < sz; i++) {
+        if (ss.tellp() < 256)
+            ss << p[i] << ",";
+
+        if ((i % last_dim_size) == (last_dim_size - 1)) {
+            os << lines << " : " <<  ss.str() << "...\n\t";
+            ss.str("");
+            lines++;
+            if (lines > 16) {
+                os << "... ... ... ... \n\t";
+                break;
+            }
+        }
+    }
+    os << "}";
+}
+
+std::ostream& operator<<(std::ostream& os, const Memory& mem) {
+    auto nbytes = mem.GetSize();
+    void* ptr = mem.GetPtr();
+    auto& dims = mem.getStaticDims();
+    switch (mem.GetDataType()) {
+    case dnnl::memory::data_type::bf16:
+        dump_tensor<ov::bfloat16>(os, ptr, dims);
+        break;
+    case dnnl::memory::data_type::f32:
+        dump_tensor<float>(os, ptr, dims);
+        break;
+    case dnnl::memory::data_type::s32:
+        dump_tensor<int32_t>(os, ptr, dims);
+        break;
+    case dnnl::memory::data_type::s8:
+        dump_tensor<int8_t>(os, ptr, dims);
+        break;
+    case dnnl::memory::data_type::u8:
+        dump_tensor<uint8_t>(os, ptr, dims);
+        break;
+    }
+    return os;
+}
+
 std::ostream & operator<<(std::ostream & os, const Node &c_node) {
     Node & node = const_cast<Node &>(c_node);
     const int align_col = 50;
@@ -323,7 +378,7 @@ std::ostream & operator<<(std::ostream & os, const Node &c_node) {
     os << " " << node.getPrimitiveDescriptorType();
 
     // last line(s): fused layers
-    os << " " << node.getOriginalLayers();
+    os << " orglayers:" << node.getOriginalLayers();
 
     if (node.PerfCounter().count()) {
         os << " latency:" << node.PerfCounter().avg() << "(us) x" << node.PerfCounter().count();
@@ -333,6 +388,16 @@ std::ostream & operator<<(std::ostream & os, const Node &c_node) {
         os << "\n\t  FusedWith: " << *fn;
     }
 
+    // output result values
+    for (int i = 0; i < num_output_port; i++) {
+        auto edge = node.getChildEdgeAt(i);
+        if (edge->getStatus() != Edge::Status::NotAllocated) {
+            auto ptr = edge->getMemoryPtr();
+            if (ptr->getDesc().getShape().isStatic()) {
+                os << "\n\t ChildEdgeAt(" << i << "): " << *ptr << std::endl;
+            }
+        }
+    }
     // primArgs
     /*
     if (node.primArgs.size()) {
@@ -858,15 +923,14 @@ bool DumpModel::run_on_model(const std::shared_ptr<ov::Model>& model) {
         return false;
     }
     dump_cpp_style(ofs, model);
-    //ofs << PrintableModel(*model);
+    // ofs << PrintableModel(*model);
     ofs.close();
 
-    ov::serialize(model, file_name+".xml", "/dev/null");
+    ov::serialize(model, file_name + ".xml", "/dev/null");
     std::cout << "Model dumpped into " << file_name << " and " << file_name << ".xml" << std::endl;
 
     return false;
 }
-
 }   // namespace intel_cpu
 }   // namespace ov
 #else

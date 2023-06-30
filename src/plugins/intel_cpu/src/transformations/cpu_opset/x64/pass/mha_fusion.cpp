@@ -859,8 +859,8 @@ MHADynamicVNodeIn::MHADynamicVNodeIn() {
     add_matcher<VNodeIn>("gpt2_attention", vnode_gpt2, [](OutputVector& inputs) {
         int ii = 0;
         auto _transformer_h_1_ln_1_Add_1 = inputs[ii++];
-        auto past_key_values_1_value = inputs[ii++];
         auto past_key_values_1_key = inputs[ii++];
+        auto past_key_values_1_value = inputs[ii++];
         // GenPattern<opset1::Constant>({}, "u8[1,1,1024,1024]");
         auto Constant_174 = inputs[ii++];
         auto _transformer_Mul = inputs[ii++];
@@ -880,9 +880,10 @@ MHADynamicVNodeOut::MHADynamicVNodeOut() {
         auto root_value = m.get_match_value();
         auto vnode = std::dynamic_pointer_cast<VNode>(root_value.get_node_shared_ptr());
 
+        std::cout << "MHADynamicVNodeOut found : " << root_value.get_node_shared_ptr() << std::endl;
+
         if (vnode_whitelist.find(vnode->get_vtype() + ",") != std::string::npos) {
             // leave this VNode since it's in the white-list, clear it's internal references to original subgraph
-            std::cout << "MHADynamicVNodeOut::callback kept " << root_value << std::endl;
             vnode->clear_org();
             return false;
         }

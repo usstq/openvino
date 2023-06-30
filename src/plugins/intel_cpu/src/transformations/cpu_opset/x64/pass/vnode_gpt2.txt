@@ -3,11 +3,10 @@ OutputVector vnode_gpt2(const OutputVector& inputs) {
 
     // GenPattern<opset1::Reshape>({_transformer_h_1_attn_c_attn_Gemm, _transformer_h_1_attn_c_attn_Concat_1}, "f32[?,?,2304]", {{"special_zero", 1}});   //  /transformer/h.1/attn/c_attn/Reshape_1
     auto _transformer_h_1_attn_c_attn_Reshape_1 = inputs[ii++];
-
-    // GenPattern<opset1::Parameter>({}, "f32[?,12,?,64]", {{"shape", "[?,12,?,64]"}, {"element_type", "f32"}});   //  past_key_values.1.value
-    auto past_key_values_1_value = inputs[ii++];
     // GenPattern<opset1::Parameter>({}, "f32[?,12,?,64]", {{"shape", "[?,12,?,64]"}, {"element_type", "f32"}});   //  past_key_values.1.key
     auto past_key_values_1_key = inputs[ii++];
+    // GenPattern<opset1::Parameter>({}, "f32[?,12,?,64]", {{"shape", "[?,12,?,64]"}, {"element_type", "f32"}});   //  past_key_values.1.value
+    auto past_key_values_1_value = inputs[ii++];
     // GenPattern<opset1::Constant>({/*1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,...1048576in total*/}, "u8[1,1,1024,1024]");
     auto Constant_174 = inputs[ii++];
 
