@@ -105,10 +105,13 @@ if (ENABLE_MLAS)
 endif()
 target_include_directories(${TARGET_NAME} SYSTEM PRIVATE $<TARGET_PROPERTY:dnnl,INCLUDE_DIRECTORIES>)
 
-add_library(llmdnn STATIC IMPORTED)
-set_target_properties(llmdnn PROPERTIES IMPORTED_LOCATION "/home/tingqian/llmdnn/build/lib/libllmdnn.a")
-set_target_properties(llmdnn PROPERTIES INTERFACE_INCLUDE_DIRECTORIES "/home/tingqian/llmdnn/include")
-target_link_libraries(${TARGET_NAME} PRIVATE llmdnn)
+if (ENABLE_LLMDNN)
+    add_library(llmdnn STATIC IMPORTED)
+    set_target_properties(llmdnn PROPERTIES IMPORTED_LOCATION "/home/tingqian/llmdnn/build/lib/libllmdnn.a")
+    set_target_properties(llmdnn PROPERTIES INTERFACE_INCLUDE_DIRECTORIES "/home/tingqian/llmdnn/include")
+    target_link_libraries(${TARGET_NAME} PRIVATE llmdnn)
+    add_definitions(-DOV_CPU_WITH_LLMDNN)
+endif()
 
 # Cross compiled function
 # TODO: The same for proposal, proposalONNX, topk

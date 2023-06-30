@@ -40,9 +40,9 @@ bool VNode::isSupportedOperation(const std::shared_ptr<const ngraph::Node>& op, 
         errorMessage = "Only VNode operation is supported";
         return false;
     }
-
+    auto inpType = vnode->get_input_element_type(0);
     auto vtype = vnode->get_vtype();
-    if (!vnode_executor_creator(vtype)) {
+    if (!vnode_executor_creator(vtype, inpType)) {
         errorMessage = vtype + " is not supported!";
         return false;
     }
@@ -58,7 +58,7 @@ VNode::VNode(const std::shared_ptr<ngraph::Node>& op, const GraphContext::CPtr c
     }
 
     errorPrefix = "VNode layer with name '" + getName() + "'";
-
+    inType = op->get_input_element_type(0);
     m_vnode = std::dynamic_pointer_cast<ov::intel_cpu::VNode>(op);
     m_vtype = m_vnode->get_vtype();
 }
@@ -77,7 +77,7 @@ void VNode::initSupportedPrimitiveDescriptors() {
     if (!supportedPrimitiveDescriptors.empty())
         return;
 
-    auto creator = vnode_executor_creator(m_vtype);
+    auto creator = vnode_executor_creator(m_vtype, inType);
     if (creator) {
         m_executor = creator(this);
     } else {

@@ -13,10 +13,11 @@
 #include <memory>
 #include <string>
 #include <vector>
-
+#ifdef OV_CPU_WITH_LLMDNN
 #include "llm_emb_gpt.hpp"
 #include "llm_mha_gpt.hpp"
 #include "llm_mm.hpp"
+#endif
 #include "utils/plain_tensor.hpp"
 
 namespace ov {
@@ -139,9 +140,9 @@ struct vnode_executor {
             for (size_t h = 0; h < H; h++) {
                 for (size_t m = 0; m < L1; m++) {
                     // dot-product to get attention scores
-                    ov::bfloat16* q = &query.at({b, h, m, 0});
+                    T* q = &query.at({b, h, m, 0});
                     for (size_t n = 0; n <= L0 + m; n++) {
-                        ov::bfloat16* k = &present_key.at({b, h, n, 0});
+                        T* k = &present_key.at({b, h, n, 0});
                         attn_score[n] = dot_product(q, k, S) * d_scale;
                     }
                     // apply causal_mask
@@ -162,16 +163,17 @@ struct vnode_executor {
     }
 };
 
+template <class DataType>
 struct gpt2_attention_executor : public vnode_executor {
-    PlainTensor<bfloat16> qkv_input;    // "f32[?,?,2304]"
-    PlainTensor<bfloat16> past_key;     // "f32[?,12,?,64]"
-    PlainTensor<bfloat16> past_value;   // "f32[?,12,?,64]"
+    PlainTensor<DataType> qkv_input;    // "f32[?,?,2304]"
+    PlainTensor<DataType> past_key;     // "f32[?,12,?,64]"
+    PlainTensor<DataType> past_value;   // "f32[?,12,?,64]"
     PlainTensor<uint8_t> Constant_174;  // "u8[1,1,1024,1024]"
-    PlainTensor<float> attention_mask;  // "f32[?,1,1,?]"
+    PlainTensor<DataType> attention_mask;  // "f32[?,1,1,?]"
 
-    PlainTensor<ov::bfloat16> output_emb;     // f32[B, L1, 512]
-    PlainTensor<ov::bfloat16> present_key;    // f32[B, H, L0+L1, 64]
-    PlainTensor<ov::bfloat16> present_value;  // f32[B, H, L0+L1, 64]
+    PlainTensor<DataType> output_emb;     // f32[B, L1, 512]
+    PlainTensor<DataType> present_key;    // f32[B, H, L0+L1, 64]
+    PlainTensor<DataType> present_value;  // f32[B, H, L0+L1, 64]
 
     gpt2_attention_executor(Node* node) {
         std::cout << node->getName() << " creates gpt2_attention_executor" << std::endl;
@@ -179,7 +181,7 @@ struct gpt2_attention_executor : public vnode_executor {
         register_outputs(output_emb, present_key, present_value);
     }
 
-    PlainTensor<ov::bfloat16> query;
+    PlainTensor<DataType> query;
 
     void exec(Node* node, dnnl::stream strm) override {
         update_inputs(node);
@@ -233,6 +235,7 @@ struct gpt2_attention_executor : public vnode_executor {
     }
 };
 
+#ifdef OV_CPU_WITH_LLMDNN
 struct gptneox_attention_executor : public vnode_executor {
     PlainTensor<int32_t> input_ids;       // i32[B, L1]
     PlainTensor<float> attention_mask;    // f32[B, 1, 1, L0 + L1]
@@ -471,18 +474,27 @@ struct gptneox_attention_executor : public vnode_executor {
         // DEBUG_LOG(" ref_q_emb=", ref_q_emb);
     }
 };
+#endif
 
-inline std::function<std::shared_ptr<vnode_executor>(Node* node)> vnode_executor_creator(std::string name) {
+inline std::function<std::shared_ptr<vnode_executor>(Node* node)> vnode_executor_creator(std::string name, ov::element::Type type) {
     if (name == "gpt2_attention") {
-        return [](Node* node) {
-            return std::make_shared<gpt2_attention_executor>(node);
-        };
+        if (type == ov::element::f32) {
+            return [](Node* node) {
+                return std::make_shared<gpt2_attention_executor<float>>(node);
+            };
+        } else if (type == ov::element::bf16) {
+            return [](Node* node) {
+                return std::make_shared<gpt2_attention_executor<ov::bfloat16>>(node);
+            };
+        }
     }
+#ifdef OV_CPU_WITH_LLMDNN
     if (name == "gptneox_attention") {
         return [](Node* node) {
             return std::make_shared<gptneox_attention_executor>(node);
         };
     }
+#endif
     return nullptr;
 }
 

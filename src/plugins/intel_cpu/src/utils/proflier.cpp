@@ -372,6 +372,7 @@ void ProfilerManager::finalize() {
 
 void ProfilerManager::_do_finalize() {
     // collect all entries
+    if (!enabled) return;
     if (finalized) return;
     finalized = true;
     auto data_size = all_data.size();

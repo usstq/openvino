@@ -221,12 +221,16 @@ struct EnforceInferPrcDebug {
 #include "openvino/core/model.hpp"
 #include "openvino/pass/pass.hpp"
 
+namespace ov {
+namespace intel_cpu {
 class DumpModel : public ov::pass::ModelPass {
 public:
     OPENVINO_RTTI("DumpModel");
     DumpModel(const std::string& file_name);
     bool run_on_model(const std::shared_ptr<ov::Model>& model) override;
 };
+}  // namespace intel_cpu
+}  // namespace ov
 
 #define CPU_DEBUG_CAP_ENABLE(...)
 #define CPU_DEBUG_CAPS_ALWAYS_TRUE(x) x
