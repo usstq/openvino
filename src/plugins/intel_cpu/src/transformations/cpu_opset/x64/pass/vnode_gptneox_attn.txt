@@ -1,0 +1,144 @@
+OutputVector vnode_gptneox_attn(const OutputVector& inputs) {
+    int ii = 0;
+
+    auto input_ids = inputs[ii++]; //GenInput("i32[?,?]");
+
+    // GenPattern<opset1::Add>({Multiply_108429, Constant_108431}, "f32[?,1,1,?]", {{"auto_broadcast", "numpy"}});   //  /gpt_neox/Mul
+    auto _gpt_neox_Mul = inputs[ii++];
+
+    // GenPattern<opset1::Parameter>({}, "f32[?,8,?,256]", {{"shape", "[?,8,?,256]"}, {"element_type", "f32"}});   //  past_key_values.1.key
+    auto past_key_values_1_key = inputs[ii++];
+
+    // GenPattern<opset1::Parameter>({}, "f32[?,8,?,256]", {{"shape", "[?,8,?,256]"}, {"element_type", "f32"}});   //  past_key_values.1.value
+    auto past_key_values_1_value = inputs[ii++];
+
+    // GenPattern<opset1::Parameter>({}, "f32[?,8,?,256]", {{"shape", "[?,8,?,256]"}, {"element_type", "f32"}});   //  past_key_values.0.key
+    auto past_key_values_0_key = inputs[ii++];
+
+    // GenPattern<opset1::Add>({Constant_105709, _gpt_neox_layers_1_attention_query_key_value_MatMul}, "f32[?,?,6144]", {{"auto_broadcast", "numpy"}});   //  /gpt_neox/layers.1/attention/query_key_value/Add
+    auto _gpt_neox_layers_1_attention_query_key_value_Add = inputs[ii++]; //GenPattern<FullyConnectedNode>({_gpt_neox_layers_1_input_layernorm_Add_1, Constant_40943, Constant_53989}, "f32[?,?,1536]", {{"out-rank", "?"}, {"out-type", "f32"}});
+
+    // GenPattern<opset1::Constant>({/*1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,...4194304in total*/}, "u8[1,1,2048,2048]");
+    auto gpt_neox_layers_1_attention_bias = inputs[ii++];// GenPattern<opset1::Constant>({/*1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,...4194304in total*/}, "u8[1,1,2048,2048]");
+    
+    // GenPattern<opset1::Constant>({/*1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,...131072in total*/}, "f32[1,1,2048,64]");
+    auto _gpt_neox_layers_0_attention_rotary_emb_Constant = inputs[ii++];
+
+    // GenPattern<opset1::Constant>({/*0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,...131072in total*/}, "f32[1,1,2048,64]");
+    auto _gpt_neox_layers_0_attention_rotary_emb_Constant_5 = inputs[ii++];
+
+    auto _gpt_neox_layers_0_attention_Shape_3 = GenPattern<opset1::ShapeOf>({past_key_values_0_key}, "i32[4]", {});   //  /gpt_neox/layers.0/attention/Shape_3
+    auto _gpt_neox_Slice = GenPattern<opset8::Slice>({_gpt_neox_layers_0_attention_Shape_3, {-2}, {-1}, {1}, {0}}, "i32[1]");   //  /gpt_neox/Slice
+    auto _gpt_neox_Squeeze = GenPattern<opset1::Squeeze>({_gpt_neox_Slice, {0}}, "i32[]");   //  /gpt_neox/Squeeze
+    auto _gpt_neox_Shape_1 = GenPattern<opset1::ShapeOf>({input_ids}, "i32[2]", {});   //  /gpt_neox/Shape_1
+    auto _gpt_neox_Gather_1 = GenPattern<opset8::Gather>({_gpt_neox_Shape_1, 1, 0}, "i32[]", {{"batch_dims", 0}});   //  /gpt_neox/Gather_1
+    auto _gpt_neox_Add = GenPattern<opset1::Add>({_gpt_neox_Gather_1, _gpt_neox_Squeeze}, "i32[]", {{"auto_broadcast", "numpy"}});   //  /gpt_neox/Add
+    auto _gpt_neox_Range = GenPattern<opset4::Range>({_gpt_neox_Squeeze, _gpt_neox_Add, 1}, "i32[?]", {{"output_type", "i32"}});   //  /gpt_neox/Range
+    auto _gpt_neox_Unsqueeze = GenPattern<opset1::Reshape>({_gpt_neox_Range, {1, -1}}, "i32[1,?]", {{"special_zero", 0}});   //  /gpt_neox/Unsqueeze
+    auto _gpt_neox_Gather_11 = GenPattern<opset8::Gather>({_gpt_neox_Shape_1, {1}, 0}, "i32[1]", {{"batch_dims", 0}});   //  /gpt_neox/Gather_1
+    auto _gpt_neox_Concat = GenPattern<opset1::Concat>({{-1}, _gpt_neox_Gather_11}, "i32[2]", {{"axis", 0}});   //  /gpt_neox/Concat
+    auto _gpt_neox_Reshape = GenPattern<opset1::Reshape>({_gpt_neox_Unsqueeze, _gpt_neox_Concat}, "i32[?,?]", {{"special_zero", 1}});   //  /gpt_neox/Reshape
+    auto _gpt_neox_layers_0_attention_Unsqueeze_3 = GenPattern<opset1::Unsqueeze>({_gpt_neox_Reshape, {1, 3}}, "i32[?,1,?,1]");   //  /gpt_neox/layers.0/attention/Unsqueeze_3
+
+    auto H = Symbol("H"); // num_attention_heads             8
+    auto S = Symbol("S"); // hidden_size/num_attention_heads 
+    auto R = Symbol("R"); // rotary dimensions
+
+    auto _gpt_neox_layers_1_attention_Reshape = GenPattern<opset1::Reshape>({_gpt_neox_layers_1_attention_query_key_value_Add, {0, 0, H, 3*S}}, "f32[?,?,?,?]", {{"special_zero", 1}});   //  /gpt_neox/layers.1/attention/Reshape
+    auto _gpt_neox_layers_1_attention_Slice_1 = GenPattern<opset8::Slice>({_gpt_neox_layers_1_attention_Reshape, {S}, {2*S}, {1}, {3}}, "f32[?,?,?,?]");   //  /gpt_neox/layers.1/attention/Slice_1
+    auto _gpt_neox_layers_1_attention_Transpose_1 = GenPattern<opset1::Transpose>({_gpt_neox_layers_1_attention_Slice_1, {0, 2, 1, 3}}, "f32[?,?,?,?]");   //  /gpt_neox/layers.1/attention/Transpose_1
+    auto _gpt_neox_layers_1_attention_Slice_5 = GenPattern<opset8::Slice>({_gpt_neox_layers_1_attention_Transpose_1, {0}, {R}, {1}, {3}}, "f32[?,?,?,?]");   //  /gpt_neox/layers.1/attention/Slice_5
+    auto _gpt_neox_layers_1_attention_Shape_2 = GenPattern<opset1::ShapeOf>({_gpt_neox_layers_1_attention_Transpose_1}, "i32[4]", {});   //  /gpt_neox/layers.1/attention/Shape_2
+    auto _gpt_neox_layers_1_attention_Gather_2 = GenPattern<opset8::Gather>({_gpt_neox_layers_1_attention_Shape_2, 2, 0}, "i32[]", {{"batch_dims", 0}});   //  /gpt_neox/layers.1/attention/Gather_2
+    auto _gpt_neox_layers_1_attention_Shape_3 = GenPattern<opset1::ShapeOf>({past_key_values_1_key}, "i32[4]", {});   //  /gpt_neox/layers.1/attention/Shape_3
+    auto _gpt_neox_layers_1_attention_Gather_3 = GenPattern<opset8::Gather>({_gpt_neox_layers_1_attention_Shape_3, 2, 0}, "i32[]", {{"batch_dims", 0}});   //  /gpt_neox/layers.1/attention/Gather_3
+    auto _gpt_neox_layers_1_attention_Add = GenPattern<opset1::Add>({_gpt_neox_layers_1_attention_Gather_2, _gpt_neox_layers_1_attention_Gather_3}, "i32[]", {{"auto_broadcast", "numpy"}});   //  /gpt_neox/layers.1/attention/Add
+    auto _gpt_neox_layers_1_attention_rotary_emb_Unsqueeze = GenPattern<opset1::Reshape>({_gpt_neox_layers_1_attention_Add, {1}}, "i32[1]", {{"special_zero", 0}});   //  /gpt_neox/layers.1/attention/rotary_emb/Unsqueeze
+    auto _gpt_neox_layers_1_attention_rotary_emb_Slice = GenPattern<opset8::Slice>({_gpt_neox_layers_0_attention_rotary_emb_Constant, {0}, _gpt_neox_layers_1_attention_rotary_emb_Unsqueeze, {1}, {0}}, "f32[..1,1,2048,?]");   //  /gpt_neox/layers.1/attention/rotary_emb/Slice
+    auto Constant_119385 = GenConst({1.0f}, "f32[1,1,1,1]");
+    auto _gpt_neox_layers_1_attention_Expand_1 = GenPattern<opset1::Multiply>({_gpt_neox_layers_1_attention_rotary_emb_Slice, Constant_119385}, "f32[..1,1,2048,?]", {{"auto_broadcast", "numpy"}});   //  /gpt_neox/layers.1/attention/Expand_1
+    auto Constant_119387 = GenConst({1}, "i32[1,1,1,1]");
+    auto _gpt_neox_layers_1_attention_Expand = GenPattern<opset1::Multiply>({_gpt_neox_layers_0_attention_Unsqueeze_3, Constant_119387}, "i32[?,1,?,1]", {{"auto_broadcast", "numpy"}});   //  /gpt_neox/layers.1/attention/Expand
+    auto _gpt_neox_layers_1_attention_Tile = GenPattern<opset1::Tile>({_gpt_neox_layers_1_attention_Expand, {1, 1, 1, R}}, "i32[?,1,?,?]");   //  /gpt_neox/layers.1/attention/Tile
+    auto _gpt_neox_layers_1_attention_Shape_7 = GenPattern<opset1::ShapeOf>({_gpt_neox_layers_1_attention_Tile}, "i32[4]", {});   //  /gpt_neox/layers.1/attention/Shape_7
+    auto _gpt_neox_layers_1_attention_Gather_6 = GenPattern<opset8::Gather>({_gpt_neox_layers_1_attention_Shape_7, {0}, 0}, "i32[1]", {{"batch_dims", 0}});   //  /gpt_neox/layers.1/attention/Gather_6
+    auto _gpt_neox_layers_1_attention_Concat_4 = GenPattern<opset1::Concat>({_gpt_neox_layers_1_attention_Gather_6, {1}, {1}, {1}}, "i32[4]", {{"axis", 0}});   //  /gpt_neox/layers.1/attention/Concat_4
+    auto _gpt_neox_layers_1_attention_Tile_1 = GenPattern<opset1::Tile>({_gpt_neox_layers_1_attention_Expand_1, _gpt_neox_layers_1_attention_Concat_4}, "f32[?,1,2048,?]");   //  /gpt_neox/layers.1/attention/Tile_1
+    auto _gpt_neox_layers_1_attention_GatherElements = GenPattern<opset6::GatherElements>({_gpt_neox_layers_1_attention_Tile_1, _gpt_neox_layers_1_attention_Tile}, "f32[?,1,?,?]", {{"axis", 2}});   //  /gpt_neox/layers.1/attention/GatherElements
+    auto _gpt_neox_layers_1_attention_Mul_2 = GenPattern<opset1::Multiply>({_gpt_neox_layers_1_attention_Slice_5, _gpt_neox_layers_1_attention_GatherElements}, "f32[?,?,?,?]", {{"auto_broadcast", "numpy"}});   //  /gpt_neox/layers.1/attention/Mul_2
+    auto _gpt_neox_layers_1_attention_Slice_10 = GenPattern<opset8::Slice>({_gpt_neox_layers_1_attention_Slice_5, {R/2}, {2147483647}, {1}, {3}}, "f32[?,?,?,?]");   //  /gpt_neox/layers.1/attention/Slice_10
+    auto Constant_105710 = GenConst({-1.0f}, "f32[1,1,1,1]");
+    auto _gpt_neox_layers_1_attention_Neg_1 = GenPattern<opset1::Multiply>({_gpt_neox_layers_1_attention_Slice_10, Constant_105710}, "f32[?,?,?,?]", {{"auto_broadcast", "numpy"}});   //  /gpt_neox/layers.1/attention/Neg_1
+    auto _gpt_neox_layers_1_attention_Slice_9 = GenPattern<opset8::Slice>({_gpt_neox_layers_1_attention_Slice_5, {0}, {R/2}, {1}, {3}}, "f32[?,?,?,?]");   //  /gpt_neox/layers.1/attention/Slice_9
+    auto _gpt_neox_layers_1_attention_Concat_8 = GenPattern<opset1::Concat>({_gpt_neox_layers_1_attention_Neg_1, _gpt_neox_layers_1_attention_Slice_9}, "f32[?,?,?,?]", {{"axis", -1}});   //  /gpt_neox/layers.1/attention/Concat_8
+    auto _gpt_neox_layers_1_attention_rotary_emb_Unsqueeze_1 = GenPattern<opset1::Reshape>({_gpt_neox_layers_1_attention_Add, {1}}, "i32[1]", {{"special_zero", 0}});   //  /gpt_neox/layers.1/attention/rotary_emb/Unsqueeze_1
+    auto _gpt_neox_layers_1_attention_rotary_emb_Slice_1 = GenPattern<opset8::Slice>({_gpt_neox_layers_0_attention_rotary_emb_Constant_5, {0}, _gpt_neox_layers_1_attention_rotary_emb_Unsqueeze_1, {1}, {0}}, "f32[..1,1,2048,?]");   //  /gpt_neox/layers.1/attention/rotary_emb/Slice_1
+    auto Constant_119389 = GenConst({1.0f}, "f32[1,1,1,1]");
+    auto _gpt_neox_layers_1_attention_Expand_2 = GenPattern<opset1::Multiply>({_gpt_neox_layers_1_attention_rotary_emb_Slice_1, Constant_119389}, "f32[..1,1,2048,?]", {{"auto_broadcast", "numpy"}});   //  /gpt_neox/layers.1/attention/Expand_2
+    auto _gpt_neox_layers_1_attention_Gather_61 = GenPattern<opset8::Gather>({_gpt_neox_layers_1_attention_Shape_7, {0}, 0}, "i32[1]", {{"batch_dims", 0}});   //  /gpt_neox/layers.1/attention/Gather_6
+    auto _gpt_neox_layers_1_attention_Concat_6 = GenPattern<opset1::Concat>({_gpt_neox_layers_1_attention_Gather_61, {1}, {1}, {1}}, "i32[4]", {{"axis", 0}});   //  /gpt_neox/layers.1/attention/Concat_6
+    auto _gpt_neox_layers_1_attention_Tile_2 = GenPattern<opset1::Tile>({_gpt_neox_layers_1_attention_Expand_2, _gpt_neox_layers_1_attention_Concat_6}, "f32[?,1,?,?]");   //  /gpt_neox/layers.1/attention/Tile_2
+    auto _gpt_neox_layers_1_attention_GatherElements_1 = GenPattern<opset6::GatherElements>({_gpt_neox_layers_1_attention_Tile_2, _gpt_neox_layers_1_attention_Tile}, "f32[?,1,?,?]", {{"axis", 2}});   //  /gpt_neox/layers.1/attention/GatherElements_1
+    auto _gpt_neox_layers_1_attention_Mul_3 = GenPattern<opset1::Multiply>({_gpt_neox_layers_1_attention_Concat_8, _gpt_neox_layers_1_attention_GatherElements_1}, "f32[?,?,?,?]", {{"auto_broadcast", "numpy"}});   //  /gpt_neox/layers.1/attention/Mul_3
+    auto _gpt_neox_layers_1_attention_Add_2 = GenPattern<opset1::Add>({_gpt_neox_layers_1_attention_Mul_2, _gpt_neox_layers_1_attention_Mul_3}, "f32[?,?,?,?]", {{"auto_broadcast", "numpy"}});   //  /gpt_neox/layers.1/attention/Add_2
+    auto _gpt_neox_layers_1_attention_Slice_6 = GenPattern<opset8::Slice>({_gpt_neox_layers_1_attention_Transpose_1, {R}, {2147483647}, {1}, {3}}, "f32[?,?,?,?]");   //  /gpt_neox/layers.1/attention/Slice_6
+    auto _gpt_neox_layers_1_attention_Concat_10 = GenPattern<opset1::Concat>({_gpt_neox_layers_1_attention_Add_2, _gpt_neox_layers_1_attention_Slice_6}, "f32[?,?,?,?]", {{"axis", -1}});   //  /gpt_neox/layers.1/attention/Concat_10
+    auto present_1_key = GenPattern<opset1::Concat>({past_key_values_1_key, _gpt_neox_layers_1_attention_Concat_10}, "f32[?,?,?,?]", {{"axis", -2}});   //  present.1.key
+    auto _gpt_neox_layers_1_attention_Shape_16 = GenPattern<opset1::ShapeOf>({present_1_key}, "i32[4]", {});   //  /gpt_neox/layers.1/attention/Shape_16
+    auto _gpt_neox_layers_1_attention_Slice_11 = GenPattern<opset8::Slice>({_gpt_neox_layers_1_attention_Shape_16, {-2}, {-1}, {1}, {0}}, "i32[1]");   //  /gpt_neox/layers.1/attention/Slice_11
+    auto _gpt_neox_layers_1_attention_Squeeze = GenPattern<opset1::Squeeze>({_gpt_neox_layers_1_attention_Slice_11, {0}}, "i32[]");   //  /gpt_neox/layers.1/attention/Squeeze
+    auto _gpt_neox_layers_1_attention_Slice = GenPattern<opset8::Slice>({_gpt_neox_layers_1_attention_Reshape, {0}, {S}, {1}, {3}}, "f32[?,?,?,?]");   //  /gpt_neox/layers.1/attention/Slice
+    auto _gpt_neox_layers_1_attention_Transpose = GenPattern<opset1::Transpose>({_gpt_neox_layers_1_attention_Slice, {0, 2, 1, 3}}, "f32[?,?,?,?]");   //  /gpt_neox/layers.1/attention/Transpose
+    auto _gpt_neox_layers_1_attention_Slice_3 = GenPattern<opset8::Slice>({_gpt_neox_layers_1_attention_Transpose, {0}, {R}, {1}, {3}}, "f32[?,?,?,?]");   //  /gpt_neox/layers.1/attention/Slice_3
+    auto _gpt_neox_layers_1_attention_Mul = GenPattern<opset1::Multiply>({_gpt_neox_layers_1_attention_Slice_3, _gpt_neox_layers_1_attention_GatherElements}, "f32[?,?,?,?]", {{"auto_broadcast", "numpy"}});   //  /gpt_neox/layers.1/attention/Mul
+    auto _gpt_neox_layers_1_attention_Slice_8 = GenPattern<opset8::Slice>({_gpt_neox_layers_1_attention_Slice_3, {R/2}, {2147483647}, {1}, {3}}, "f32[?,?,?,?]");   //  /gpt_neox/layers.1/attention/Slice_8
+    auto Constant_105711 = GenConst({-1.0f}, "f32[1,1,1,1]");
+    auto _gpt_neox_layers_1_attention_Neg = GenPattern<opset1::Multiply>({_gpt_neox_layers_1_attention_Slice_8, Constant_105711}, "f32[?,?,?,?]", {{"auto_broadcast", "numpy"}});   //  /gpt_neox/layers.1/attention/Neg
+    auto _gpt_neox_layers_1_attention_Slice_7 = GenPattern<opset8::Slice>({_gpt_neox_layers_1_attention_Slice_3, {0}, {R/2}, {1}, {3}}, "f32[?,?,?,?]");   //  /gpt_neox/layers.1/attention/Slice_7
+    auto _gpt_neox_layers_1_attention_Concat_7 = GenPattern<opset1::Concat>({_gpt_neox_layers_1_attention_Neg, _gpt_neox_layers_1_attention_Slice_7}, "f32[?,?,?,?]", {{"axis", -1}});   //  /gpt_neox/layers.1/attention/Concat_7
+    auto _gpt_neox_layers_1_attention_Mul_1 = GenPattern<opset1::Multiply>({_gpt_neox_layers_1_attention_Concat_7, _gpt_neox_layers_1_attention_GatherElements_1}, "f32[?,?,?,?]", {{"auto_broadcast", "numpy"}});   //  /gpt_neox/layers.1/attention/Mul_1
+    auto _gpt_neox_layers_1_attention_Add_1 = GenPattern<opset1::Add>({_gpt_neox_layers_1_attention_Mul, _gpt_neox_layers_1_attention_Mul_1}, "f32[?,?,?,?]", {{"auto_broadcast", "numpy"}});   //  /gpt_neox/layers.1/attention/Add_1
+    auto _gpt_neox_layers_1_attention_Slice_4 = GenPattern<opset8::Slice>({_gpt_neox_layers_1_attention_Transpose, {R}, {2147483647}, {1}, {3}}, "f32[?,?,?,?]");   //  /gpt_neox/layers.1/attention/Slice_4
+    auto _gpt_neox_layers_1_attention_Concat_9 = GenPattern<opset1::Concat>({_gpt_neox_layers_1_attention_Add_1, _gpt_neox_layers_1_attention_Slice_4}, "f32[?,?,?,?]", {{"axis", -1}});   //  /gpt_neox/layers.1/attention/Concat_9
+    auto _gpt_neox_layers_1_attention_Shape_14 = GenPattern<opset1::ShapeOf>({_gpt_neox_layers_1_attention_Concat_9}, "i32[4]", {});   //  /gpt_neox/layers.1/attention/Shape_14
+    auto Multiply_135768 = GenPattern<opset1::Multiply>({_gpt_neox_layers_1_attention_Shape_14, -1}, "i32[4]", {{"auto_broadcast", "numpy"}});   //  Multiply_135768
+    auto _gpt_neox_layers_1_attention_Gather_11 = GenPattern<opset8::Gather>({Multiply_135768, 2, 0}, "i32[]", {{"batch_dims", 0}});   //  /gpt_neox/layers.1/attention/Gather_11
+    auto _gpt_neox_layers_1_attention_Sub = GenPattern<opset1::Add>({_gpt_neox_layers_1_attention_Squeeze, _gpt_neox_layers_1_attention_Gather_11}, "i32[]", {{"auto_broadcast", "numpy"}});   //  /gpt_neox/layers.1/attention/Sub
+    auto _gpt_neox_layers_1_attention_Unsqueeze_14 = GenPattern<opset1::Reshape>({_gpt_neox_layers_1_attention_Sub, {1}}, "i32[1]", {{"special_zero", 0}});   //  /gpt_neox/layers.1/attention/Unsqueeze_14
+    auto _gpt_neox_layers_1_attention_Slice_12 = GenPattern<opset8::Slice>({gpt_neox_layers_1_attention_bias, _gpt_neox_layers_1_attention_Unsqueeze_14, _gpt_neox_layers_1_attention_Slice_11, {1}, {2}}, "u8[1,1,..2048,2048]");   //  /gpt_neox/layers.1/attention/Slice_12
+    auto _gpt_neox_layers_1_attention_Slice_13 = GenPattern<opset8::Slice>({_gpt_neox_layers_1_attention_Slice_12, {0}, _gpt_neox_layers_1_attention_Slice_11, {1}, {3}}, "u8[1,1,..2048,..2048]");   //  /gpt_neox/layers.1/attention/Slice_13
+    auto _gpt_neox_layers_1_attention_Gather_9 = GenPattern<opset8::Gather>({_gpt_neox_layers_1_attention_Shape_14, 0, 0}, "i32[]", {{"batch_dims", 0}});   //  /gpt_neox/layers.1/attention/Gather_9
+    auto _gpt_neox_layers_1_attention_Mul_4 = GenPattern<opset1::Multiply>({_gpt_neox_layers_1_attention_Gather_9, H}, "i32[]", {{"auto_broadcast", "numpy"}});   //  /gpt_neox/layers.1/attention/Mul_4
+    auto _gpt_neox_layers_1_attention_Unsqueeze_17 = GenPattern<opset1::Reshape>({_gpt_neox_layers_1_attention_Mul_4, {1}}, "i32[1]", {{"special_zero", 0}});   //  /gpt_neox/layers.1/attention/Unsqueeze_17
+    auto _gpt_neox_layers_1_attention_Gather_111 = GenPattern<opset8::Gather>({_gpt_neox_layers_1_attention_Shape_14, {2}, 0}, "i32[1]", {{"batch_dims", 0}});   //  /gpt_neox/layers.1/attention/Gather_11
+    auto _gpt_neox_layers_1_attention_Concat_13 = GenPattern<opset1::Concat>({_gpt_neox_layers_1_attention_Unsqueeze_17, _gpt_neox_layers_1_attention_Gather_111, {S}}, "i32[3]", {{"axis", 0}});   //  /gpt_neox/layers.1/attention/Concat_13
+    auto _gpt_neox_layers_1_attention_Reshape_1 = GenPattern<opset1::Reshape>({_gpt_neox_layers_1_attention_Concat_9, _gpt_neox_layers_1_attention_Concat_13}, "f32[?,?,?]", {{"special_zero", 1}});   //  /gpt_neox/layers.1/attention/Reshape_1
+    auto Multiply_135771 = GenPattern<opset1::Multiply>({present_1_key, 1.0f/sqrt(S)}, "f32[?,?,?,?]", {{"auto_broadcast", "numpy"}});   //  Multiply_135771
+    auto _gpt_neox_layers_1_attention_Unsqueeze_20 = GenPattern<opset1::Reshape>({_gpt_neox_layers_1_attention_Mul_4, {1}}, "i32[1]", {{"special_zero", 0}});   //  /gpt_neox/layers.1/attention/Unsqueeze_20
+    auto _gpt_neox_layers_1_attention_Concat_14 = GenPattern<opset1::Concat>({_gpt_neox_layers_1_attention_Unsqueeze_20, _gpt_neox_layers_1_attention_Slice_11, {S}}, "i32[3]", {{"axis", 0}});   //  /gpt_neox/layers.1/attention/Concat_14
+    auto _gpt_neox_layers_1_attention_Reshape_2 = GenPattern<opset1::Reshape>({Multiply_135771, _gpt_neox_layers_1_attention_Concat_14}, "f32[?,?,?]", {{"special_zero", 1}});   //  /gpt_neox/layers.1/attention/Reshape_2
+    auto _gpt_neox_layers_1_attention_Mul_5 = GenPattern<opset1::MatMul>({_gpt_neox_layers_1_attention_Reshape_1, _gpt_neox_layers_1_attention_Reshape_2}, "f32[?,?,?]", {{"transpose_a", 0}, {"transpose_b", 1}});   //  /gpt_neox/layers.1/attention/Mul_5
+    auto ShapeOf_64930 = GenPattern<opset1::ShapeOf>({_gpt_neox_layers_1_attention_Mul_5}, "i32[3]", {});   //  ShapeOf_64930
+    auto _gpt_neox_layers_1_attention_Unsqueeze_23 = GenPattern<opset1::Reshape>({_gpt_neox_layers_1_attention_Mul_4, {1}}, "i32[1]", {{"special_zero", 0}});   //  /gpt_neox/layers.1/attention/Unsqueeze_23
+    auto _gpt_neox_layers_1_attention_Gather_112 = GenPattern<opset8::Gather>({_gpt_neox_layers_1_attention_Shape_14, {2}, 0}, "i32[1]", {{"batch_dims", 0}});   //  /gpt_neox/layers.1/attention/Gather_11
+    auto _gpt_neox_layers_1_attention_Concat_15 = GenPattern<opset1::Concat>({_gpt_neox_layers_1_attention_Unsqueeze_23, _gpt_neox_layers_1_attention_Gather_112, _gpt_neox_layers_1_attention_Slice_11}, "i32[3]", {{"axis", 0}});   //  /gpt_neox/layers.1/attention/Concat_15
+    auto Maximum_64797 = GenPattern<opset1::Maximum>({{1, 1, 1}, _gpt_neox_layers_1_attention_Concat_15}, "i32[3]", {{"auto_broadcast", "numpy"}});   //  Maximum_64797
+    auto Maximum_64931 = GenPattern<opset1::Maximum>({ShapeOf_64930, Maximum_64797}, "i32[3]", {{"auto_broadcast", "numpy"}});   //  Maximum_64931
+    auto Constant_119391 = GenConst({0}, "u8[]");
+    auto _gpt_neox_layers_1_attention_Add_3 = GenPattern<opset1::Broadcast>({_gpt_neox_layers_1_attention_Mul_5, Maximum_64931, Constant_119391}, "f32[?,?,?]", {{"mode", "numpy"}});   //  /gpt_neox/layers.1/attention/Add_3
+    auto _gpt_neox_layers_1_attention_Gather_91 = GenPattern<opset8::Gather>({_gpt_neox_layers_1_attention_Shape_14, {0}, 0}, "i32[1]", {{"batch_dims", 0}});   //  /gpt_neox/layers.1/attention/Gather_9
+    auto _gpt_neox_layers_1_attention_Gather_113 = GenPattern<opset8::Gather>({_gpt_neox_layers_1_attention_Shape_14, {2}, 0}, "i32[1]", {{"batch_dims", 0}});   //  /gpt_neox/layers.1/attention/Gather_11
+    auto _gpt_neox_layers_1_attention_Concat_16 = GenPattern<opset1::Concat>({_gpt_neox_layers_1_attention_Gather_91, {H}, _gpt_neox_layers_1_attention_Gather_113, _gpt_neox_layers_1_attention_Slice_11}, "i32[4]", {{"axis", 0}});   //  /gpt_neox/layers.1/attention/Concat_16
+    auto _gpt_neox_layers_1_attention_Reshape_3 = GenPattern<opset1::Reshape>({_gpt_neox_layers_1_attention_Add_3, _gpt_neox_layers_1_attention_Concat_16}, "f32[?,?,?,?]", {{"special_zero", 1}});   //  /gpt_neox/layers.1/attention/Reshape_3
+    auto _gpt_neox_layers_1_attention_Where = GenPattern<opset1::Select>({_gpt_neox_layers_1_attention_Slice_13, _gpt_neox_layers_1_attention_Reshape_3, -FLT_MAX}, "f32[?,?,?,?]", {{"type_relax", 1}, {"auto_broadcast", "numpy"}});   //  /gpt_neox/layers.1/attention/Where
+    auto _gpt_neox_layers_1_attention_Add_4 = GenPattern<opset1::Add>({_gpt_neox_layers_1_attention_Where, _gpt_neox_Mul}, "f32[?,?,?,?]", {{"auto_broadcast", "numpy"}});   //  /gpt_neox/layers.1/attention/Add_4
+    auto _gpt_neox_layers_1_attention_Softmax = GenPattern<opset1::Softmax>({_gpt_neox_layers_1_attention_Add_4}, "f32[?,?,?,?]", {{"axis", 3}});   //  /gpt_neox/layers.1/attention/Softmax
+    auto _gpt_neox_layers_1_attention_Slice_2 = GenPattern<opset8::Slice>({_gpt_neox_layers_1_attention_Reshape, {2*S}, {2147483647}, {1}, {3}}, "f32[?,?,?,?]");   //  /gpt_neox/layers.1/attention/Slice_2
+    auto _gpt_neox_layers_1_attention_Transpose_2 = GenPattern<opset1::Transpose>({_gpt_neox_layers_1_attention_Slice_2, {0, 2, 1, 3}}, "f32[?,?,?,?]");   //  /gpt_neox/layers.1/attention/Transpose_2
+    auto present_1_value = GenPattern<opset1::Concat>({past_key_values_1_value, _gpt_neox_layers_1_attention_Transpose_2}, "f32[?,?,?,?]", {{"axis", -2}});   //  present.1.value
+    auto _gpt_neox_layers_1_attention_MatMul_1 = GenPattern<opset1::MatMul>({_gpt_neox_layers_1_attention_Softmax, present_1_value}, "f32[?,?,?,?]", {{"transpose_a", 0}, {"transpose_b", 0}});   //  /gpt_neox/layers.1/attention/MatMul_1
+    auto _gpt_neox_layers_1_attention_Transpose_4 = GenPattern<opset1::Transpose>({_gpt_neox_layers_1_attention_MatMul_1, {0, 2, 1, 3}}, "f32[?,?,?,?]");   //  /gpt_neox/layers.1/attention/Transpose_4
+    auto _gpt_neox_layers_1_attention_Reshape_4 = GenPattern<opset1::Reshape>({_gpt_neox_layers_1_attention_Transpose_4, {0, 0, H*S}}, "f32[?,?,?]", {{"special_zero", 1}});   //  /gpt_neox/layers.1/attention/Reshape_4
+    
+    return {_gpt_neox_layers_1_attention_Reshape_4, present_1_key, present_1_value};
+}

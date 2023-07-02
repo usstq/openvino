@@ -59,6 +59,7 @@
 #include "utils/general_utils.h"
 #include "utils/cpu_utils.hpp"
 #include "utils/verbose.h"
+#include "utils/profiler.hpp"
 #include "nodes/common/cpu_convert.h"
 #include "memory_desc/cpu_memory_desc_utils.h"
 #include "memory_desc/dnnl_blocked_memory_desc.h"
@@ -557,6 +558,9 @@ std::vector<memory::format_tag> Node::getAvailableFormatsForDims(const Shape &di
 
 void Node::updateShapes() {
     IE_ASSERT(isDynamicNode()) << "Node::updateShapes() is called to a static shape node of type: " << getTypeStr() << " with name: " << getName();
+    auto _prof0 = Profile([this](ProfileData * p){
+        p->name = this->getName();
+    });
     if (needShapeInfer()) {
         auto result = shapeInfer();
         if (ShapeInferStatus::success == result.status) {
@@ -566,6 +570,9 @@ void Node::updateShapes() {
 }
 
 void Node::updateDynamicParams() {
+    auto _prof0 = Profile([this](ProfileData * p){
+        p->name = this->getName();
+    });
     IE_ASSERT(isDynamicNode()) << "Node::updateDynamicParams() is called to a static shape node of type: " << getTypeStr() << " with name: " << getName();
     if (isExecutable()) {
         if (needPrepareParams()) {

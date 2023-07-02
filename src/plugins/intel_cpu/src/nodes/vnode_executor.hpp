@@ -420,10 +420,6 @@ struct gptneox_attention_executor : public vnode_executor {
         //  concat (past_value, cur_value)
         //  matmul W*V
         //
-
-        PlainTensor<ov::bfloat16> ref_q_emb;
-        ref_q_emb.resize({B, H, L1, S});  // bfloat16[1,8,6,64]
-
         // calculate reference
         auto half_rotary_dims = rotary_dims / 2;
         auto rotate_half = [&](bfloat16* q, int s) -> float {
@@ -468,7 +464,6 @@ struct gptneox_attention_executor : public vnode_executor {
                 }
             }
         }
-        // DEBUG_LOG(" ref_q_emb=", ref_q_emb);
     }
 };
 

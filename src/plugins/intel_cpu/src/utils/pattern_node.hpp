@@ -3,11 +3,18 @@
 //
 #pragma once
 
+#include <cassert>
+#include <cfloat>
+#include <cmath>
 #include <cstdlib>
 #include <iostream>
+#include <map>
 #include <memory>
-#include <cfloat>
+#include <openvino/opsets/opset8.hpp>
+#include <sstream>
+#include <string>
 #include <utility>
+
 #include "openvino/opsets/opset1.hpp"
 #include "openvino/opsets/opset2.hpp"
 #include "openvino/opsets/opset3.hpp"
@@ -15,24 +22,20 @@
 #include "openvino/opsets/opset5.hpp"
 #include "openvino/opsets/opset6.hpp"
 #include "openvino/opsets/opset7.hpp"
-#include <openvino/opsets/opset8.hpp>
-#include <sstream>
-#include <string>
-#include <cassert>
-
+#include "openvino/pass/pattern/matcher.hpp"
+#include "openvino/pass/pattern/op/label.hpp"
+#include "openvino/pass/pattern/op/wrap_type.hpp"
 #include "transformations/cpu_opset/common/op/dimof.hpp"
-//#include "ngraph/pattern/op/pattern.hpp"
-#include "ngraph/pattern/op/label.hpp"
-#include "ngraph/pattern/op/wrap_type.hpp"
 
 namespace ov {
 namespace intel_cpu {
 
 extern const int _matcher_verbose;
 
-template<typename ... Args>
-static inline void verbose_log(Args&& ... args) {
-    if (!_matcher_verbose) return;
+template <typename... Args>
+static inline void verbose_log(Args&&... args) {
+    if (!_matcher_verbose)
+        return;
     std::stringstream ss;
     int dummy[] = {(ss << std::forward<Args>(args) << " ", 0)...};
     (void)(dummy);
@@ -40,7 +43,7 @@ static inline void verbose_log(Args&& ... args) {
     std::cout << ss.str();
 }
 
-inline std::vector<std::string> split_string(const std::string & s, const std::string & delimiter) {
+inline std::vector<std::string> split_string(const std::string& s, const std::string& delimiter) {
     std::vector<std::string> ret;
     size_t pos = 0, pos_next;
     std::string token;
@@ -78,6 +81,12 @@ struct values_info {
         auto index = value.get_index();
         auto& item = all_type_pshape[index];
         if (!item.first.compatible(value.get_element_type()) || !item.second.compatible(value.get_partial_shape())) {
+            verbose_log("* mismatched vtype between value & pattern : ",
+                        value.get_element_type(),
+                        value.get_partial_shape(),
+                        " vs ",
+                        item.first,
+                        item.second);
             return false;
         }
         return true;
@@ -132,12 +141,15 @@ struct attr {
     std::string to_string() const {
         std::stringstream ss;
         ss << name << ":";
-        if (type == 0) ss << value.str;
-        if (type == 1) ss << value.i32;
-        if (type == 2) ss << value.f32;
+        if (type == 0)
+            ss << value.str;
+        if (type == 1)
+            ss << value.i32;
+        if (type == 2)
+            ss << value.f32;
         return ss.str();
     }
-    const char * name;
+    const char* name;
     union {
         const char* str;
         int i32;
@@ -147,6 +159,102 @@ struct attr {
 };
 
 bool attr_compatible(ov::Node& node, const std::vector<attr>& attr);
+
+class Symbol {
+private:
+    struct Entity {
+        const char* name = "?";
+        char op;
+        double literal_const_value;
+        std::shared_ptr<Entity> lhs;
+        std::shared_ptr<Entity> rhs;
+        // _,+,-,*,/
+        // l : literal const
+        // n : named symbol
+        double eval(const std::map<void*, double>& value_map) {
+            switch (op) {
+            case 'l':
+                return literal_const_value;
+            case 'n':
+                return value_map.at(this);
+            case '+':
+                return lhs->eval(value_map) + rhs->eval(value_map);
+            case '-':
+                return lhs->eval(value_map) - rhs->eval(value_map);
+            case '*':
+                return lhs->eval(value_map) * rhs->eval(value_map);
+            case '/':
+                return lhs->eval(value_map) / rhs->eval(value_map);
+            case '_':
+                return -lhs->eval(value_map);
+            case 'r':
+                return std::sqrt(lhs->eval(value_map));
+            default:
+                assert(false);
+            }
+        }
+    };
+    std::shared_ptr<Entity> entity;
+
+public:
+    Symbol() {
+        entity = std::make_shared<Entity>();
+        entity->op = 'n';
+    }
+    Symbol(const char* name) {
+        entity = std::make_shared<Entity>();
+        entity->op = 'n';
+        entity->name = name;
+    }
+    Symbol(const int value) {
+        entity = std::make_shared<Entity>();
+        entity->op = 'l';
+        entity->literal_const_value = value;
+    }
+    Symbol(char op, const Symbol& lhs, const Symbol& rhs) {
+        entity = std::make_shared<Entity>();
+        entity->op = op;
+        entity->lhs = lhs.entity;
+        entity->rhs = rhs.entity;
+    }
+    double eval(const std::map<void*, double>& value_map) {
+        return entity->eval(value_map);
+    }
+    bool is_independent_var() {
+        return entity->op == 'n';
+    }
+    int is_literal_const() {
+        return entity->op == 'l';
+    }
+    char get_op() {
+        return entity->op;
+    }
+    void* get_id() {
+        return entity.get();
+    }
+    const char* get_name() {
+        return entity->name;
+    }
+};
+
+inline Symbol operator-(const Symbol& lhs) {
+    return Symbol('_', lhs, lhs);
+}
+inline Symbol operator+(const Symbol& lhs, const Symbol& rhs) {
+    return Symbol('+', lhs, rhs);
+}
+inline Symbol operator-(const Symbol& lhs, const Symbol& rhs) {
+    return Symbol('-', lhs, rhs);
+}
+inline Symbol operator*(const Symbol& lhs, const Symbol& rhs) {
+    return Symbol('*', lhs, rhs);
+}
+inline Symbol operator/(const Symbol& lhs, const Symbol& rhs) {
+    return Symbol('/', lhs, rhs);
+}
+inline Symbol sqrt(Symbol lhs) {
+    return Symbol('r', lhs, lhs);
+}
 
 inline std::shared_ptr<Node> GenInput(values_info vt = nullptr) {
     return ov::pass::pattern::any_input([vt](const Output<Node>& value) {
@@ -159,7 +267,25 @@ inline std::shared_ptr<Node> GenInput(values_info vt = nullptr) {
     });
 }
 
-// A glue type which allows more types to be used as input to GenPattern()
+template <typename T>
+std::string vec2str(const std::vector<T>& vec, int cnt_limit = 9) {
+    std::stringstream ss;
+    ss << "{";
+    const char* sep = "";
+    for (auto& v : vec) {
+        cnt_limit--;
+        if (cnt_limit == 0) {
+            ss << sep << "...";
+            break;
+        }
+        ss << sep << v;
+        sep = ",";
+    }
+    ss << "}";
+    return ss.str();
+}
+
+// A glue/syntax-sugar type which allows more types to be used as input to GenPattern()
 struct GenPatternNode {
     std::shared_ptr<Node> node;
 
@@ -173,7 +299,7 @@ struct GenPatternNode {
             return true;
         });
     }
-    GenPatternNode(const std::shared_ptr<Node> & node) : node(node) {}
+    GenPatternNode(const std::shared_ptr<Node>& node) : node(node) {}
     GenPatternNode(const Output<Node>& out) : node(out.get_node_shared_ptr()) {}
     GenPatternNode(int v) {
         node = ConstVector(std::vector<int>{v}, "i32[]");
@@ -187,6 +313,27 @@ struct GenPatternNode {
     }
     GenPatternNode(std::initializer_list<float> v) {
         node = ConstVector(std::vector<float>(v), nullptr);
+    }
+
+    // 1D-vector & scalar of symbol
+    GenPatternNode(std::initializer_list<Symbol> v) {
+        // initializer_list of Symbol ls special, need to be recorded
+        // and eval/check in the callback after whole match is complete,
+        // where all observed actual constant values are known, first
+        // we will go over all symbols and collect actual value for individual
+        // symbol(named symbol), and then we go over all derived symbols and
+        // evaluate their predicated values and compare against what observed,
+        // and check if they all match.
+        // node = ConstVector(std::vector<float>(v), nullptr);
+        node = ov::pass::pattern::wrap_type<opset1::Constant>();
+
+        auto& rt_info = node->get_rt_info();
+        rt_info["symbolic_const_value"] = std::vector<Symbol>(v);
+    }
+    GenPatternNode(Symbol v) {
+        node = ov::pass::pattern::wrap_type<opset1::Constant>();
+        auto& rt_info = node->get_rt_info();
+        rt_info["symbolic_const_value"] = std::vector<Symbol>({v});
     }
 
     template <typename T, typename std::enable_if<std::is_arithmetic<T>::value, bool>::type = true>
@@ -205,11 +352,16 @@ struct GenPatternNode {
             auto s1 = as_type_ptr<opset1::Constant>(value.get_node_shared_ptr());
             auto shape = s1->get_output_shape(0);
             if (shape_size(shape) != vec.size()) {
+                verbose_log("*mismatched shape_size between pattern & value : ", shape_size(shape), " vs ", vec.size());
                 verbose_log("*mismatched ConstVector ", value);
                 return false;
             }
             std::vector<T> actual = s1->cast_vector<T>();
             if (actual != vec) {
+                verbose_log("*mismatched actual value between pattern & value : ",
+                            vec2str(vec),
+                            " vs ",
+                            vec2str(actual));
                 verbose_log("*mismatched ConstVector ", value);
                 return false;
             }
@@ -227,9 +379,11 @@ std::shared_ptr<Node> GenConst(std::initializer_list<T> v, values_info vt = null
 }
 
 template <class... Args>
-std::shared_ptr<Node> GenPattern(const std::vector<GenPatternNode>& inputs, values_info vt, const std::vector<attr>& attrs = {}) {
+std::shared_ptr<Node> GenPattern(const std::vector<GenPatternNode>& inputs,
+                                 values_info vt,
+                                 const std::vector<attr>& attrs = {}) {
     OutputVector ovs;
-    for (auto & i : inputs) {
+    for (auto& i : inputs) {
         ovs.push_back(i.node);
     }
 
@@ -255,13 +409,7 @@ std::shared_ptr<Node> GenPattern(const std::vector<GenPatternNode>& inputs, valu
     return pattern_node;
 }
 
-// TODO
-// for better performance, pattern matching is done in 2 steps
-//  1. match topology based on type of nodes and their inter-connections
-//  2. detailed validation on individual node's attributes
-//
-// but for clear description of the pattern, all information about
-// each node is described in the pattern description part.
+bool validate_matched_symbols(ov::pass::pattern::Matcher& m);
 
 }  // namespace intel_cpu
 }  // namespace ov

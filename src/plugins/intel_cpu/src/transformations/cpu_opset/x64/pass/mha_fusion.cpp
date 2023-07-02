@@ -606,7 +606,7 @@ public:
             return 1;
         }
         int ret = 0;
-        for (int i = 0; i < node->get_input_size(); i++) {
+        for (size_t i = 0; i < node->get_input_size(); i++) {
             ret += get_all_labels(node->input_value(i), all_labels);
         }
         return ret;
@@ -626,6 +626,10 @@ public:
             // auto node_src = pvmap.at(select.node).get_node_shared_ptr();
             auto root_value = m.get_match_value();
             std::cout << "VNodeIn::callback " << root_value << std::endl;
+            if (!validate_matched_symbols(m)) {
+                std::cout << "VNodeIn: symbol validation failed!" << std::endl;
+                return false;
+            }
 
             OutputVector real_inputs;
             for (auto& in : fake_inputs) {
@@ -635,7 +639,7 @@ public:
                 real_inputs.push_back(it->second);
             }
             OutputVector real_outputs;
-            for (int i = 0; i < pattern_values.size(); i++) {
+            for (size_t i = 0; i < pattern_values.size(); i++) {
                 real_outputs.push_back(pvmap[pattern_values[i].get_node_shared_ptr()]);
             }
 
@@ -644,7 +648,7 @@ public:
 
             auto vnode = std::make_shared<VNode>(real_inputs, real_outputs, vtype);
 
-            for (int i = 0; i < pattern_values.size(); i++) {
+            for (size_t i = 0; i < pattern_values.size(); i++) {
                 auto out = pvmap[pattern_values[i].get_node_shared_ptr()];
                 ngraph::replace_node(out.get_node_shared_ptr(), {vnode->output(i)});
                 auto name = out.get_node_shared_ptr()->get_friendly_name();
@@ -657,7 +661,7 @@ public:
     }
 };
 
-#include "vnode_pythia_1b.txt"
+#include "vnode_gptneox_attn.txt"
 #include "vnode_gpt2.txt"
 
 static bool tril_4d(const Output<Node>& value) {
@@ -672,8 +676,8 @@ static bool tril_4d(const Output<Node>& value) {
     auto max_positions = shape[2];
     std::vector<uint8_t> output_vector = s1->cast_vector<uint8_t>();
     // check if it's unit lower triangular matrix
-    for (int i = 0; i < max_positions; i++) {
-        for (int j = 0; j < max_positions; j++) {
+    for (size_t i = 0; i < max_positions; i++) {
+        for (size_t j = 0; j < max_positions; j++) {
             if (static_cast<bool>(output_vector[i * max_positions + j]) != static_cast<bool>(j <= i))
                 return false;
         }
@@ -682,7 +686,7 @@ static bool tril_4d(const Output<Node>& value) {
 }
 
 MHADynamicVNodeIn::MHADynamicVNodeIn() {
-    add_matcher<VNodeIn>("gptneox_attention", vnode_pythia_1b, [](OutputVector& inputs) {
+    auto gptneox_attention_pred = [](OutputVector& inputs) {
         int ii = 0;
         auto input_ids = inputs[ii++]; //GenInput("i32[?,?]");
         auto attention_mask = inputs[ii++];// GenPattern<opset1::Parameter>({}, "i32[?,?]", {{"shape", "[?,?]"}, {"element_type", "i32"}});
@@ -706,7 +710,8 @@ MHADynamicVNodeIn::MHADynamicVNodeIn() {
         if (!tril_4d(gpt_neox_layers_1_attention_bias))
             return false;
         return true;
-    });
+    };
+    add_matcher<VNodeIn>("gptneox_attention", vnode_gptneox_attn, gptneox_attention_pred);
 
     add_matcher<VNodeIn>("gpt2_attention", vnode_gpt2, [](OutputVector& inputs) {
         int ii = 0;
