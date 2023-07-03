@@ -267,12 +267,14 @@ bool validate_matched_symbols(ov::pass::pattern::Matcher& m) {
         }
     }
 
-    if (true) {
-        std::cout << "Independent Symbols : ";
-        for (auto& sym : independent_vars) {
-            std::cout << sym.get_name() << "=" << sym.eval(symbol_value_map) << ", ";
+    if (_matcher_verbose) {
+        if (independent_vars.size()) {
+            std::cout << "Independent Symbols : ";
+            for (auto& sym : independent_vars) {
+                std::cout << sym.get_name() << "=" << sym.eval(symbol_value_map) << ", ";
+            }
+            std::cout << std::endl;
         }
-        std::cout << std::endl;
     }
 
     // derive/eval dependent symbol's value and check against observed

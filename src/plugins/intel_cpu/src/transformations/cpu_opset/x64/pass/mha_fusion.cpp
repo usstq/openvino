@@ -663,6 +663,7 @@ public:
 
 #include "vnode_gptneox_attn.txt"
 #include "vnode_gpt2.txt"
+#include "vnode_opt.txt"
 
 static bool tril_4d(const Output<Node>& value) {
     values_info vt("u8[1,1,?,?]");
@@ -725,6 +726,10 @@ MHADynamicVNodeIn::MHADynamicVNodeIn() {
             return false;
         return true;
     });
+
+    add_matcher<VNodeIn>("opt_attention", vnode_opt_attn, [](OutputVector& inputs) {
+        return true;
+    });
 }
 
 MHADynamicVNodeOut::MHADynamicVNodeOut() {
@@ -737,7 +742,7 @@ MHADynamicVNodeOut::MHADynamicVNodeOut() {
         auto root_value = m.get_match_value();
         auto vnode = std::dynamic_pointer_cast<VNode>(root_value.get_node_shared_ptr());
 
-        std::cout << "MHADynamicVNodeOut found : " << root_value.get_node_shared_ptr() << std::endl;
+        std::cout << "MHADynamicVNodeOut found : " << root_value.get_node_shared_ptr()->get_friendly_name() << std::endl;
 
         if (vnode_whitelist.find(vnode->get_vtype() + ",") != std::string::npos) {
             // leave this VNode since it's in the white-list, clear it's internal references to original subgraph
