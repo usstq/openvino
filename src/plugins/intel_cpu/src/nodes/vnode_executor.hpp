@@ -161,6 +161,53 @@ struct vnode_executor {
             }
         }
     }
+
+    // Q, K, V is ready, do attention
+    // qkv           [B, L1, 3*(H*S)]
+    // curKey   [B, H, L0+L1, S]
+    // curValue [B, H, L0+L1, S]
+    // attnMask [B, 1, 1, L0+L1]
+    // output_emb    [B, L1, H*S]
+    template <typename T>
+    void ref_mha(PlainTensor<T>& qkv,
+                 PlainTensor<T>& curKey,
+                 PlainTensor<T>& curValue,
+                 PlainTensor<T>& attnMask,
+                 PlainTensor<T>& output,
+                 size_t batchIndex,
+                 size_t headIndex) {
+        const auto& qkvDims = qkv.get_dims();
+        const auto& curKeyDims = curKey.get_dims();
+        auto L1 = qkvDims[1];
+        auto S = curKeyDims[3];
+        auto L0 = curKeyDims[2] - L1;
+        // use dot-product to save memory cost
+        std::vector<float> attn_score(L0 + L1, 0.0f);
+        std::vector<float> word_vec(S, 0.0f);
+        float d_scale = 1.0f / sqrt(S);
+        for (size_t m = 0; m < L1; m++) {
+            // dot-product to get attention scores
+            T* q = &qkv.at({batchIndex, m, 0}) + headIndex * S;
+            auto* mask = &attnMask.at({batchIndex, 0, 0, 0});
+            // causal_mask is applied by above tril-matrix
+            // apply attention mask
+            for (size_t n = 0; n <= L0 + m; n++) {
+                T* k = &curKey.at({batchIndex, headIndex, n, 0});
+                attn_score[n] = dot_product(q, k, S) * d_scale;
+                attn_score[n] += mask[n];
+            }
+            // sofmax
+            softmax(&attn_score[0], L0 + m + 1);
+
+            // linearly combine value
+            word_vec.assign(S, 0.0f);
+            for (size_t n = 0; n <= L0 + m; n++)
+                accumulate(word_vec.data(), &curValue.at({batchIndex, headIndex, n, 0}), S, attn_score[n]);
+
+            // output [B, L1, H*S]
+            std::copy(word_vec.begin(), word_vec.end(), &output.at({batchIndex, m, headIndex * S}));
+        }
+    }
 };
 
 template <class DataType>
@@ -214,24 +261,22 @@ struct gpt2_attention_executor : public vnode_executor {
         //qkv_input.max_repr_len = 99999;
         DEBUG_LOG("qkv_input=", qkv_input.repr(256, 8));
 
-        // concat pask_key/value & k/v into present_key/value
+        // concat past_key/value & k/v into present_key/value
         for (size_t b = 0; b < B; b++) {
             for (size_t h = 0; h < H; h++) {
-                memcpy(&present_key.at({b, h, 0, 0}), &past_key.at({b, h, 0, 0}), sizeof(bfloat16) * L0 * S);
-                memcpy(&present_value.at({b, h, 0, 0}), &past_value.at({b, h, 0, 0}), sizeof(bfloat16) * L0 * S);
+                memcpy(&present_key.at({b, h, 0, 0}), &past_key.at({b, h, 0, 0}), sizeof(DataType) * L0 * S);
+                memcpy(&present_value.at({b, h, 0, 0}), &past_value.at({b, h, 0, 0}), sizeof(DataType) * L0 * S);
 
                 for (size_t p = 0; p < L1; p++) {
-                    auto * q = &qkv_input.at({b, p, h*S});
+                    // auto * q = &qkv_input.at({b, p, h*S});
                     auto * k = &qkv_input.at({b, p, (H + h)*S});
                     auto * v = &qkv_input.at({b, p, (2*H + h)*S});
-                    memcpy(&query.at({b, h, p, 0}), q, sizeof(bfloat16) * S);
-                    memcpy(&present_key.at({b, h, L0 + p, 0}), k, sizeof(bfloat16) * S);
-                    memcpy(&present_value.at({b, h, L0 + p, 0}), v, sizeof(bfloat16) * S);
+                    memcpy(&present_key.at({b, h, L0 + p, 0}), k, sizeof(DataType) * S);
+                    memcpy(&present_value.at({b, h, L0 + p, 0}), v, sizeof(DataType) * S);
                 }
+                ref_mha(qkv_input, present_key, present_value, attention_mask, output_emb, b, h);
             }
         }
-        DEBUG_LOG(" attention_mask=", attention_mask);
-        ref_mha(query, present_key, present_value, output_emb);
     }
 };
 
