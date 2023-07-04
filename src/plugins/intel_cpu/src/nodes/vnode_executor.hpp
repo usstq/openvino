@@ -73,6 +73,8 @@ struct gpt2_attention_executor : public vnode_executor {
     PlainTensor<RT> output_emb;     // f32[B, L1, 512]
     PlainTensor<RT> present_key;    // f32[B, H, L0+L1, 64]
     PlainTensor<RT> present_value;  // f32[B, H, L0+L1, 64]
+    PlainTensor<float> qk_buffer;   // [threads, L1, L0+L1]
+    PlainTensor<float> dst_buffer;  // [threads, L1, S]
 
     GPT2_MHA_kernel<KType, RT> kernel;
 
@@ -96,7 +98,8 @@ struct gpt2_attention_executor : public vnode_executor {
         past_key.assert_dims({B, H, L0, S});
         past_value.assert_dims({B, H, L0, S});
         attention_mask.assert_dims({B, 1, 1, L0 + L1});
-
+        qk_buffer.resize({1, L1, L0 + L1});
+        dst_buffer.resize({1, L1, S});
         std::vector<VectorDims> outputShapes{VectorDims{B, L1, H * S},
                                              VectorDims{B, H, L0 + L1, S},
                                              VectorDims{B, H, L0 + L1, S}};
@@ -117,12 +120,20 @@ struct gpt2_attention_executor : public vnode_executor {
 
                 for (size_t p = 0; p < L1; p++) {
                     // auto * q = &qkv_input.at({b, p, h*S});
-                    auto * k = &qkv_input.at({b, p, (H + h)*S});
-                    auto * v = &qkv_input.at({b, p, (2*H + h)*S});
+                    auto* k = &qkv_input.at({b, p, (H + h) * S});
+                    auto* v = &qkv_input.at({b, p, (2 * H + h) * S});
                     memcpy(&present_key.at({b, h, L0 + p, 0}), k, sizeof(RT) * S);
                     memcpy(&present_value.at({b, h, L0 + p, 0}), v, sizeof(RT) * S);
                 }
-                kernel(qkv_input, present_key, present_value, attention_mask, output_emb, b, h);
+                kernel(qkv_input,
+                       present_key,
+                       present_value,
+                       attention_mask,
+                       output_emb,
+                       &qk_buffer.at({0, 0, 0}),
+                       &dst_buffer.at({0, 0, 0}),
+                       b,
+                       h);
             }
         }
     }

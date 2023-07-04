@@ -20,7 +20,7 @@
 #include "llm_mm.hpp"
 #endif
 #include "utils/plain_tensor.hpp"
-
+#include "gemm/ov_cpu_gemm.h"
 namespace ov {
 namespace intel_cpu {
 namespace node {
@@ -293,6 +293,8 @@ struct GPT2_MHA_kernel {
                  PlainTensor<T>& curValue,
                  PlainTensor<float>& attnMask,
                  PlainTensor<T>& output,
+                 float* qk,
+                 float* dst,
                  size_t batchIndex,
                  size_t headIndex) {
         const auto& qkvDims = qkv.get_dims();
@@ -301,11 +303,12 @@ struct GPT2_MHA_kernel {
         auto S = curKeyDims[3];
         auto L0 = curKeyDims[2] - L1;
         // use dot-product to save memory cost
-        std::vector<float> attn_score(L0 + L1, 0.0f);
-        std::vector<float> word_vec(S, 0.0f);
+        float* attn_score = qk;
+        std::fill(attn_score, attn_score + L0 + L1, 0.0f);
+        float* word_vec = dst;
+        std::fill(word_vec, word_vec + S, 0.0f);
         float d_scale = 1.0f / sqrt(S);
         // Q x K^T =[L1, d] * [L0 + L1, d]^T
-        
         for (size_t m = 0; m < L1; m++) {
             // dot-product to get attention scores
             T* q = &qkv.at({batchIndex, m, 0}) + headIndex * S;
@@ -321,14 +324,133 @@ struct GPT2_MHA_kernel {
             softmax(&attn_score[0], L0 + m + 1);
 
             // linearly combine value
-            word_vec.assign(S, 0.0f);
+            std::fill(word_vec, word_vec + S, 0.0f);
             for (size_t n = 0; n <= L0 + m; n++)
-                accumulate(word_vec.data(), &curValue.at({batchIndex, headIndex, n, 0}), S, attn_score[n]);
+                accumulate(word_vec, &curValue.at({batchIndex, headIndex, n, 0}), S, attn_score[n]);
 
             // output [B, L1, H*S]
-            std::copy(word_vec.begin(), word_vec.end(), &output.at({batchIndex, m, headIndex * S}));
+            std::copy(word_vec, word_vec + S, &output.at({batchIndex, m, headIndex * S}));
         }
     }
+};
+
+template <>
+struct GPT2_MHA_kernel<KT_MLAS, float> {
+    GPT2_MHA_kernel() = default;
+    float dot_product(const float* a, const float* b, int len) {
+        float result = 0;
+        for (int i = 0; i < len; i++)
+            result += static_cast<float>(a[i]) * static_cast<float>(b[i]);
+        return result;
+    }
+
+    void softmax(float* a, size_t len, size_t total_size) {
+        float max = *std::max_element(a, a + len);
+        float sum = 0.0f;
+        for (size_t i = 0; i < len; i++) {
+            a[i] = exp(a[i] - max);
+            sum += a[i];
+        }
+        float scale = 1.0f / sum;
+        for (size_t i = 0; i < len; i++) {
+            a[i] *= scale;
+        }
+        for (size_t i = len; i < total_size; i++) {
+            a[i] = 0.0f;
+        }
+    }
+
+    void accumulate(float* acc, const float* v, int len, float weight = 1.0f) {
+        for (int i = 0; i < len; i++) {
+            acc[i] += static_cast<float>(v[i]) * weight;
+        }
+    }
+
+    // Q, K, V is ready, do attention
+    // qkv           [B, L1, 3*(H*S)]
+    // curKey   [B, H, L0+L1, S]
+    // curValue [B, H, L0+L1, S]
+    // attnMask [B, 1, 1, L0+L1]
+    // output_emb    [B, L1, H*S]
+    // qk        [L1, L0+L1]
+    // dst       [L1, S]
+    void operator()(PlainTensor<float>& qkv,
+                 PlainTensor<float>& curKey,
+                 PlainTensor<float>& curValue,
+                 PlainTensor<float>& attnMask,
+                 PlainTensor<float>& output,
+                 float* qk,
+                 float* dst,
+                 size_t batchIndex,
+                 size_t headIndex) {
+        const auto& qkvDims = qkv.get_dims();
+        const auto& curKeyDims = curKey.get_dims();
+        auto L1 = qkvDims[1];
+        auto S = curKeyDims[3];
+        auto L0 = curKeyDims[2] - L1;
+        auto qkvSize = qkvDims[2];
+        // use dot-product to save memory cost
+        std::vector<float> word_vec(S, 0.0f);
+        float d_scale = 1.0f / sqrt(S);
+        // Q x K^T =[L1, d] * [L0 + L1, d]^T
+        const float* qBasePtr = &qkv.at({batchIndex, 0, 0}) + headIndex * S;
+        const float* kBasePtr = &curKey.at({batchIndex, headIndex, 0, 0});
+        const float* vBasePtr = &curValue.at({batchIndex, headIndex, 0, 0});
+        ov_sgemm("N", "T", L1, L0 + L1, S, 1.0f, qBasePtr, qkvSize, kBasePtr, S, 0.f, qk, L0 + L1, 1);
+        // iterate m
+        auto* mask = &attnMask.at({batchIndex, 0, 0, 0});
+        for (size_t m = 0; m < L1; m++) {
+            size_t offset = m * (L0 + L1);
+            // apply attention mask
+            for (size_t n = 0; n <= L0 + m; n++) {
+                qk[offset + n] *= d_scale;
+                qk[offset + n] += mask[n];
+            }
+            // sofmax
+            softmax(&qk[offset], L0 + m + 1, L0 + L1);
+        }
+
+        ov_sgemm("N", "N", L1, S, L0 + L1, 1.0f, qk, L0 + L1, vBasePtr, S, 0.f, dst, S, 1);
+
+        // output [B, L1, H*S]
+        for (size_t m = 0; m < L1; m++) {
+            const float * src = dst + m * S;
+            std::copy(src, src + S, &output.at({batchIndex, m, headIndex * S}));
+        }
+    }
+    // Q, K, V is ready, do attention
+    // qkv        [B, L1, 3*(H*S)]
+    // past_key   [B, H, L0, S]
+    // past_value [B, H, L0, S]
+    // attn_mask  [B, 1, 1, L0+L1]
+    // output_emb [B, L1, H*S]
+    // void operator()(PlainTensor<float>& qkv,
+    //              PlainTensor<float>& past_key,
+    //              PlainTensor<float>& past_value,
+    //              PlainTensor<float>& attn_mask,
+    //              float* qk,
+    //              PlainTensor<float>& output,
+    //              size_t batchIndex,
+    //              size_t headIndex) {
+    //     const auto& qkv_dims = qkv.get_dims();
+    //     const auto& past_key_dims = past_key.get_dims();
+    //     auto L1 = qkv_dims[1];
+    //     auto S = past_key_dims[3];
+    //     auto L0 = past_key_dims[2];
+    //     auto qkvSize = qkv_dims[2];
+    //     auto hiddenSize = qkvSize / 3; // [H * S]
+    //     // use dot-product to save memory cost
+    //     std::vector<float> attn_score(L0 + L1, 0.0f);
+    //     std::vector<float> word_vec(S, 0.0f);
+    //     float d_scale = 1.0f / sqrt(S);
+    //     // Q x K^T =[L1, d] * [L0 + L1, d]^T
+    //     const float* qBasePtr = &qkv.at({batchIndex, 0, 0}) + headIndex * S;
+    //     const float* kBasePtr = &qkv.at({batchIndex, 0, hiddenSize}) + headIndex * S;
+    //     const float* pastKPtr = &qkv.at({batchIndex, headIndex, 0, 0});
+    //     // split Q x K^T into [L1,d] *[L0,d]^T + [L1,d] *[L1,d]^T
+    //     ov_sgemm("N", "T", L1, L0, S, 1.0f, qBasePtr, qkvSize, pastKPtr, S, 0.f, qk, L0 + L1);
+    //     ov_sgemm("N", "T", L1, L1, S, 1.0f, qBasePtr, qkvSize, kBasePtr, qkvSize, 0.f, qk + L1, L0 + L1);
+    // }
 };
 
 #ifdef OV_CPU_WITH_LLM
