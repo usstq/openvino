@@ -49,22 +49,22 @@ inline void assert_dt<int32_t>(dnnl::memory::data_type dt) {
 
 template <typename T>
 struct data_type_name {
-    static constexpr char* value = "?";
+    static constexpr const char* value = "?";
 };
 
 template <>
 struct data_type_name<float> {
-    static constexpr char* value = "float";
+    static constexpr const char* value = "float";
 };
 
 template <>
 struct data_type_name<bfloat16> {
-    static constexpr char* value = "bfloat16";
+    static constexpr const char* value = "bfloat16";
 };
 
 template <>
 struct data_type_name<uint8_t> {
-    static constexpr char* value = "uint8_t";
+    static constexpr const char* value = "uint8_t";
 };
 
 template <typename T>
@@ -113,25 +113,24 @@ template <typename DT>
 struct PlainTensor : public PlainTensorBase {
     PlainTensor(MemoryPtr mem) {
         assert_dt<DT>(mem->GetDataType());
-        resize<DT>(mem->getStaticDims(), reinterpret_cast<DT*>(mem->GetPtr()));
+        resize(mem->getStaticDims(), reinterpret_cast<DT*>(mem->GetPtr()));
     }
 
     PlainTensor() = default;
 
     void reset(MemoryPtr mem) override {
         assert_dt<DT>(mem->GetDataType());
-        resize<DT>(mem->getStaticDims(), reinterpret_cast<DT*>(mem->GetPtr()));
+        resize(mem->getStaticDims(), reinterpret_cast<DT*>(mem->GetPtr()));
     }
 
     InferenceEngine::Precision::ePrecision get_precision(void) override {
         return precision_of<DT>::value;
     }
 
-    template <typename T = DT>
-    void resize(const VectorDims& new_dims, T* data = nullptr) {
+    void resize(const VectorDims& new_dims, DT* data = nullptr) {
         m_dims = new_dims;
         if (!data) {
-            auto capacity_new = shape_size(m_dims) * sizeof(T);
+            auto capacity_new = shape_size(m_dims) * sizeof(DT);
             if (capacity_new > m_capacity) {
                 m_ptr = std::shared_ptr<void>(aligned_alloc(64, capacity_new), [](void* p) {
                     ::free(p);
@@ -145,13 +144,11 @@ struct PlainTensor : public PlainTensorBase {
         }
     }
 
-    template <typename T = DT>
-    T* data() const {
-        return reinterpret_cast<T*>(m_ptr.get());
+    DT* data() const {
+        return reinterpret_cast<DT*>(m_ptr.get());
     }
 
-    template <typename T = DT>
-    T& at(const std::initializer_list<size_t>& index) {
+    DT& at(const std::initializer_list<size_t>& index) {
         size_t off = 0;
         auto it = index.begin();
         for (size_t i = 0; i < m_dims.size(); i++) {
@@ -159,12 +156,11 @@ struct PlainTensor : public PlainTensorBase {
             if (i < index.size())
                 off += *it++;
         }
-        return reinterpret_cast<T*>(m_ptr.get())[off];
+        return reinterpret_cast<DT*>(m_ptr.get())[off];
     }
 
-    template <typename T = DT>
-    T& operator()(const std::initializer_list<size_t>& index) {
-        return at<T>(index);
+    DT& operator()(const std::initializer_list<size_t>& index) {
+        return at(index);
     }
 
     void assert_dims(const std::initializer_list<size_t>& expect_dims) {
@@ -182,7 +178,6 @@ struct PlainTensor : public PlainTensorBase {
         }
     }
 
-    template <typename T = DT>
     uint8_t** get_batched_ptrs() {
         uint8_t** ret_ptrs = batched_ptr_buff;
         auto batch_size = m_dims[0];
@@ -191,7 +186,7 @@ struct PlainTensor : public PlainTensorBase {
             ret_ptrs = &batched_ptr_backup[0];
         }
         for (size_t b = 0; b < batch_size; b++) {
-            ret_ptrs[b] = reinterpret_cast<uint8_t*>(&at<T>({b}));
+            ret_ptrs[b] = reinterpret_cast<uint8_t*>(&at({b}));
         }
         return ret_ptrs;
     }
@@ -213,7 +208,7 @@ struct PlainTensor : public PlainTensorBase {
         auto sz = shape_size(m_dims);
         auto last_dim_size = m_dims[rank - 1];
         int row_id = 0;
-        int cur_row_lines_left;
+        int cur_row_lines_left = lines_per_row;
         size_t i;
         auto* p = reinterpret_cast<DT*>(m_ptr.get());
         for (i = 0; i < sz && max_total_lines > 0; i++) {

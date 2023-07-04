@@ -49,26 +49,6 @@ public:
     MHAQuantFusion2();
 };
 
-// recognize different CausalMask operations and fuse them into 1
-class CausalMaskFusion: public ngraph::pass::MatcherPass {
-public:
-    OPENVINO_RTTI("CausalMaskFusion", "0");
-    CausalMaskFusion();
-};
-/*
-class RoPEFusionQuery: public ngraph::pass::MatcherPass {
-public:
-    OPENVINO_RTTI("RoPEFusionQuery", "0");
-    RoPEFusionQuery();
-};
-
-class RoPEFusionKey: public ngraph::pass::MatcherPass {
-public:
-    OPENVINO_RTTI("RoPEFusionKey", "0");
-    RoPEFusionKey();
-};
-*/
-
 class MHADynamicVNodeIn: public ngraph::pass::GraphRewrite {
 public:
     OPENVINO_RTTI("MHADynamicVNodeIn", "0");
@@ -78,16 +58,6 @@ class MHADynamicVNodeOut: public ngraph::pass::MatcherPass {
 public:
     OPENVINO_RTTI("MHADynamicVNodeOut", "0");
     MHADynamicVNodeOut();
-};
-
-class MHADynamicFloatFusion: public ngraph::pass::GraphRewrite {
-public:
-    OPENVINO_RTTI("MHADynamicFloatFusion", "0");
-    MHADynamicFloatFusion() {
-        add_matcher<CausalMaskFusion>();
-        //add_matcher<RoPEFusionQuery>();
-        //add_matcher<RoPEFusionKey>();
-    }
 };
 
 class MHAFusion : public ngraph::pass::GraphRewrite {

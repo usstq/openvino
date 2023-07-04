@@ -18,16 +18,20 @@ public:
 
     VNode(const ngraph::OutputVector& new_args, const ngraph::OutputVector& org_outputs, const std::string& vtype);
 
-    bool visit_attributes(ngraph::AttributeVisitor &visitor) override;
+    bool visit_attributes(ngraph::AttributeVisitor& visitor) override;
 
     void validate_and_infer_types() override;
 
     std::shared_ptr<Node> clone_with_new_inputs(const ngraph::OutputVector& new_args) const override;
 
-    std::string get_vtype() const { return m_vtype; }
-    ngraph::OutputVector get_org() { return m_org_outputs; }
-    void clear_org() { m_org_outputs.clear(); }
-    void get_internal_vnodes(ov::NodeVector & nv, ngraph::Output<Node> base);
+    std::string get_vtype() const {
+        return m_vtype;
+    }
+    ngraph::OutputVector get_org() {
+        return m_org_outputs;
+    }
+    void clear_org();
+    void get_internal_vnodes(ov::NodeVector& nv, ngraph::Output<Node> base);
 
 private:
     ngraph::OutputVector m_org_outputs;
@@ -35,5 +39,5 @@ private:
     ov::NodeVector m_nodes;
 };
 
-}   // namespace intel_cpu
-}   // namespace ov
+}  // namespace intel_cpu
+}  // namespace ov

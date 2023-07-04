@@ -2,8 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
-#include <map>
 #include "pattern_node.hpp"
+
+#include <map>
 
 namespace ov {
 namespace intel_cpu {
@@ -75,7 +76,6 @@ public:
         attr_match[name] = it->second.predicate(adapter.get());
     }
 
-
     void on_adapter(const std::string& name, ngraph::ValueAccessor<int>& adapter) override {
         auto it = attr_map.find(name);
         if (it == attr_map.end())
@@ -142,6 +142,168 @@ bool attr_compatible(ov::Node& node, const std::vector<attr>& attr) {
     AttributePredicate vis(attr);
     node.visit_attributes(vis);
     return vis.all_matched(true);
+}
+
+struct SymbolReference {
+    Symbol sym;
+
+    // observations in matched subgraph
+    std::shared_ptr<ov::Node> node;
+    int offset;
+    double value;
+    bool is_integer;
+
+    SymbolReference(Symbol sym, std::shared_ptr<ov::Node> node, int offset, float value)
+        : sym(sym),
+          node(node),
+          offset(offset),
+          value(value),
+          is_integer(false) {}
+
+    SymbolReference(Symbol sym, std::shared_ptr<ov::Node> node, int offset, int32_t value)
+        : sym(sym),
+          node(node),
+          offset(offset),
+          value(value),
+          is_integer(true) {}
+};
+
+static bool collect_symbol_references(std::vector<SymbolReference>& svs,
+                                      ov::pass::pattern::PatternValueMap& pvmap,
+                                      std::shared_ptr<ov::Node> node) {
+    // std::cout << "-------" << node->get_friendly_name() << std::endl;
+    //  recursively collect from parent node
+    for (size_t i = 0; i < node->get_input_size(); i++) {
+        if (!collect_symbol_references(svs, pvmap, node->input_value(i).get_node_shared_ptr())) {
+            return false;
+        }
+    }
+
+    auto& rt_info = node->get_rt_info();
+    if (rt_info.count("symbolic_const_value")) {
+        auto& symbols = rt_info["symbolic_const_value"].as<std::vector<Symbol>>();
+        auto matched_node = pvmap[node].get_node_shared_ptr();
+        auto constop = std::dynamic_pointer_cast<op::v0::Constant>(matched_node);
+        if (constop) {
+            auto ele_cnt = shape_size(constop->get_shape());
+            auto ele_type = constop->get_element_type();
+
+            if (ele_cnt != symbols.size()) {
+                return false;
+            }
+
+            if (ele_type == ov::element::i32) {
+                auto observed = constop->get_vector<int32_t>();
+                if (observed.size() != symbols.size())
+                    return false;
+                for (size_t i = 0; i < symbols.size(); i++) {
+                    svs.emplace_back(symbols[i], matched_node, i, observed[i]);
+                }
+            } else if (ele_type == ov::element::f32) {
+                auto observed = constop->get_vector<float>();
+                if (observed.size() != symbols.size())
+                    return false;
+                for (size_t i = 0; i < symbols.size(); i++) {
+                    svs.emplace_back(symbols[i], matched_node, i, observed[i]);
+                }
+            } else {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+bool validate_matched_symbols(ov::pass::pattern::Matcher& m) {
+    auto& pvmap = m.get_pattern_value_map();
+    auto root_pattern = m.get_pattern();
+
+    // collect symbols and their observed value
+    std::vector<SymbolReference> sym_refs;
+    if (!collect_symbol_references(sym_refs, pvmap, root_pattern)) {
+        return false;
+    }
+
+    // assign independent symbols & check literals
+    std::vector<Symbol> independent_vars;
+    std::map<void*, double> symbol_value_map;
+    for (auto& ref : sym_refs) {
+        auto& sym = ref.sym;
+        if (sym.is_literal_const()) {
+            auto literal = sym.eval(symbol_value_map);
+            if (literal != ref.value) {
+                verbose_log(" mismatch between literal symbol & value : ",
+                            literal,
+                            " vs ",
+                            ref.value,
+                            " from ",
+                            ref.node,
+                            "[",
+                            ref.offset,
+                            "]");
+                return false;
+            }
+            // no need to put literal into value map to eval them.
+        }
+
+        if (sym.is_independent_var()) {
+            auto id = sym.get_id();
+            if (symbol_value_map.count(id)) {
+                if (symbol_value_map[id] != ref.value) {
+                    verbose_log(" in-consistency between multiple references of same symbol : ",
+                                symbol_value_map[id],
+                                " vs ",
+                                ref.value,
+                                " from ",
+                                ref.node,
+                                "[",
+                                ref.offset,
+                                "]");
+                }
+            } else {
+                symbol_value_map[id] = ref.value;
+                independent_vars.emplace_back(sym);
+            }
+        }
+    }
+
+    if (_matcher_verbose) {
+        if (independent_vars.size()) {
+            std::cout << "Independent Symbols : ";
+            for (auto& sym : independent_vars) {
+                std::cout << sym.get_name() << "=" << sym.eval(symbol_value_map) << ", ";
+            }
+            std::cout << std::endl;
+        }
+    }
+
+    // derive/eval dependent symbol's value and check against observed
+    for (auto& ref : sym_refs) {
+        auto& sym = ref.sym;
+        if (!sym.is_literal_const() && !sym.is_independent_var()) {
+            auto derived = sym.eval(symbol_value_map);
+            bool is_match;
+            if (ref.is_integer) {
+                is_match = (derived == ref.value);
+            } else {
+                is_match = static_cast<float>(derived) == static_cast<float>(ref.value);
+            }
+            if (!is_match) {
+                verbose_log(" mismatch between derived & value : ",
+                            derived,
+                            " vs ",
+                            ref.value,
+                            " from ",
+                            ref.node,
+                            "[",
+                            ref.offset,
+                            "]");
+                return false;
+            }
+        }
+    }
+
+    return true;
 }
 
 }  // namespace intel_cpu
