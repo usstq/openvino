@@ -14,6 +14,7 @@
 #include "openvino/core/core_visibility.hpp"
 
 #define ROUND_MODE_TO_NEAREST_EVEN
+#define ROUND_MODE_TO_NEAREST
 
 namespace ov {
 class OPENVINO_API bfloat16 {

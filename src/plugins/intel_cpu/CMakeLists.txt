@@ -96,10 +96,10 @@ target_compile_definitions(${TARGET_NAME} PRIVATE IMPLEMENT_INFERENCE_EXTENSION_
 target_include_directories(${TARGET_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_include_directories(${TARGET_NAME} SYSTEM PRIVATE $<TARGET_PROPERTY:dnnl,INCLUDE_DIRECTORIES>)
 
-add_library(llmdnn STATIC IMPORTED)
-set_target_properties(llmdnn PROPERTIES IMPORTED_LOCATION "/home/tingqian/llmdnn/build/lib/libllmdnn.a")
-set_target_properties(llmdnn PROPERTIES INTERFACE_INCLUDE_DIRECTORIES "/home/tingqian/llmdnn/include")
-target_link_libraries(${TARGET_NAME} PRIVATE llmdnn)
+add_library(cpu_extensions STATIC IMPORTED)
+set_target_properties(cpu_extensions PROPERTIES IMPORTED_LOCATION "/home/tingqian/cpu_extensions/build/lib/libcpu_extensions.a")
+set_target_properties(cpu_extensions PROPERTIES INTERFACE_INCLUDE_DIRECTORIES "/home/tingqian/cpu_extensions/include")
+target_link_libraries(${TARGET_NAME} PRIVATE cpu_extensions)
 
 # Cross compiled function
 # TODO: The same for proposal, proposalONNX, topk

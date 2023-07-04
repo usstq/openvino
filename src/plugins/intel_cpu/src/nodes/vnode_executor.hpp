@@ -45,36 +45,9 @@ void matmul(bool transA, bool transB, int M, int N, int K, TI* pA, int lda, TI* 
     }
 }
 
-template <typename T>
-inline float dot_product(const T* a, const T* b, int len) {
-    float result = 0;
-    for (int i = 0; i < len; i++)
-        result += static_cast<float>(a[i]) * static_cast<float>(b[i]);
-    return result;
-}
-
-inline void softmax(float* a, int len) {
-    float max = *std::max_element(a, a + len);
-    float sum = 0.0f;
-    for (int i = 0; i < len; i++) {
-        a[i] = exp(a[i] - max);
-        sum += a[i];
-    }
-    float scale = 1.0f / sum;
-    for (int i = 0; i < len; i++) {
-        a[i] *= scale;
-    }
-}
-
-template <typename T>
-inline void accumulate(float* acc, const T* v, int len, float weight = 1.0f) {
-    for (int i = 0; i < len; i++) {
-        acc[i] += static_cast<float>(v[i]) * weight;
-    }
-}
-
 // vnode executor with inputs/outputs described in PlainTensor
 struct vnode_executor {
+    std::string impl_signature;
     std::vector<PlainTensorBase*> inputs;
     std::vector<PlainTensorBase*> outputs;
     int use_ref;
@@ -112,106 +85,199 @@ struct vnode_executor {
     }
 
     virtual void exec(Node* node, dnnl::stream strm) = 0;
+};
+//============================ MHA kernels ============================
+template <typename T>
+struct MHA_kernel_ref {
+    MHA_kernel_ref() {}
 
-    // single head Q, K, V, do attention
-    // query    [q_len, nstates]
-    // key      [kv_len, nstates]
-    // value    [kv_len, nstates]
-    // output   [q_len, nstates]
-    //
-    // each array is passed in as leading dimension
-    template <typename T>
-    void ref_mha_single_head(int q_len,
-                             int kv_len,
-                             int nstates,
-                             T* query,
-                             int ld_query,
-                             T* key,
-                             int ld_key,
-                             T* value,
-                             int ld_value,
-                             T* output,
-                             int ld_output) {
-        // use dot-product to save memory cost
-        std::vector<float> attn_score(kv_len, 0.0f);
-        std::vector<float> word_vec(nstates, 0.0f);
-        float d_scale = 1.0f / sqrt(nstates);
-        for (size_t m = 0; m < q_len; m++) {
-            // dot-product to get attention scores
-            auto* q = query + m * ld_query;
-            // how many key/values can be accessed causally
-            auto ncausal = kv_len - q_len + m + 1;
-            for (size_t n = 0; n < ncausal; n++) {
-                auto* k = key + n * ld_key;
-                attn_score[n] = dot_product(q, k, nstates) * d_scale;
-            }
-            // apply causal_mask
-            // apply attention mask
-            // softmax
-            softmax(&attn_score[0], ncausal);
+    template <typename D>
+    float dot_product(const D* a, const D* b, int len) {
+        float result = 0;
+        for (int i = 0; i < len; i++)
+            result += static_cast<float>(a[i]) * static_cast<float>(b[i]);
+        return result;
+    }
 
-            // linearly combine value
-            word_vec.assign(nstates, 0.0f);
-            for (size_t n = 0; n < ncausal; n++) {
-                auto* v = value + n * ld_value;
-                accumulate(word_vec.data(), v, nstates, attn_score[n]);
-            }
-
-            // output [B, L1, H*nstates]
-            auto* out = output + m * ld_output;
-            std::copy(word_vec.begin(), word_vec.end(), out);
+    void softmax(float* a, int len) {
+        float max = *std::max_element(a, a + len);
+        float sum = 0.0f;
+        for (int i = 0; i < len; i++) {
+            a[i] = exp(a[i] - max);
+            sum += a[i];
+        }
+        float scale = 1.0f / sum;
+        for (int i = 0; i < len; i++) {
+            a[i] *= scale;
         }
     }
 
+    template <typename D>
+    void accumulate(float* acc, const D* v, int len, float weight = 1.0f) {
+        for (int i = 0; i < len; i++) {
+            acc[i] += static_cast<float>(v[i]) * weight;
+        }
+    }
     // Q, K, V is ready, do attention
     // query         [B, H, L1, S]
     // present_key   [B, H, L0+L1, S]
     // present_value [B, H, L0+L1, S]
     // output_emb    [B, L1, H*S]
-
-    template <typename T>
-    void ref_mha(PlainTensor<T>& query,
-                 PlainTensor<T>& present_key,
-                 PlainTensor<T>& present_value,
-                 PlainTensor<T>& output_emb) {
+    void operator()(PlainTensor<T>& query,
+                    PlainTensor<T>& present_key,
+                    PlainTensor<T>& present_value,
+                    PlainTensor<float>& attention_mask,
+                    PlainTensor<T>& output_emb) {
         auto& query_dims = query.get_dims();
         auto B = query_dims[0];
         auto H = query_dims[1];
         auto q_len = query_dims[2];
-        auto nstates = query_dims[3];
+        auto head_size = query_dims[3];
         auto& present_key_dims = present_key.get_dims();
         auto kv_len = present_key_dims[2];
+        std::vector<float> attn_score(kv_len, 0.0f);
+        std::vector<float> word_vec(head_size, 0.0f);
+        float d_scale = 1.0f / sqrt(head_size);
 
         for (size_t b = 0; b < B; b++) {
             for (size_t h = 0; h < H; h++) {
-                ref_mha_single_head(q_len, kv_len, nstates,
-                    &query.at({b, h, 0, 0}), nstates,
-                    &present_key.at({b, h, 0, 0}), nstates,
-                    &present_value.at({b, h, 0, 0}), nstates,
-                    &output_emb.at({b, 0, h*nstates}), H*nstates);
+                auto cquery = &query.at({b, h, 0, 0});
+                auto key = &present_key.at({b, h, 0, 0});
+                auto value = &present_value.at({b, h, 0, 0});
+                auto output = &output_emb.at({b, 0, h * head_size});
+                for (size_t m = 0; m < q_len; m++) {
+                    // dot-product to get attention scores
+                    auto* q = cquery + m * head_size;
+                    // how many key/values can be accessed causally
+                    auto ncausal = kv_len - q_len + m + 1;
+                    for (size_t n = 0; n < ncausal; n++) {
+                        auto* k = key + n * head_size;
+                        attn_score[n] = dot_product(q, k, head_size) * d_scale;
+                    }
+                    // apply causal_mask
+                    // apply attention mask
+                    // softmax
+                    softmax(&attn_score[0], ncausal);
+
+                    // linearly combine value
+                    word_vec.assign(head_size, 0.0f);
+                    for (size_t n = 0; n < ncausal; n++) {
+                        auto* v = value + n * head_size;
+                        accumulate(word_vec.data(), v, head_size, attn_score[n]);
+                    }
+
+                    // output [B, L1, H*head_size]
+                    auto* out = output + m * H * head_size;
+                    std::copy(word_vec.begin(), word_vec.end(), out);
+                }
             }
         }
     }
 };
 
+template <typename T>
+struct MHA_kernel_impl;
+
+template <>
+struct MHA_kernel_impl<float> {
+    MHA_kernel_impl() = default;
+    void operator()(PlainTensor<float>& query,
+                    PlainTensor<float>& present_key,
+                    PlainTensor<float>& present_value,
+                    PlainTensor<float>& attention_mask,
+                    PlainTensor<float>& attn_output) {}
+};
+
+template <>
+struct MHA_kernel_impl<ov::bfloat16> {
+    llmdnn::mha_gpt m_kernel;
+    bool m_kernel_initialized = false;
+    MHA_kernel_impl() {}
+
+    void operator()(PlainTensor<ov::bfloat16>& query,
+                    PlainTensor<ov::bfloat16>& present_key,
+                    PlainTensor<ov::bfloat16>& present_value,
+                    PlainTensor<float>& attention_mask,
+                    PlainTensor<ov::bfloat16>& attn_output) {
+        int max_position_embeddings = 2048;
+        auto& query_dims = query.get_dims();
+        auto B = query_dims[0];
+        auto H = query_dims[1];
+        auto q_len = query_dims[2];
+        auto head_size = query_dims[3];
+        auto& present_key_dims = present_key.get_dims();
+        auto kv_len = present_key_dims[2];
+        if (!m_kernel_initialized) {
+            std::cout << "::::::::::::::;  " << __func__ << " llmdnn::mha_gpt " << std::endl;
+            if (!m_kernel.create(llmdnn::mha_gpt::create_param{
+                    .num_heads = H,
+                    .head_size = head_size,
+                    .head_size_aligned =
+                        head_size,  // better to aligned to 64 bytes for best performance, apply for qkv
+                    .max_seq_len =
+                        max_position_embeddings,  // max seq length for computing the size of matmul tmp result
+                    .normal_factor = 1.0f / sqrt(head_size),
+                    .qkv_precision = llmdnn::data_type_t::dnnl_bf16,
+                    .dst_precision = llmdnn::data_type_t::dnnl_bf16,
+                })) {
+                IE_THROW() << __func__ << " llmdnn::mha_gpt::create failed " << std::endl;
+            }
+            m_kernel_initialized = true;
+        }
+        auto batched_ptrs_key = present_key.get_batched_ptrs();
+        auto batched_ptrs_value = present_value.get_batched_ptrs();
+        m_kernel.exec(llmdnn::mha_gpt::exec_param{
+            .batch = B,
+            .query_seq_len = q_len,
+            .key_seq_len = kv_len,
+            .is_causal_in_attention = false,  // causal mask is fused in attention mask: chatglm uses it.
+            .q = reinterpret_cast<uint8_t*>(
+                query.data()),        // q buffer, compact, shape: [batch, num_heads, query_seq_len, head_size]
+            .k = batched_ptrs_key,    // k buffer, k[N] stands different batch which may be discreted
+                                      //      k[0] shape: [batch, num_heads, key_seq_len, head_size]
+            .v = batched_ptrs_value,  // v buffer, v[N] stands different batch which may be discreted
+                                      //      v[0] shape: [batch, num_heads, value_seq_len, head_size]
+            .attention_mask = attention_mask.data(),  // attention mask, attention_mask[0] shape:
+                                                      //      [batch, 1, 1, key_seq_len], when
+                                                      //      is_causal_in_attention is false
+            //      [batch, 1, query_seq_len, key_seq_len], when is_causal_in_attention is true
+            .attn_output = reinterpret_cast<uint8_t*>(
+                attn_output.data()),  // output, compact, shape: [batch, query_seq_len, num_heads
+                                      // * head_size]
+            .head_stride_in_kv =
+                (kv_len)*head_size,  // kv stride for next head; kv may be preallocated a big buffer
+                                     // expected quant schema:
+                                     //   q,k,v use per tensor quant, attn_output may use per tensor/channel quant
+            .q_dequant = 1.0f,
+            .k_dequant = 1.0f,
+            .v_dequant = 1.0f,
+            .qk_quant = 1.0f,
+            .qkv_quant = {}  // size==1 per tensor, size==head_size per channel
+        });
+    }
+};
+
+//============================ MHA kernels ============================
+// RT : runtime precision(type)
+template <typename RT>
 struct gpt2_attention_executor : public vnode_executor {
-    PlainTensor<bfloat16> qkv_input;    // "f32[?,?,2304]"
-    PlainTensor<bfloat16> past_key;     // "f32[?,12,?,64]"
-    PlainTensor<bfloat16> past_value;   // "f32[?,12,?,64]"
-    PlainTensor<uint8_t> Constant_174;  // "u8[1,1,1024,1024]"
+    PlainTensor<RT> qkv_input;          // "f32[?,?,2304]"
+    PlainTensor<RT> past_key;           // "f32[?,12,?,64]"
+    PlainTensor<RT> past_value;         // "f32[?,12,?,64]"
     PlainTensor<float> attention_mask;  // "f32[?,1,1,?]"
 
-    PlainTensor<ov::bfloat16> output_emb;     // f32[B, L1, 512]
-    PlainTensor<ov::bfloat16> present_key;    // f32[B, H, L0+L1, 64]
-    PlainTensor<ov::bfloat16> present_value;  // f32[B, H, L0+L1, 64]
+    PlainTensor<RT> output_emb;     // f32[B, L1, 512]
+    PlainTensor<RT> present_key;    // f32[B, H, L0+L1, 64]
+    PlainTensor<RT> present_value;  // f32[B, H, L0+L1, 64]
 
-    gpt2_attention_executor(Node* node) {
-        std::cout << node->getName() << " creates gpt2_attention_executor" << std::endl;
-        register_inputs(qkv_input, past_key, past_value, Constant_174, attention_mask);
+    MHA_kernel_impl<RT> kernel;
+
+    gpt2_attention_executor() {
+        register_inputs(qkv_input, past_key, past_value, attention_mask);
         register_outputs(output_emb, present_key, present_value);
     }
 
-    PlainTensor<ov::bfloat16> query;
+    PlainTensor<RT> query;
 
     void exec(Node* node, dnnl::stream strm) override {
         update_inputs(node);
@@ -229,75 +295,77 @@ struct gpt2_attention_executor : public vnode_executor {
         past_value.assert_dims({B, H, L0, S});
         attention_mask.assert_dims({B, 1, 1, L0 + L1});
 
-        std::vector<VectorDims> outputShapes;
-        outputShapes.push_back(VectorDims{B, L1, H * S});
-        outputShapes.push_back(VectorDims{B, H, L0 + L1, S});
-        outputShapes.push_back(VectorDims{B, H, L0 + L1, S});
+        std::vector<VectorDims> outputShapes{VectorDims{B, L1, H * S},
+                                             VectorDims{B, H, L0 + L1, S},
+                                             VectorDims{B, H, L0 + L1, S}};
         node->redefineOutputMemory(outputShapes);
 
         update_outputs(node);
 
-        query.resize({B, H, L1, S});
-
         DEBUG_LOG(" B=", B, " H=", H, " S=", S, " L0=", L0, " L1=", L1);
 
+        query.resize({B, H, L1, S});
         // qkv_input.max_repr_len = 99999;
         DEBUG_LOG("qkv_input=", qkv_input.repr(256, 8));
 
         // concat pask_key/value & k/v into present_key/value
         for (size_t b = 0; b < B; b++) {
             for (size_t h = 0; h < H; h++) {
-                memcpy(&present_key.at({b, h, 0, 0}), &past_key.at({b, h, 0, 0}), sizeof(bfloat16) * L0 * S);
-                memcpy(&present_value.at({b, h, 0, 0}), &past_value.at({b, h, 0, 0}), sizeof(bfloat16) * L0 * S);
+                memcpy(&present_key.at({b, h, 0, 0}), &past_key.at({b, h, 0, 0}), sizeof(RT) * L0 * S);
+                memcpy(&present_value.at({b, h, 0, 0}), &past_value.at({b, h, 0, 0}), sizeof(RT) * L0 * S);
 
                 for (size_t p = 0; p < L1; p++) {
                     auto* q = &qkv_input.at({b, p, h * S});
                     auto* k = &qkv_input.at({b, p, (H + h) * S});
                     auto* v = &qkv_input.at({b, p, (2 * H + h) * S});
-                    memcpy(&query.at({b, h, p, 0}), q, sizeof(bfloat16) * S);
-                    memcpy(&present_key.at({b, h, L0 + p, 0}), k, sizeof(bfloat16) * S);
-                    memcpy(&present_value.at({b, h, L0 + p, 0}), v, sizeof(bfloat16) * S);
+                    memcpy(&query.at({b, h, p, 0}), q, sizeof(RT) * S);
+                    memcpy(&present_key.at({b, h, L0 + p, 0}), k, sizeof(RT) * S);
+                    memcpy(&present_value.at({b, h, L0 + p, 0}), v, sizeof(RT) * S);
                 }
             }
         }
-        DEBUG_LOG(" attention_mask=", attention_mask);
-        ref_mha(query, present_key, present_value, output_emb);
+
+        if (use_ref) {
+            MHA_kernel_ref<RT> kernel2;
+            kernel2(query, present_key, present_value, attention_mask, output_emb);
+            return;
+        }
+        // call mlas based kernel
+        kernel(query, present_key, present_value, attention_mask, output_emb);
     }
 };
 
+template <typename RT>
 struct gptneox_attention_executor : public vnode_executor {
-    PlainTensor<int32_t> input_ids;       // i32[B, L1]
-    PlainTensor<float> attention_mask;    // f32[B, 1, 1, L0 + L1]
-    PlainTensor<bfloat16> past_key;       // f32[B, H, L0, S]
-    PlainTensor<bfloat16> past_value;     // f32[B, H, L0, S]
-    PlainTensor<bfloat16> past_0_key;     // f32[B, H, L0, S]
-    PlainTensor<bfloat16> qkv_input;      // f32[B, L1, H*3*S] => [B, L1, H, 3, S]
-    PlainTensor<uint8_t> attention_bias;  // u8[1,1,2048,2048]
-    PlainTensor<float> rotary_emb_cos;    // f32[1,1,2048,16]
-    PlainTensor<float> rotary_emb_sin;    // f32[1,1,2048,16]
+    PlainTensor<RT> qkv_input;          // f32[B, L1, H*3*S] => [B, L1, H, 3, S]
+    PlainTensor<RT> past_key;           // f32[B, H, L0, S]
+    PlainTensor<RT> past_value;         // f32[B, H, L0, S]
+    PlainTensor<RT> past_0_key;         // f32[B, H, L0, S]
+    PlainTensor<float> attention_mask;  // f32[B, 1, 1, L0 + L1]
+    PlainTensor<float> rotary_emb_cos;  // f32[1,1,2048,16]
+    PlainTensor<float> rotary_emb_sin;  // f32[1,1,2048,16]
+    PlainTensor<int32_t> input_ids;     // i32[B, L1]
 
-    PlainTensor<ov::bfloat16> output_emb;     // f32[B, L1, 512]
-    PlainTensor<ov::bfloat16> present_key;    // f32[B, H, L0+L1, 64]
-    PlainTensor<ov::bfloat16> present_value;  // f32[B, H, L0+L1, 64]
+    PlainTensor<RT> output_emb;     // f32[B, L1, 512]
+    PlainTensor<RT> present_key;    // f32[B, H, L0+L1, 64]
+    PlainTensor<RT> present_value;  // f32[B, H, L0+L1, 64]
 
-    gptneox_attention_executor(Node* node) {
-        std::cout << node->getName() << " creates gptneox_attention_executor" << std::endl;
-        register_inputs(input_ids,
-                        attention_mask,
+    MHA_kernel_impl<RT> kernel;
+    gptneox_attention_executor() {
+        register_inputs(qkv_input,
                         past_key,
                         past_value,
                         past_0_key,
-                        qkv_input,
-                        attention_bias,
+                        attention_mask,
                         rotary_emb_cos,
-                        rotary_emb_sin);
+                        rotary_emb_sin,
+                        input_ids);
         register_outputs(output_emb, present_key, present_value);
     }
 
     bool m_kernel_initialized;
-    PlainTensor<ov::bfloat16> m_query_emb;  // query with embed
+    PlainTensor<RT> m_query_emb;  // query with embed
     llmdnn::emb_gpt m_kernel_emb;
-    llmdnn::mha_gpt m_kernel_mha;
 
     size_t B;
     size_t H;
@@ -318,7 +386,7 @@ struct gptneox_attention_executor : public vnode_executor {
         S = dims_past[3];   // 64
         L1 = dims_cur[1];
         rotary_dims = rotary_emb_cos.get_dims()[3];
-        max_position_embeddings = attention_bias.get_dims()[2];
+        max_position_embeddings = rotary_emb_cos.get_dims()[2];
 
         std::vector<VectorDims> outputShapes;
         outputShapes.push_back(VectorDims{B, L1, H * S});
@@ -334,13 +402,12 @@ struct gptneox_attention_executor : public vnode_executor {
         past_value.assert_dims({B, H, L0, S});
         past_0_key.assert_dims({B, H, L0, S});
         qkv_input.assert_dims({B, L1, H * 3 * S});
-        attention_bias.assert_dims({1, 1, max_position_embeddings, max_position_embeddings});
         rotary_emb_cos.assert_dims({1, 1, max_position_embeddings, rotary_dims});
         rotary_emb_sin.assert_dims({1, 1, max_position_embeddings, rotary_dims});
 
         DEBUG_LOG(" B=", B, " H=", H, " S=", S, " L0=", L0, " L1=", L1);
 
-        m_query_emb.resize<ov::bfloat16>({B, H, L1, S});
+        m_query_emb.resize({B, H, L1, S});
 
         if (!m_kernel_initialized) {
             if ((use_ref & 1) == 0) {
@@ -349,38 +416,19 @@ struct gptneox_attention_executor : public vnode_executor {
                         .num_heads = H,
                         .head_size = S,
                         .head_size_aligned = S,  // better to aligned to 64 bytes for best performance, apply for qkv
-                        .max_seq_len =
-                            max_position_embeddings,  // max seq length for computing the size of matmul tmp result
                         .qkv_precision = llmdnn::data_type_t::dnnl_bf16,
                         .dst_precision = llmdnn::data_type_t::dnnl_bf16,
-                        .rotary_emb_base = 10000,
-                        .rotary_pct = 0.25f,
+                        .rotary_dims = rotary_dims,
                         .use_position2d = false,
                     })) {
                     IE_THROW() << __func__ << " llmdnn::emb_gpt::create failed " << std::endl;
-                }
-            }
-            if ((use_ref & 2) == 0) {
-                std::cout << "::::::::::::::;  " << __func__ << " llmdnn::mha_gpt " << std::endl;
-                if (!m_kernel_mha.create(llmdnn::mha_gpt::create_param{
-                        .num_heads = H,
-                        .head_size = S,
-                        .head_size_aligned = S,  // better to aligned to 64 bytes for best performance, apply for qkv
-                        .max_seq_len =
-                            max_position_embeddings,  // max seq length for computing the size of matmul tmp result
-                        .normal_factor = 1.0f / sqrt(S),
-                        .qkv_precision = llmdnn::data_type_t::dnnl_bf16,
-                        .dst_precision = llmdnn::data_type_t::dnnl_bf16,
-                    })) {
-                    IE_THROW() << __func__ << " llmdnn::mha_gpt::create failed " << std::endl;
                 }
             }
             m_kernel_initialized = true;
         }
 
         // exec_ref_rope(); exec_ref_mha(); return;
-        auto batched_ptrs_key = present_key.get_batched_ptrs<ov::bfloat16>();
-        auto batched_ptrs_value = present_value.get_batched_ptrs<ov::bfloat16>();
+
         if (use_ref & 1) {
             exec_ref_rope();
         } else {
@@ -388,15 +436,23 @@ struct gptneox_attention_executor : public vnode_executor {
                 .batch = B,
                 .query_seq_len = L1,
                 .past_seq_len = L0,
-                .qkv = qkv_input.data<uint8_t>(),  // shape: [batch, query_seq_len, 3 * hidden size]   [B, L1, H*3*S]
-                .query_dst = m_query_emb.data<uint8_t>(),                             // rotary embbeding dst
-                .layer_past_key_src = past_key.get_batched_ptrs<ov::bfloat16>(),      // past key src
-                .layer_past_value_src = past_value.get_batched_ptrs<ov::bfloat16>(),  // past value src
-                .layer_past_key_dst = batched_ptrs_key,  // past key dst, if layer_past_key_src!=layer_past_key_dst,
-                                                         // will copy layer_past_key_src to layer_past_key_dst
+                .q = reinterpret_cast<uint8_t*>(&qkv_input.at({0, 0, 0})),      // [B, L1,  H*3*S]
+                .k = reinterpret_cast<uint8_t*>(&qkv_input.at({0, 0, S})),      // [B, L1,  H*3*S]
+                .v = reinterpret_cast<uint8_t*>(&qkv_input.at({0, 0, 2 * S})),  // [B, L1,  H*3*S]
+                .ldq = 3 * S,
+                .ldk = 3 * S,
+                .ldv = 3 * S,
+                .query_dst = reinterpret_cast<uint8_t*>(m_query_emb.data()),  // rotary embbeding dst
+                .layer_past_key_src = past_key.get_batched_ptrs(),            // past key src
+                .layer_past_value_src = past_value.get_batched_ptrs(),        // past value src
+                .layer_past_key_dst =
+                    present_key.get_batched_ptrs(),  // past key dst, if layer_past_key_src!=layer_past_key_dst,
+                                                     // will copy layer_past_key_src to layer_past_key_dst
                 .layer_past_value_dst =
-                    batched_ptrs_value,             // past value dst, if layer_past_value!=layer_past_value_dst,
-                                                    // will copy layer_past_value to layer_past_value_dst
+                    present_value.get_batched_ptrs(),  // past value dst, if layer_past_value!=layer_past_value_dst,
+                                                       // will copy layer_past_value to layer_past_value_dst
+                .cos = rotary_emb_cos.data(),
+                .sin = rotary_emb_sin.data(),
                 .position2d_ids = nullptr,          // shape: [batch, 2, query_seq_len]
                 .head_stride_in_kv = (L0 + L1) * S  // kv stride for next head; kv may be preallocated a big buffer
             });
@@ -405,35 +461,10 @@ struct gptneox_attention_executor : public vnode_executor {
         DEBUG_LOG(" m_query_emb=", m_query_emb);
 
         if (use_ref & 2) {
-            ref_mha(m_query_emb, present_key, present_value, output_emb);
+            MHA_kernel_ref<RT> kernel2;
+            kernel2(m_query_emb, present_key, present_value, attention_mask, output_emb);
         } else {
-            m_kernel_mha.exec(llmdnn::mha_gpt::exec_param{
-                .batch = B,
-                .query_seq_len = L1,
-                .key_seq_len = L0 + L1,
-                .is_causal_in_attention = false,  // causal mask is fused in attention mask: chatglm uses it.
-                .q = m_query_emb
-                         .data<uint8_t>(),  // q buffer, compact, shape: [batch, num_heads, query_seq_len, head_size]
-                .k = batched_ptrs_key,      // k buffer, k[N] stands different batch which may be discreted
-                                            //      k[0] shape: [batch, num_heads, key_seq_len, head_size]
-                .v = batched_ptrs_value,    // v buffer, v[N] stands different batch which may be discreted
-                                            //      v[0] shape: [batch, num_heads, value_seq_len, head_size]
-                .attention_mask = attention_mask.data<float>(),  // attention mask, attention_mask[0] shape:
-                                                                 //      [batch, 1, 1, key_seq_len], when
-                                                                 //      is_causal_in_attention is false
-                //      [batch, 1, query_seq_len, key_seq_len], when is_causal_in_attention is true
-                .attn_output = output_emb.data<uint8_t>(),  // output, compact, shape: [batch, query_seq_len, num_heads
-                                                            // * head_size]
-                .head_stride_in_kv =
-                    (L0 + L1) * S,  // kv stride for next head; kv may be preallocated a big buffer
-                                    // expected quant schema:
-                                    //   q,k,v use per tensor quant, attn_output may use per tensor/channel quant
-                .q_dequant = 1.0f,
-                .k_dequant = 1.0f,
-                .v_dequant = 1.0f,
-                .qk_quant = 1.0f,
-                .qkv_quant = {}  // size==1 per tensor, size==head_size per channel
-            });
+            kernel(m_query_emb, present_key, present_value, attention_mask, output_emb);
         }
     }
 
@@ -454,17 +485,11 @@ struct gptneox_attention_executor : public vnode_executor {
         //
         // calculate reference
         auto half_rotary_dims = rotary_dims / 2;
-        auto rotate_half = [&](bfloat16* q, int s) -> float {
-            if (s < half_rotary_dims)
-                return static_cast<float>(-q[s + half_rotary_dims]);
-            return static_cast<float>(q[s - half_rotary_dims]);
-        };
-
         // copy past kv into present
         for (size_t b = 0; b < B; b++) {
             for (size_t h = 0; h < H; h++) {
-                memcpy(&present_key.at({b, h, 0, 0}), &past_key.at({b, h, 0, 0}), sizeof(bfloat16) * L0 * S);
-                memcpy(&present_value.at({b, h, 0, 0}), &past_value.at({b, h, 0, 0}), sizeof(bfloat16) * L0 * S);
+                memcpy(&present_key.at({b, h, 0, 0}), &past_key.at({b, h, 0, 0}), sizeof(RT) * L0 * S);
+                memcpy(&present_value.at({b, h, 0, 0}), &past_value.at({b, h, 0, 0}), sizeof(RT) * L0 * S);
             }
         }
 
@@ -483,14 +508,21 @@ struct gptneox_attention_executor : public vnode_executor {
                     // k_embed = (k * cos) + (rotate_half(k) * sin)
                     auto* cos = &rotary_emb_cos({0, 0, p, 0});
                     auto* sin = &rotary_emb_sin({0, 0, p, 0});
-                    for (size_t s = 0; s < S; s++) {
-                        if (s < rotary_dims) {
-                            q_embed[s] = cos[s] * q[s] + sin[s] * rotate_half(q, s);
-                            present_k[s] = cos[s] * k[s] + sin[s] * rotate_half(k, s);
-                        } else {
-                            q_embed[s] = q[s];
-                            present_k[s] = k[s];
-                        }
+
+                    size_t s = 0;
+                    for (; s < half_rotary_dims; s++) {
+                        q_embed[s] = cos[s] * q[s] + sin[s] * (-q[s + half_rotary_dims]);
+                        present_k[s] = cos[s] * k[s] + sin[s] * (-k[s + half_rotary_dims]);
+                        present_v[s] = v[s];
+                    }
+                    for (; s < rotary_dims; s++) {
+                        q_embed[s] = cos[s] * q[s] + sin[s] * (q[s - half_rotary_dims]);
+                        present_k[s] = cos[s] * k[s] + sin[s] * (k[s - half_rotary_dims]);
+                        present_v[s] = v[s];
+                    }
+                    for (; s < S; s++) {
+                        q_embed[s] = q[s];
+                        present_k[s] = k[s];
                         present_v[s] = v[s];
                     }
                 }
@@ -499,18 +531,23 @@ struct gptneox_attention_executor : public vnode_executor {
     }
 };
 
-inline std::function<std::shared_ptr<vnode_executor>(Node* node)> vnode_executor_creator(std::string name) {
-    if (name == "gpt2_attention") {
-        return [](Node* node) {
-            return std::make_shared<gpt2_attention_executor>(node);
-        };
+inline std::shared_ptr<vnode_executor> vnode_executor_create(std::string impl_signature) {
+    std::shared_ptr<vnode_executor> ret;
+    if (impl_signature == "gpt2_attention_FP32") {
+        ret = std::make_shared<gpt2_attention_executor<float>>();
     }
-    if (name == "gptneox_attention") {
-        return [](Node* node) {
-            return std::make_shared<gptneox_attention_executor>(node);
-        };
+    if (impl_signature == "gpt2_attention_BF16") {
+        ret = std::make_shared<gpt2_attention_executor<ov::bfloat16>>();
     }
-    return nullptr;
+    if (impl_signature == "gptneox_attention_FP32") {
+        ret = std::make_shared<gptneox_attention_executor<float>>();
+    }
+    if (impl_signature == "gptneox_attention_BF16") {
+        ret = std::make_shared<gptneox_attention_executor<ov::bfloat16>>();
+    }
+    if (ret)
+        ret->impl_signature = impl_signature;
+    return ret;
 }
 
 }  // namespace intel_cpu

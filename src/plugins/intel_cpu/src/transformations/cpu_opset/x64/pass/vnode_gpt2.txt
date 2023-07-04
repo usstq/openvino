@@ -9,8 +9,9 @@ OutputVector vnode_gpt2(const OutputVector& inputs) {
     auto _transformer_h_1_attn_c_attn_Reshape_1 = inputs[ii++];
     auto past_key_values_1_key = inputs[ii++];
     auto past_key_values_1_value = inputs[ii++];
-    auto Constant_174 = inputs[ii++];
     auto _transformer_Mul = inputs[ii++];
+
+    auto Constant_174 = GenConst_tril<uint8_t>("u8[...]");
 
     auto _transformer_h_1_attn_Split = GenPattern<opset1::VariadicSplit>({_transformer_h_1_attn_c_attn_Reshape_1, 2, {768, 768, 768}}, "f32[?,?,768] f32[?,?,768] f32[?,?,768]");   //  /transformer/h.1/attn/Split
     auto _transformer_h_1_attn_Reshape_1 = GenPattern<opset1::Reshape>({_transformer_h_1_attn_Split->output(1), {0, 0, 12, 64}}, "f32[?,?,12,64]", {{"special_zero", 1}});   //  /transformer/h.1/attn/Reshape_1

@@ -409,6 +409,42 @@ std::shared_ptr<Node> GenPattern(const std::vector<GenPatternNode>& inputs,
     return pattern_node;
 }
 
+template<typename T>
+std::shared_ptr<Node> GenConst_tril(values_info vt) {
+    return ov::pass::pattern::wrap_type<opset1::Constant>({}, [vt](const Output<Node>& value) {
+        if (!vt.predicate(value)) {
+            verbose_log("*mismatched GenConst_tril vt ", value);
+            return false;
+        }
+        // ignore higher dimensions, require lowerst 2D to be lower triangular
+        auto s1 = as_type_ptr<opset1::Constant>(value.get_node_shared_ptr());
+        auto shape = s1->get_output_shape(0);
+        auto rank = shape.size();
+        if (rank < 2) {
+            verbose_log("*mismatched GenConst_tril rank < 2 (rank=", rank, ")");
+            return false;
+        }
+        if (shape[rank - 1] != shape[rank - 2]) {
+            verbose_log("*mismatched GenConst_tril shape[-1] != shape[-2] : ",
+                        shape[rank - 1],
+                        " != ",
+                        shape[rank - 2]);
+            return false;
+        }
+        // NxN const matrix
+        auto N = shape[rank - 1];
+        std::vector<T> output_vector = s1->cast_vector<T>();
+        // check if it's unit lower triangular matrix
+        for (size_t i = 0; i < N; i++) {
+            for (size_t j = 0; j < N; j++) {
+                if (static_cast<bool>(output_vector[i * N + j]) != static_cast<bool>(j <= i))
+                    return false;
+            }
+        }
+        return true;
+    });
+}
+
 bool validate_matched_symbols(ov::pass::pattern::Matcher& m);
 
 }  // namespace intel_cpu

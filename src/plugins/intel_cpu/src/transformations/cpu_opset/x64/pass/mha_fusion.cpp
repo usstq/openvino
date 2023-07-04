@@ -613,7 +613,7 @@ public:
     }
 
     template <typename F>
-    VNodeIn(const char* vtype, F func, std::function<bool(OutputVector&)> pred) {
+    VNodeIn(const char* vtype, F func, std::function<bool(OutputVector&)> pred = {}) {
         MATCHER_SCOPE(VNodeIn);
         OutputVector fake_inputs;
         for (int i = 0; i < 32; i++) {
@@ -643,7 +643,7 @@ public:
                 real_outputs.push_back(pvmap[pattern_values[i].get_node_shared_ptr()]);
             }
 
-            if (!pred(real_inputs))
+            if (pred && !pred(real_inputs))
                 return false;
 
             auto vnode = std::make_shared<VNode>(real_inputs, real_outputs, vtype);
@@ -665,71 +665,10 @@ public:
 #include "vnode_gpt2.txt"
 #include "vnode_opt.txt"
 
-static bool tril_4d(const Output<Node>& value) {
-    values_info vt("u8[1,1,?,?]");
-    if (!vt.predicate(value))
-        return false;
-    auto s1 = as_type_ptr<opset1::Constant>(value.get_node_shared_ptr());
-    auto shape = s1->get_output_shape(0);
-    if (shape[2] != shape[3])
-        return false;
-    // NxN const matrix
-    auto max_positions = shape[2];
-    std::vector<uint8_t> output_vector = s1->cast_vector<uint8_t>();
-    // check if it's unit lower triangular matrix
-    for (size_t i = 0; i < max_positions; i++) {
-        for (size_t j = 0; j < max_positions; j++) {
-            if (static_cast<bool>(output_vector[i * max_positions + j]) != static_cast<bool>(j <= i))
-                return false;
-        }
-    }
-    return true;
-}
-
 MHADynamicVNodeIn::MHADynamicVNodeIn() {
-    auto gptneox_attention_pred = [](OutputVector& inputs) {
-        int ii = 0;
-        auto input_ids = inputs[ii++]; //GenInput("i32[?,?]");
-        auto attention_mask = inputs[ii++];// GenPattern<opset1::Parameter>({}, "i32[?,?]", {{"shape", "[?,?]"}, {"element_type", "i32"}});
-        auto past_key_values_1_key = inputs[ii++]; //GenPattern<opset1::Parameter>({}, "f32[?,8,?,64]", {{"shape", "[?,8,?,64]"}, {"element_type", "f32"}});
-        auto past_key_values_1_value = inputs[ii++]; //GenPattern<opset1::Parameter>({}, "f32[?,8,?,64]", {{"shape", "[?,8,?,64]"}, {"element_type", "f32"}});
-        auto past_key_values_0_key = inputs[ii++];
-        //GenPattern<FullyConnectedNode>({_gpt_neox_layers_1_input_layernorm_Add_1, Constant_40943, Constant_53989},
-        // "f32[?,?,1536]", {{"out-rank", "?"}, {"out-type", "f32"}});
-        auto _gpt_neox_layers_1_attention_query_key_value_Add = inputs[ii++];
-        //GenPattern<opset1::Constant>({/*1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,...4194304in total*/},
-        // "u8[1,1,2048,2048]");
-        auto gpt_neox_layers_1_attention_bias = inputs[ii++];
-        //GenPattern<opset1::Constant>({/*1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0.540302,0.950415,0.995004,0.9995,0.99995,0.999995,...32768in total*/},
-        // "f32[1,1,2048,16]");
-        auto _gpt_neox_layers_0_attention_rotary_emb_Constant = inputs[ii++];
-        // GenPattern<opset1::Constant>({/*0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0.841471,0.310984,0.0998334,0.0316175,0.00999983,...32768in total*/},
-        //  "f32[1,1,2048,16]");
-        auto _gpt_neox_layers_0_attention_rotary_emb_Constant_5 = inputs[ii++];
-
-        // check if gpt_neox_layers_1_attention_bias is lower triangular
-        if (!tril_4d(gpt_neox_layers_1_attention_bias))
-            return false;
-        return true;
-    };
-    add_matcher<VNodeIn>("gptneox_attention", vnode_gptneox_attn, gptneox_attention_pred);
-
-    add_matcher<VNodeIn>("gpt2_attention", vnode_gpt2, [](OutputVector& inputs) {
-        int ii = 0;
-        auto _transformer_h_1_ln_1_Add_1 = inputs[ii++];
-        auto past_key_values_1_key = inputs[ii++];
-        auto past_key_values_1_value = inputs[ii++];
-        // GenPattern<opset1::Constant>({}, "u8[1,1,1024,1024]");
-        auto Constant_174 = inputs[ii++];
-        auto _transformer_Mul = inputs[ii++];
-        if (!tril_4d(Constant_174))
-            return false;
-        return true;
-    });
-
-    add_matcher<VNodeIn>("opt_attention", vnode_opt_attn, [](OutputVector& inputs) {
-        return true;
-    });
+    add_matcher<VNodeIn>("gptneox_attention", vnode_gptneox_attn);
+    add_matcher<VNodeIn>("gpt2_attention", vnode_gpt2);
+    add_matcher<VNodeIn>("opt_attention", vnode_opt_attn);
 }
 
 MHADynamicVNodeOut::MHADynamicVNodeOut() {

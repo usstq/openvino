@@ -41,12 +41,6 @@ bool VNode::isSupportedOperation(const std::shared_ptr<const ngraph::Node>& op, 
         return false;
     }
 
-    auto vtype = vnode->get_vtype();
-    if (!vnode_executor_creator(vtype)) {
-        errorMessage = vtype + " is not supported!";
-        return false;
-    }
-
     return true;
 }
 
@@ -77,12 +71,17 @@ void VNode::initSupportedPrimitiveDescriptors() {
     if (!supportedPrimitiveDescriptors.empty())
         return;
 
-    auto creator = vnode_executor_creator(m_vtype);
-    if (creator) {
-        m_executor = creator(this);
-    } else {
-        IE_THROW() << errorPrefix << " unsupported vnode type " << m_vtype;
+    // orginal precision at input port 0 as a hint of runtime precisions
+    auto runtime_precision = getOriginalInputPrecisionAtPort(0);
+    auto impl_signature = m_vtype + "_" + runtime_precision.name();
+
+    m_executor = vnode_executor_create(impl_signature);
+    if (!m_executor) {
+        IE_THROW() << errorPrefix << " unsupported vnode implementation " << impl_signature;
     }
+
+    std::cout << getName() << " created executor: " << m_executor->impl_signature << std::endl;
+
     std::vector<ov::intel_cpu::PortConfigurator> inPortConfigs;
     std::vector<ov::intel_cpu::PortConfigurator> outPortConfigs;
     for (auto* p : m_executor->inputs) {
