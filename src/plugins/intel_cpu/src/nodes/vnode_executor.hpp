@@ -12,6 +12,7 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include "openvino/core/parallel.hpp"
 
 #include "vnode_kernels.hpp"
 
@@ -93,13 +94,13 @@ struct gpt2_attention_executor : public vnode_executor {
         auto L0 = dims_past[2];  // number of tokens have been encoded
         auto S = dims_past[3];   // 64
         auto L1 = dims_qkv[1];
-
+        size_t num_threads = parallel_get_num_threads();
         qkv_input.assert_dims({B, L1, 3 * (H * S)});
         past_key.assert_dims({B, H, L0, S});
         past_value.assert_dims({B, H, L0, S});
         attention_mask.assert_dims({B, 1, 1, L0 + L1});
-        qk_buffer.resize({1, L1, L0 + L1});
-        dst_buffer.resize({1, L1, S});
+        qk_buffer.resize({num_threads, L1, L0 + L1});
+        dst_buffer.resize({num_threads, L1, S});
         std::vector<VectorDims> outputShapes{VectorDims{B, L1, H * S},
                                              VectorDims{B, H, L0 + L1, S},
                                              VectorDims{B, H, L0 + L1, S}};
@@ -113,29 +114,51 @@ struct gpt2_attention_executor : public vnode_executor {
         DEBUG_LOG("qkv_input=", qkv_input.repr(256, 8));
 
         // concat past_key/value & k/v into present_key/value
-        for (size_t b = 0; b < B; b++) {
-            for (size_t h = 0; h < H; h++) {
-                memcpy(&present_key.at({b, h, 0, 0}), &past_key.at({b, h, 0, 0}), sizeof(RT) * L0 * S);
-                memcpy(&present_value.at({b, h, 0, 0}), &past_value.at({b, h, 0, 0}), sizeof(RT) * L0 * S);
+        parallel_for2d(B, H, [&](size_t b, size_t h) {
+            int64_t threadID = parallel_get_thread_num();
+            memcpy(&present_key.at({b, h, 0, 0}), &past_key.at({b, h, 0, 0}), sizeof(RT) * L0 * S);
+            memcpy(&present_value.at({b, h, 0, 0}), &past_value.at({b, h, 0, 0}), sizeof(RT) * L0 * S);
 
-                for (size_t p = 0; p < L1; p++) {
-                    // auto * q = &qkv_input.at({b, p, h*S});
-                    auto* k = &qkv_input.at({b, p, (H + h) * S});
-                    auto* v = &qkv_input.at({b, p, (2 * H + h) * S});
-                    memcpy(&present_key.at({b, h, L0 + p, 0}), k, sizeof(RT) * S);
-                    memcpy(&present_value.at({b, h, L0 + p, 0}), v, sizeof(RT) * S);
-                }
-                kernel(qkv_input,
-                       present_key,
-                       present_value,
-                       attention_mask,
-                       output_emb,
-                       &qk_buffer.at({0, 0, 0}),
-                       &dst_buffer.at({0, 0, 0}),
-                       b,
-                       h);
+            for (size_t p = 0; p < L1; p++) {
+                // auto * q = &qkv_input.at({b, p, h*S});
+                auto* k = &qkv_input.at({b, p, (H + h) * S});
+                auto* v = &qkv_input.at({b, p, (2 * H + h) * S});
+                memcpy(&present_key.at({b, h, L0 + p, 0}), k, sizeof(RT) * S);
+                memcpy(&present_value.at({b, h, L0 + p, 0}), v, sizeof(RT) * S);
             }
-        }
+            kernel(qkv_input,
+                    present_key,
+                    present_value,
+                    attention_mask,
+                    output_emb,
+                    &qk_buffer.at({threadID, 0, 0}),
+                    &dst_buffer.at({threadID, 0, 0}),
+                    b,
+                    h);
+        });
+        // for (size_t b = 0; b < B; b++) {
+        //     for (size_t h = 0; h < H; h++) {
+        //         memcpy(&present_key.at({b, h, 0, 0}), &past_key.at({b, h, 0, 0}), sizeof(RT) * L0 * S);
+        //         memcpy(&present_value.at({b, h, 0, 0}), &past_value.at({b, h, 0, 0}), sizeof(RT) * L0 * S);
+
+        //         for (size_t p = 0; p < L1; p++) {
+        //             // auto * q = &qkv_input.at({b, p, h*S});
+        //             auto* k = &qkv_input.at({b, p, (H + h) * S});
+        //             auto* v = &qkv_input.at({b, p, (2 * H + h) * S});
+        //             memcpy(&present_key.at({b, h, L0 + p, 0}), k, sizeof(RT) * S);
+        //             memcpy(&present_value.at({b, h, L0 + p, 0}), v, sizeof(RT) * S);
+        //         }
+        //         kernel(qkv_input,
+        //                present_key,
+        //                present_value,
+        //                attention_mask,
+        //                output_emb,
+        //                &qk_buffer.at({0, 0, 0}),
+        //                &dst_buffer.at({0, 0, 0}),
+        //                b,
+        //                h);
+        //     }
+        // }
     }
 };
 

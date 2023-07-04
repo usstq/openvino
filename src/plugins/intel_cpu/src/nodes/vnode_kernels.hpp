@@ -337,35 +337,31 @@ struct GPT2_MHA_kernel {
 template <>
 struct GPT2_MHA_kernel<KT_MLAS, float> {
     GPT2_MHA_kernel() = default;
-    float dot_product(const float* a, const float* b, int len) {
-        float result = 0;
-        for (int i = 0; i < len; i++)
-            result += static_cast<float>(a[i]) * static_cast<float>(b[i]);
-        return result;
-    }
-
-    void softmax(float* a, size_t len, size_t total_size) {
-        float max = *std::max_element(a, a + len);
+    void scale_add_softmax(float* a, float scale, float* mask, size_t len, size_t total_size) {
+        float max = std::numeric_limits<float>::lowest();
+        // scale_add_reduce_max
+        for (size_t i = 0; i < len; i++) {
+            a[i] *= scale;
+            a[i] += mask[i];
+            max = a[i] > max ? a[i] : max;
+        }
         float sum = 0.0f;
+        // exp sum
         for (size_t i = 0; i < len; i++) {
             a[i] = exp(a[i] - max);
             sum += a[i];
         }
-        float scale = 1.0f / sum;
+        // divide sum
+        float dividend = 1.0f / sum;
         for (size_t i = 0; i < len; i++) {
-            a[i] *= scale;
+            a[i] *= dividend;
         }
+        // causual mask with zeros
         for (size_t i = len; i < total_size; i++) {
             a[i] = 0.0f;
         }
     }
-
-    void accumulate(float* acc, const float* v, int len, float weight = 1.0f) {
-        for (int i = 0; i < len; i++) {
-            acc[i] += static_cast<float>(v[i]) * weight;
-        }
-    }
-
+    void
     // Q, K, V is ready, do attention
     // qkv           [B, L1, 3*(H*S)]
     // curKey   [B, H, L0+L1, S]
@@ -402,12 +398,8 @@ struct GPT2_MHA_kernel<KT_MLAS, float> {
         for (size_t m = 0; m < L1; m++) {
             size_t offset = m * (L0 + L1);
             // apply attention mask
-            for (size_t n = 0; n <= L0 + m; n++) {
-                qk[offset + n] *= d_scale;
-                qk[offset + n] += mask[n];
-            }
             // sofmax
-            softmax(&qk[offset], L0 + m + 1, L0 + L1);
+            scale_add_softmax(&qk[offset], d_scale, mask, L0 + m + 1, L0 + L1);
         }
 
         ov_sgemm("N", "N", L1, S, L0 + L1, 1.0f, qk, L0 + L1, vBasePtr, S, 0.f, dst, S, 1);
@@ -418,39 +410,6 @@ struct GPT2_MHA_kernel<KT_MLAS, float> {
             std::copy(src, src + S, &output.at({batchIndex, m, headIndex * S}));
         }
     }
-    // Q, K, V is ready, do attention
-    // qkv        [B, L1, 3*(H*S)]
-    // past_key   [B, H, L0, S]
-    // past_value [B, H, L0, S]
-    // attn_mask  [B, 1, 1, L0+L1]
-    // output_emb [B, L1, H*S]
-    // void operator()(PlainTensor<float>& qkv,
-    //              PlainTensor<float>& past_key,
-    //              PlainTensor<float>& past_value,
-    //              PlainTensor<float>& attn_mask,
-    //              float* qk,
-    //              PlainTensor<float>& output,
-    //              size_t batchIndex,
-    //              size_t headIndex) {
-    //     const auto& qkv_dims = qkv.get_dims();
-    //     const auto& past_key_dims = past_key.get_dims();
-    //     auto L1 = qkv_dims[1];
-    //     auto S = past_key_dims[3];
-    //     auto L0 = past_key_dims[2];
-    //     auto qkvSize = qkv_dims[2];
-    //     auto hiddenSize = qkvSize / 3; // [H * S]
-    //     // use dot-product to save memory cost
-    //     std::vector<float> attn_score(L0 + L1, 0.0f);
-    //     std::vector<float> word_vec(S, 0.0f);
-    //     float d_scale = 1.0f / sqrt(S);
-    //     // Q x K^T =[L1, d] * [L0 + L1, d]^T
-    //     const float* qBasePtr = &qkv.at({batchIndex, 0, 0}) + headIndex * S;
-    //     const float* kBasePtr = &qkv.at({batchIndex, 0, hiddenSize}) + headIndex * S;
-    //     const float* pastKPtr = &qkv.at({batchIndex, headIndex, 0, 0});
-    //     // split Q x K^T into [L1,d] *[L0,d]^T + [L1,d] *[L1,d]^T
-    //     ov_sgemm("N", "T", L1, L0, S, 1.0f, qBasePtr, qkvSize, pastKPtr, S, 0.f, qk, L0 + L1);
-    //     ov_sgemm("N", "T", L1, L1, S, 1.0f, qBasePtr, qkvSize, kBasePtr, qkvSize, 0.f, qk + L1, L0 + L1);
-    // }
 };
 
 #ifdef OV_CPU_WITH_LLM
