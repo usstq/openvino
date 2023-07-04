@@ -39,12 +39,12 @@ struct RoPE_kernel {
                     PlainTensor<T>& present_value,
                     PlainTensor<float>& rotary_emb_cos,
                     PlainTensor<float>& rotary_emb_sin) {
-        auto B = qkv_input.get_dims()[0];
-        auto L1 = qkv_input.get_dims()[1];
-        auto H = past_key.get_dims()[1];
-        auto L0 = past_key.get_dims()[2];
-        auto S = past_key.get_dims()[3];
-        auto rotary_dims = rotary_emb_cos.get_dims()[3];
+        auto B = qkv_input.size(0);
+        auto L1 = qkv_input.size(1);
+        auto H = past_key.size(1);
+        auto L0 = past_key.size(2);
+        auto S = past_key.size(3);
+        auto rotary_dims = rotary_emb_cos.size(3);
         auto half_rotary_dims = rotary_dims / 2;
         // copy past kv into present
         for (size_t b = 0; b < B; b++) {
@@ -108,12 +108,12 @@ struct RoPE_kernel<KT_LLMDNN, ov::bfloat16> {
                     PlainTensor<ov::bfloat16>& present_value,
                     PlainTensor<float>& rotary_emb_cos,
                     PlainTensor<float>& rotary_emb_sin) {
-        auto B = qkv_input.get_dims()[0];
-        auto L1 = qkv_input.get_dims()[1];
-        auto H = past_key.get_dims()[1];
-        auto L0 = past_key.get_dims()[2];
-        auto S = past_key.get_dims()[3];
-        auto rotary_dims = rotary_emb_cos.get_dims()[3];
+        auto B = qkv_input.size(0);
+        auto L1 = qkv_input.size(1);
+        auto H = past_key.size(1);
+        auto L0 = past_key.size(2);
+        auto S = past_key.size(3);
+        auto rotary_dims = rotary_emb_cos.size(3);
         if (!m_kernel_initialized) {
             std::cout << "::::::::::::::;  " << __func__ << " llmdnn::emb_gpt " << std::endl;
             if (!m_kernel_emb.create(llmdnn::emb_gpt::create_param{
@@ -200,26 +200,23 @@ struct MHA_kernel {
                     PlainTensor<T>& present_value,
                     PlainTensor<float>& attention_mask,
                     PlainTensor<T>& output_emb) {
-        auto& query_dims = query.get_dims();
-        auto B = query_dims[0];
-        auto H = query_dims[1];
-        auto q_len = query_dims[2];
-        auto head_size = query_dims[3];
-        auto& present_key_dims = present_key.get_dims();
-        auto kv_len = present_key_dims[2];
+        auto B = query.size(0);
+        auto H = query.size(1);
+        auto q_len = query.size(2);
+        auto head_size = query.size(3);
+        auto kv_len = present_key.size(2);
         std::vector<float> attn_score(kv_len, 0.0f);
         std::vector<float> word_vec(head_size, 0.0f);
         float d_scale = 1.0f / sqrt(head_size);
 
         for (size_t b = 0; b < B; b++) {
             for (size_t h = 0; h < H; h++) {
-                auto cquery = &query.at({b, h, 0, 0});
                 auto key = &present_key.at({b, h, 0, 0});
                 auto value = &present_value.at({b, h, 0, 0});
                 auto output = &output_emb.at({b, 0, h * head_size});
                 for (size_t m = 0; m < q_len; m++) {
                     // dot-product to get attention scores
-                    auto* q = cquery + m * head_size;
+                    auto* q = &query.at({b, h, m, 0});
                     // how many key/values can be accessed causally
                     auto ncausal = kv_len - q_len + m + 1;
                     for (size_t n = 0; n < ncausal; n++) {
@@ -259,13 +256,11 @@ struct MHA_kernel<KT_LLMDNN, ov::bfloat16> {
                     PlainTensor<float>& attention_mask,
                     PlainTensor<ov::bfloat16>& attn_output) {
         int max_position_embeddings = 2048;
-        auto& query_dims = query.get_dims();
-        auto B = query_dims[0];
-        auto H = query_dims[1];
-        auto q_len = query_dims[2];
-        auto head_size = query_dims[3];
-        auto& present_key_dims = present_key.get_dims();
-        auto kv_len = present_key_dims[2];
+        auto B = query.size(0);
+        auto H = query.size(1);
+        auto q_len = query.size(2);
+        auto head_size = query.size(3);
+        auto kv_len = present_key.size(2);
         if (!m_kernel_initialized) {
             std::cout << "::::::::::::::;  " << __func__ << " llmdnn::mha_gpt " << std::endl;
             if (!m_kernel.create(llmdnn::mha_gpt::create_param{
