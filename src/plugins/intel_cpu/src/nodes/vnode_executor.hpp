@@ -21,6 +21,7 @@
 
 namespace ov {
 namespace intel_cpu {
+namespace node {
 
 template <typename TI, typename TO>
 void matmul(bool transA, bool transB, int M, int N, int K, TI* pA, int lda, TI* pB, int ldb, TO* pC, int ldc) {
@@ -47,14 +48,11 @@ void matmul(bool transA, bool transB, int M, int N, int K, TI* pA, int lda, TI* 
 
 // vnode executor with inputs/outputs described in PlainTensor
 struct vnode_executor {
-    std::string impl_signature;
+    std::string signature;
     std::vector<PlainTensorBase*> inputs;
     std::vector<PlainTensorBase*> outputs;
-    int use_ref;
 
-    vnode_executor() {
-        use_ref = std::getenv("USE_REF") ? atoi(std::getenv("USE_REF")) : 0;
-    }
+    vnode_executor() {}
 
     void register_inputs() {}
     template <typename T0, typename... Ts>
@@ -87,9 +85,154 @@ struct vnode_executor {
     virtual void exec(Node* node, dnnl::stream strm) = 0;
 };
 //============================ MHA kernels ============================
+
+enum KernelTypes { KT_REF, KT_LLMDNN, KT_MLAS };
+
+template <KernelTypes KType, typename T>
+struct RoPE_kernel_impl {
+    RoPE_kernel_impl() = default;
+
+    void operator()(PlainTensor<T>& qkv_input,
+                    PlainTensor<T>& past_key,
+                    PlainTensor<T>& past_value,
+                    PlainTensor<T>& query_emb,
+                    PlainTensor<T>& present_key,
+                    PlainTensor<T>& present_value,
+                    PlainTensor<float>& rotary_emb_cos,
+                    PlainTensor<float>& rotary_emb_sin) {
+        auto B = qkv_input.get_dims()[0];
+        auto L1 = qkv_input.get_dims()[1];
+        auto H = past_key.get_dims()[1];
+        auto L0 = past_key.get_dims()[2];
+        auto S = past_key.get_dims()[3];
+        auto rotary_dims = rotary_emb_cos.get_dims()[3];
+        auto half_rotary_dims = rotary_dims / 2;
+        // copy past kv into present
+        for (size_t b = 0; b < B; b++) {
+            for (size_t h = 0; h < H; h++) {
+                memcpy(&present_key.at({b, h, 0, 0}), &past_key.at({b, h, 0, 0}), sizeof(T) * L0 * S);
+                memcpy(&present_value.at({b, h, 0, 0}), &past_value.at({b, h, 0, 0}), sizeof(T) * L0 * S);
+            }
+        }
+
+        // rotary embedding for word vector at each position p
+        // meanwhile concat is performed
+        for (size_t b = 0; b < B; b++) {
+            for (size_t h = 0; h < H; h++) {
+                for (size_t p = L0; p < L0 + L1; p++) {
+                    auto* q = &qkv_input.at({b, p - L0, (h * 3 + 0) * S + 0});
+                    auto* k = &qkv_input.at({b, p - L0, (h * 3 + 1) * S + 0});
+                    auto* v = &qkv_input.at({b, p - L0, (h * 3 + 2) * S + 0});
+                    auto* present_k = &present_key.at({b, h, p, 0});    // f32[B, H, L0+L1, 64]
+                    auto* present_v = &present_value.at({b, h, p, 0});  // f32[B, H, L0+L1, 64]
+                    auto* q_embed = &query_emb.at({b, h, p - L0, 0});
+                    // q_embed = (q * cos) + (rotate_half(q) * sin)
+                    // k_embed = (k * cos) + (rotate_half(k) * sin)
+                    auto* cos = &rotary_emb_cos({0, 0, p, 0});
+                    auto* sin = &rotary_emb_sin({0, 0, p, 0});
+
+                    size_t s = 0;
+                    for (; s < half_rotary_dims; s++) {
+                        q_embed[s] = cos[s] * q[s] + sin[s] * (-q[s + half_rotary_dims]);
+                        present_k[s] = cos[s] * k[s] + sin[s] * (-k[s + half_rotary_dims]);
+                        present_v[s] = v[s];
+                    }
+                    for (; s < rotary_dims; s++) {
+                        q_embed[s] = cos[s] * q[s] + sin[s] * (q[s - half_rotary_dims]);
+                        present_k[s] = cos[s] * k[s] + sin[s] * (k[s - half_rotary_dims]);
+                        present_v[s] = v[s];
+                    }
+                    for (; s < S; s++) {
+                        q_embed[s] = q[s];
+                        present_k[s] = k[s];
+                        present_v[s] = v[s];
+                    }
+                }
+            }
+        }
+    }
+};
+
+template <>
+struct RoPE_kernel_impl<KT_LLMDNN, ov::bfloat16> {
+    RoPE_kernel_impl() = default;
+
+    llmdnn::emb_gpt m_kernel_emb;
+    bool m_kernel_initialized = false;
+
+    void operator()(PlainTensor<ov::bfloat16>& qkv_input,   // f32[B, L1, H*3*S] => [B, L1, H, 3, S]
+                    PlainTensor<ov::bfloat16>& past_key,    // f32[B, H, L0, S]
+                    PlainTensor<ov::bfloat16>& past_value,  // f32[B, H, L0, S]
+                    PlainTensor<ov::bfloat16>& query_emb,
+                    PlainTensor<ov::bfloat16>& present_key,
+                    PlainTensor<ov::bfloat16>& present_value,
+                    PlainTensor<float>& rotary_emb_cos,
+                    PlainTensor<float>& rotary_emb_sin) {
+        auto B = qkv_input.get_dims()[0];
+        auto L1 = qkv_input.get_dims()[1];
+        auto H = past_key.get_dims()[1];
+        auto L0 = past_key.get_dims()[2];
+        auto S = past_key.get_dims()[3];
+        auto rotary_dims = rotary_emb_cos.get_dims()[3];
+        if (!m_kernel_initialized) {
+            std::cout << "::::::::::::::;  " << __func__ << " llmdnn::emb_gpt " << std::endl;
+            if (!m_kernel_emb.create(llmdnn::emb_gpt::create_param{
+                    .num_heads = H,
+                    .head_size = S,
+                    .head_size_aligned = S,  // better to aligned to 64 bytes for best performance, apply for qkv
+                    .qkv_precision = llmdnn::data_type_t::dnnl_bf16,
+                    .dst_precision = llmdnn::data_type_t::dnnl_bf16,
+                    .rotary_dims = rotary_dims,
+                    .use_position2d = false,
+                })) {
+                IE_THROW() << __func__ << " llmdnn::emb_gpt::create failed " << std::endl;
+            }
+            m_kernel_initialized = true;
+        }
+
+        m_kernel_emb.exec(llmdnn::emb_gpt::exec_param{
+            .batch = B,
+            .query_seq_len = L1,
+            .past_seq_len = L0,
+            .q = reinterpret_cast<uint8_t*>(&qkv_input.at({0, 0, 0})),      // [B, L1,  H*3*S]
+            .k = reinterpret_cast<uint8_t*>(&qkv_input.at({0, 0, S})),      // [B, L1,  H*3*S]
+            .v = reinterpret_cast<uint8_t*>(&qkv_input.at({0, 0, 2 * S})),  // [B, L1,  H*3*S]
+            .ldq = 3 * S,
+            .ldk = 3 * S,
+            .ldv = 3 * S,
+            .query_dst = reinterpret_cast<uint8_t*>(query_emb.data()),  // rotary embbeding dst
+            .layer_past_key_src = past_key.get_batched_ptrs(),          // past key src
+            .layer_past_value_src = past_value.get_batched_ptrs(),      // past value src
+            .layer_past_key_dst =
+                present_key.get_batched_ptrs(),  // past key dst, if layer_past_key_src!=layer_past_key_dst,
+                                                 // will copy layer_past_key_src to layer_past_key_dst
+            .layer_past_value_dst =
+                present_value.get_batched_ptrs(),  // past value dst, if layer_past_value!=layer_past_value_dst,
+                                                   // will copy layer_past_value to layer_past_value_dst
+            .cos = rotary_emb_cos.data(),
+            .sin = rotary_emb_sin.data(),
+            .position2d_ids = nullptr,          // shape: [batch, 2, query_seq_len]
+            .head_stride_in_kv = (L0 + L1) * S  // kv stride for next head; kv may be preallocated a big buffer
+        });
+    }
+};
+
+template <KernelTypes KType, typename T>
+struct MHA_kernel_impl;
+
+template <>
+struct MHA_kernel_impl<KT_MLAS, float> {
+    MHA_kernel_impl() = default;
+    void operator()(PlainTensor<float>& query,
+                    PlainTensor<float>& present_key,
+                    PlainTensor<float>& present_value,
+                    PlainTensor<float>& attention_mask,
+                    PlainTensor<float>& attn_output) {}
+};
+
 template <typename T>
-struct MHA_kernel_ref {
-    MHA_kernel_ref() {}
+struct MHA_kernel_impl<KT_REF, T> {
+    MHA_kernel_impl() = default;
 
     template <typename D>
     float dot_product(const D* a, const D* b, int len) {
@@ -118,6 +261,7 @@ struct MHA_kernel_ref {
             acc[i] += static_cast<float>(v[i]) * weight;
         }
     }
+
     // Q, K, V is ready, do attention
     // query         [B, H, L1, S]
     // present_key   [B, H, L0+L1, S]
@@ -175,21 +319,8 @@ struct MHA_kernel_ref {
     }
 };
 
-template <typename T>
-struct MHA_kernel_impl;
-
 template <>
-struct MHA_kernel_impl<float> {
-    MHA_kernel_impl() = default;
-    void operator()(PlainTensor<float>& query,
-                    PlainTensor<float>& present_key,
-                    PlainTensor<float>& present_value,
-                    PlainTensor<float>& attention_mask,
-                    PlainTensor<float>& attn_output) {}
-};
-
-template <>
-struct MHA_kernel_impl<ov::bfloat16> {
+struct MHA_kernel_impl<KT_LLMDNN, ov::bfloat16> {
     llmdnn::mha_gpt m_kernel;
     bool m_kernel_initialized = false;
     MHA_kernel_impl() {}
@@ -259,7 +390,7 @@ struct MHA_kernel_impl<ov::bfloat16> {
 
 //============================ MHA kernels ============================
 // RT : runtime precision(type)
-template <typename RT>
+template <KernelTypes KType, typename RT>
 struct gpt2_attention_executor : public vnode_executor {
     PlainTensor<RT> qkv_input;          // "f32[?,?,2304]"
     PlainTensor<RT> past_key;           // "f32[?,12,?,64]"
@@ -270,7 +401,7 @@ struct gpt2_attention_executor : public vnode_executor {
     PlainTensor<RT> present_key;    // f32[B, H, L0+L1, 64]
     PlainTensor<RT> present_value;  // f32[B, H, L0+L1, 64]
 
-    MHA_kernel_impl<RT> kernel;
+    MHA_kernel_impl<KType, RT> kernel;
 
     gpt2_attention_executor() {
         register_inputs(qkv_input, past_key, past_value, attention_mask);
@@ -325,17 +456,11 @@ struct gpt2_attention_executor : public vnode_executor {
             }
         }
 
-        if (use_ref) {
-            MHA_kernel_ref<RT> kernel2;
-            kernel2(query, present_key, present_value, attention_mask, output_emb);
-            return;
-        }
-        // call mlas based kernel
         kernel(query, present_key, present_value, attention_mask, output_emb);
     }
 };
 
-template <typename RT>
+template <KernelTypes KType, typename RT>
 struct gptneox_attention_executor : public vnode_executor {
     PlainTensor<RT> qkv_input;          // f32[B, L1, H*3*S] => [B, L1, H, 3, S]
     PlainTensor<RT> past_key;           // f32[B, H, L0, S]
@@ -350,7 +475,9 @@ struct gptneox_attention_executor : public vnode_executor {
     PlainTensor<RT> present_key;    // f32[B, H, L0+L1, 64]
     PlainTensor<RT> present_value;  // f32[B, H, L0+L1, 64]
 
-    MHA_kernel_impl<RT> kernel;
+    MHA_kernel_impl<KType, RT> kernel;
+    RoPE_kernel_impl<KType, RT> rope_kernel;
+
     gptneox_attention_executor() {
         register_inputs(qkv_input,
                         past_key,
@@ -365,7 +492,6 @@ struct gptneox_attention_executor : public vnode_executor {
 
     bool m_kernel_initialized;
     PlainTensor<RT> m_query_emb;  // query with embed
-    llmdnn::emb_gpt m_kernel_emb;
 
     size_t B;
     size_t H;
@@ -409,146 +535,21 @@ struct gptneox_attention_executor : public vnode_executor {
 
         m_query_emb.resize({B, H, L1, S});
 
-        if (!m_kernel_initialized) {
-            if ((use_ref & 1) == 0) {
-                std::cout << "::::::::::::::;  " << __func__ << " llmdnn::emb_gpt " << std::endl;
-                if (!m_kernel_emb.create(llmdnn::emb_gpt::create_param{
-                        .num_heads = H,
-                        .head_size = S,
-                        .head_size_aligned = S,  // better to aligned to 64 bytes for best performance, apply for qkv
-                        .qkv_precision = llmdnn::data_type_t::dnnl_bf16,
-                        .dst_precision = llmdnn::data_type_t::dnnl_bf16,
-                        .rotary_dims = rotary_dims,
-                        .use_position2d = false,
-                    })) {
-                    IE_THROW() << __func__ << " llmdnn::emb_gpt::create failed " << std::endl;
-                }
-            }
-            m_kernel_initialized = true;
-        }
-
-        // exec_ref_rope(); exec_ref_mha(); return;
-
-        if (use_ref & 1) {
-            exec_ref_rope();
-        } else {
-            m_kernel_emb.exec(llmdnn::emb_gpt::exec_param{
-                .batch = B,
-                .query_seq_len = L1,
-                .past_seq_len = L0,
-                .q = reinterpret_cast<uint8_t*>(&qkv_input.at({0, 0, 0})),      // [B, L1,  H*3*S]
-                .k = reinterpret_cast<uint8_t*>(&qkv_input.at({0, 0, S})),      // [B, L1,  H*3*S]
-                .v = reinterpret_cast<uint8_t*>(&qkv_input.at({0, 0, 2 * S})),  // [B, L1,  H*3*S]
-                .ldq = 3 * S,
-                .ldk = 3 * S,
-                .ldv = 3 * S,
-                .query_dst = reinterpret_cast<uint8_t*>(m_query_emb.data()),  // rotary embbeding dst
-                .layer_past_key_src = past_key.get_batched_ptrs(),            // past key src
-                .layer_past_value_src = past_value.get_batched_ptrs(),        // past value src
-                .layer_past_key_dst =
-                    present_key.get_batched_ptrs(),  // past key dst, if layer_past_key_src!=layer_past_key_dst,
-                                                     // will copy layer_past_key_src to layer_past_key_dst
-                .layer_past_value_dst =
-                    present_value.get_batched_ptrs(),  // past value dst, if layer_past_value!=layer_past_value_dst,
-                                                       // will copy layer_past_value to layer_past_value_dst
-                .cos = rotary_emb_cos.data(),
-                .sin = rotary_emb_sin.data(),
-                .position2d_ids = nullptr,          // shape: [batch, 2, query_seq_len]
-                .head_stride_in_kv = (L0 + L1) * S  // kv stride for next head; kv may be preallocated a big buffer
-            });
-        }
+        rope_kernel(qkv_input,
+                    past_key,
+                    past_value,
+                    m_query_emb,
+                    present_key,
+                    present_value,
+                    rotary_emb_cos,
+                    rotary_emb_sin);
 
         DEBUG_LOG(" m_query_emb=", m_query_emb);
 
-        if (use_ref & 2) {
-            MHA_kernel_ref<RT> kernel2;
-            kernel2(m_query_emb, present_key, present_value, attention_mask, output_emb);
-        } else {
-            kernel(m_query_emb, present_key, present_value, attention_mask, output_emb);
-        }
-    }
-
-    void exec_ref_rope() {
-        DEBUG_LOG(" attention_mask=", attention_mask);
-        DEBUG_LOG(" qkv_input=", qkv_input);  // bfloat16[1,6,1536]
-        // DEBUG_LOG(" rotary_emb_cos=", rotary_emb_cos);  // float[1,1,2048,16]
-        // DEBUG_LOG(" rotary_emb_sin=", rotary_emb_sin);
-        //  rotary embedding on q/k of qkv_input, this is done in-place
-        //    position id is range: [L0, L0+L1)
-        //  concat (past_key, cur_key)
-        //  matmul W=Q*K'
-        //  apply causal_mask
-        //  apply attention mask
-        //  softmax
-        //  concat (past_value, cur_value)
-        //  matmul W*V
-        //
-        // calculate reference
-        auto half_rotary_dims = rotary_dims / 2;
-        // copy past kv into present
-        for (size_t b = 0; b < B; b++) {
-            for (size_t h = 0; h < H; h++) {
-                memcpy(&present_key.at({b, h, 0, 0}), &past_key.at({b, h, 0, 0}), sizeof(RT) * L0 * S);
-                memcpy(&present_value.at({b, h, 0, 0}), &past_value.at({b, h, 0, 0}), sizeof(RT) * L0 * S);
-            }
-        }
-
-        // rotary embedding for word vector at each position p
-        // meanwhile concat is performed
-        for (size_t b = 0; b < B; b++) {
-            for (size_t h = 0; h < H; h++) {
-                for (size_t p = L0; p < L0 + L1; p++) {
-                    auto* q = &qkv_input.at({b, p - L0, (h * 3 + 0) * S + 0});
-                    auto* k = &qkv_input.at({b, p - L0, (h * 3 + 1) * S + 0});
-                    auto* v = &qkv_input.at({b, p - L0, (h * 3 + 2) * S + 0});
-                    auto* present_k = &present_key.at({b, h, p, 0});    // f32[B, H, L0+L1, 64]
-                    auto* present_v = &present_value.at({b, h, p, 0});  // f32[B, H, L0+L1, 64]
-                    auto* q_embed = &m_query_emb.at({b, h, p - L0, 0});
-                    // q_embed = (q * cos) + (rotate_half(q) * sin)
-                    // k_embed = (k * cos) + (rotate_half(k) * sin)
-                    auto* cos = &rotary_emb_cos({0, 0, p, 0});
-                    auto* sin = &rotary_emb_sin({0, 0, p, 0});
-
-                    size_t s = 0;
-                    for (; s < half_rotary_dims; s++) {
-                        q_embed[s] = cos[s] * q[s] + sin[s] * (-q[s + half_rotary_dims]);
-                        present_k[s] = cos[s] * k[s] + sin[s] * (-k[s + half_rotary_dims]);
-                        present_v[s] = v[s];
-                    }
-                    for (; s < rotary_dims; s++) {
-                        q_embed[s] = cos[s] * q[s] + sin[s] * (q[s - half_rotary_dims]);
-                        present_k[s] = cos[s] * k[s] + sin[s] * (k[s - half_rotary_dims]);
-                        present_v[s] = v[s];
-                    }
-                    for (; s < S; s++) {
-                        q_embed[s] = q[s];
-                        present_k[s] = k[s];
-                        present_v[s] = v[s];
-                    }
-                }
-            }
-        }
+        kernel(m_query_emb, present_key, present_value, attention_mask, output_emb);
     }
 };
 
-inline std::shared_ptr<vnode_executor> vnode_executor_create(std::string impl_signature) {
-    std::shared_ptr<vnode_executor> ret;
-    if (impl_signature == "gpt2_attention_FP32") {
-        ret = std::make_shared<gpt2_attention_executor<float>>();
-    }
-    if (impl_signature == "gpt2_attention_BF16") {
-        ret = std::make_shared<gpt2_attention_executor<ov::bfloat16>>();
-    }
-    if (impl_signature == "gptneox_attention_FP32") {
-        ret = std::make_shared<gptneox_attention_executor<float>>();
-    }
-    if (impl_signature == "gptneox_attention_BF16") {
-        ret = std::make_shared<gptneox_attention_executor<ov::bfloat16>>();
-    }
-    if (ret)
-        ret->impl_signature = impl_signature;
-    return ret;
-}
-
+}  // namespace node
 }  // namespace intel_cpu
 }  // namespace ov

@@ -34,6 +34,52 @@ namespace ov {
 namespace intel_cpu {
 namespace node {
 
+using vnode_executor_map = std::map<std::string, std::function<std::shared_ptr<vnode_executor>()>>;
+
+template <typename executor>
+void register_executor(vnode_executor_map& vem, std::string signature) {
+    std::function<std::shared_ptr<vnode_executor>()> creator = []() {
+        return std::make_shared<executor>();
+    };
+    vem[signature] = creator;
+}
+
+vnode_executor_map register_all() {
+    vnode_executor_map vem;
+    register_executor<gpt2_attention_executor<KT_REF, float>>(vem, "gpt2_attention,REF,FP32");
+    register_executor<gpt2_attention_executor<KT_REF, ov::bfloat16>>(vem, "gpt2_attention,REF,FP32");
+    register_executor<gpt2_attention_executor<KT_MLAS, float>>(vem, "gpt2_attention,MLAS,FP32");
+    register_executor<gpt2_attention_executor<KT_LLMDNN, ov::bfloat16>>(vem, "gpt2_attention,LLMDNN,BF16");
+
+    register_executor<gptneox_attention_executor<KT_REF, float>>(vem, "gptneox_attention,REF,FP32");
+    register_executor<gptneox_attention_executor<KT_REF, ov::bfloat16>>(vem, "gptneox_attention,REF,FP32");
+    register_executor<gptneox_attention_executor<KT_MLAS, float>>(vem, "gptneox_attention,MLAS,FP32");
+    register_executor<gptneox_attention_executor<KT_LLMDNN, ov::bfloat16>>(vem, "gptneox_attention,LLMDNN,BF16");
+    return vem;
+}
+
+std::shared_ptr<vnode_executor> vnode_executor_create(std::string vtype, InferenceEngine::Precision prec) {
+    static vnode_executor_map registered_executors = register_all();
+    static int use_ref = std::getenv("USE_REF") ? atoi(std::getenv("USE_REF")) : 0;
+    std::string signature = vtype;
+    if (use_ref) {
+        signature += ",REF";
+    } else if (prec == InferenceEngine::Precision::FP32) {
+        signature += ",MLAS";
+    } else if (prec == InferenceEngine::Precision::BF16) {
+        signature += ",LLMDNN";
+    }
+    signature = signature + "," + prec.name();
+
+    auto it = registered_executors.find(signature);
+    if (it != registered_executors.end()) {
+        auto exec = it->second();
+        exec->signature = signature;
+        return exec;
+    }
+    return nullptr;
+}
+
 bool VNode::isSupportedOperation(const std::shared_ptr<const ngraph::Node>& op, std::string& errorMessage) noexcept {
     const auto vnode = std::dynamic_pointer_cast<const ov::intel_cpu::VNode>(op);
     if (!vnode) {
@@ -73,14 +119,13 @@ void VNode::initSupportedPrimitiveDescriptors() {
 
     // orginal precision at input port 0 as a hint of runtime precisions
     auto runtime_precision = getOriginalInputPrecisionAtPort(0);
-    auto impl_signature = m_vtype + "_" + runtime_precision.name();
 
-    m_executor = vnode_executor_create(impl_signature);
+    m_executor = vnode_executor_create(m_vtype, runtime_precision);
     if (!m_executor) {
-        IE_THROW() << errorPrefix << " unsupported vnode implementation " << impl_signature;
+        IE_THROW() << errorPrefix << " unsupported vnode " << m_vtype;
     }
 
-    std::cout << getName() << " created executor: " << m_executor->impl_signature << std::endl;
+    std::cout << getName() << " created executor: " << m_executor->signature << std::endl;
 
     std::vector<ov::intel_cpu::PortConfigurator> inPortConfigs;
     std::vector<ov::intel_cpu::PortConfigurator> outPortConfigs;
