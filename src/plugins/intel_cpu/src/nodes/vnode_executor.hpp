@@ -1,4 +1,3 @@
-
 // Copyright (C) 2018-2023 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
@@ -75,14 +74,12 @@ struct gpt2_attention_executor : public vnode_executor {
     PlainTensor<RT> present_key;    // f32[B, H, L0+L1, 64]
     PlainTensor<RT> present_value;  // f32[B, H, L0+L1, 64]
 
-    MHA_kernel<KType, RT> kernel;
+    GPT2_MHA_kernel<KType, RT> kernel;
 
     gpt2_attention_executor() {
         register_inputs(qkv_input, past_key, past_value, attention_mask);
         register_outputs(output_emb, present_key, present_value);
     }
-
-    PlainTensor<RT> query;
 
     void exec(Node* node, dnnl::stream strm) override {
         update_inputs(node);
@@ -109,28 +106,25 @@ struct gpt2_attention_executor : public vnode_executor {
 
         DEBUG_LOG(" B=", B, " H=", H, " S=", S, " L0=", L0, " L1=", L1);
 
-        query.resize({B, H, L1, S});
         // qkv_input.max_repr_len = 99999;
         DEBUG_LOG("qkv_input=", qkv_input.repr(256, 8));
 
-        // concat pask_key/value & k/v into present_key/value
+        // concat past_key/value & k/v into present_key/value
         for (size_t b = 0; b < B; b++) {
             for (size_t h = 0; h < H; h++) {
                 memcpy(&present_key.at({b, h, 0, 0}), &past_key.at({b, h, 0, 0}), sizeof(RT) * L0 * S);
                 memcpy(&present_value.at({b, h, 0, 0}), &past_value.at({b, h, 0, 0}), sizeof(RT) * L0 * S);
 
                 for (size_t p = 0; p < L1; p++) {
-                    auto* q = &qkv_input.at({b, p, h * S});
-                    auto* k = &qkv_input.at({b, p, (H + h) * S});
-                    auto* v = &qkv_input.at({b, p, (2 * H + h) * S});
-                    memcpy(&query.at({b, h, p, 0}), q, sizeof(RT) * S);
+                    // auto * q = &qkv_input.at({b, p, h*S});
+                    auto * k = &qkv_input.at({b, p, (H + h)*S});
+                    auto * v = &qkv_input.at({b, p, (2*H + h)*S});
                     memcpy(&present_key.at({b, h, L0 + p, 0}), k, sizeof(RT) * S);
                     memcpy(&present_value.at({b, h, L0 + p, 0}), v, sizeof(RT) * S);
                 }
+                kernel(qkv_input, present_key, present_value, attention_mask, output_emb, b, h);
             }
         }
-
-        kernel(query, present_key, present_value, attention_mask, output_emb);
     }
 };
 
@@ -223,7 +217,6 @@ struct gptneox_attention_executor : public vnode_executor {
         kernel(m_query_emb, present_key, present_value, attention_mask, output_emb);
     }
 };
-
 }  // namespace node
 }  // namespace intel_cpu
 }  // namespace ov

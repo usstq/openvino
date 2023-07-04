@@ -14,9 +14,11 @@
 #include <string>
 #include <vector>
 
+#ifdef OV_CPU_WITH_LLM
 #include "llm_emb_gpt.hpp"
 #include "llm_mha_gpt.hpp"
 #include "llm_mm.hpp"
+#endif
 #include "utils/plain_tensor.hpp"
 
 namespace ov {
@@ -92,6 +94,7 @@ struct RoPE_kernel {
     }
 };
 
+#ifdef OV_CPU_WITH_LLM
 // specialization on llmdnn
 template <>
 struct RoPE_kernel<KT_LLMDNN, ov::bfloat16> {
@@ -156,6 +159,7 @@ struct RoPE_kernel<KT_LLMDNN, ov::bfloat16> {
         });
     }
 };
+#endif
 
 // default implementation: reference
 template <KernelTypes KType, typename T>
@@ -247,6 +251,87 @@ struct MHA_kernel {
     }
 };
 
+template <KernelTypes KType, typename T>
+struct GPT2_MHA_kernel {
+    GPT2_MHA_kernel() = default;
+    template <typename D>
+    float dot_product(const D* a, const D* b, int len) {
+        float result = 0;
+        for (int i = 0; i < len; i++)
+            result += static_cast<float>(a[i]) * static_cast<float>(b[i]);
+        return result;
+    }
+
+    void softmax(float* a, int len) {
+        float max = *std::max_element(a, a + len);
+        float sum = 0.0f;
+        for (int i = 0; i < len; i++) {
+            a[i] = exp(a[i] - max);
+            sum += a[i];
+        }
+        float scale = 1.0f / sum;
+        for (int i = 0; i < len; i++) {
+            a[i] *= scale;
+        }
+    }
+
+    template <typename D>
+    void accumulate(float* acc, const D* v, int len, float weight = 1.0f) {
+        for (int i = 0; i < len; i++) {
+            acc[i] += static_cast<float>(v[i]) * weight;
+        }
+    }
+
+    // Q, K, V is ready, do attention
+    // qkv           [B, L1, 3*(H*S)]
+    // curKey   [B, H, L0+L1, S]
+    // curValue [B, H, L0+L1, S]
+    // attnMask [B, 1, 1, L0+L1]
+    // output_emb    [B, L1, H*S]
+    void operator()(PlainTensor<T>& qkv,
+                 PlainTensor<T>& curKey,
+                 PlainTensor<T>& curValue,
+                 PlainTensor<float>& attnMask,
+                 PlainTensor<T>& output,
+                 size_t batchIndex,
+                 size_t headIndex) {
+        const auto& qkvDims = qkv.get_dims();
+        const auto& curKeyDims = curKey.get_dims();
+        auto L1 = qkvDims[1];
+        auto S = curKeyDims[3];
+        auto L0 = curKeyDims[2] - L1;
+        // use dot-product to save memory cost
+        std::vector<float> attn_score(L0 + L1, 0.0f);
+        std::vector<float> word_vec(S, 0.0f);
+        float d_scale = 1.0f / sqrt(S);
+        // Q x K^T =[L1, d] * [L0 + L1, d]^T
+        
+        for (size_t m = 0; m < L1; m++) {
+            // dot-product to get attention scores
+            T* q = &qkv.at({batchIndex, m, 0}) + headIndex * S;
+            auto* mask = &attnMask.at({batchIndex, 0, 0, 0});
+            // causal_mask is applied by above tril-matrix
+            // apply attention mask
+            for (size_t n = 0; n <= L0 + m; n++) {
+                T* k = &curKey.at({batchIndex, headIndex, n, 0});
+                attn_score[n] = dot_product(q, k, S) * d_scale;
+                attn_score[n] += mask[n];
+            }
+            // sofmax
+            softmax(&attn_score[0], L0 + m + 1);
+
+            // linearly combine value
+            word_vec.assign(S, 0.0f);
+            for (size_t n = 0; n <= L0 + m; n++)
+                accumulate(word_vec.data(), &curValue.at({batchIndex, headIndex, n, 0}), S, attn_score[n]);
+
+            // output [B, L1, H*S]
+            std::copy(word_vec.begin(), word_vec.end(), &output.at({batchIndex, m, headIndex * S}));
+        }
+    }
+};
+
+#ifdef OV_CPU_WITH_LLM
 template <>
 struct MHA_kernel<KT_LLMDNN, ov::bfloat16> {
     llmdnn::mha_gpt m_kernel;
@@ -315,6 +400,7 @@ struct MHA_kernel<KT_LLMDNN, ov::bfloat16> {
         });
     }
 };
+#endif
 
 }  // namespace node
 }  // namespace intel_cpu

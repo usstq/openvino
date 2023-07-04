@@ -48,13 +48,16 @@ static vnode_executor_map register_all() {
     vnode_executor_map vem;
     register_executor<gpt2_attention_executor<KT_REF, float>>(vem, "gpt2_attention,REF,FP32");
     register_executor<gpt2_attention_executor<KT_REF, ov::bfloat16>>(vem, "gpt2_attention,REF,BF16");
-    register_executor<gpt2_attention_executor<KT_MLAS, float>>(vem, "gpt2_attention,MLAS,FP32");
-    register_executor<gpt2_attention_executor<KT_LLMDNN, ov::bfloat16>>(vem, "gpt2_attention,LLMDNN,BF16");
-
     register_executor<gptneox_attention_executor<KT_REF, float>>(vem, "gptneox_attention,REF,FP32");
     register_executor<gptneox_attention_executor<KT_REF, ov::bfloat16>>(vem, "gptneox_attention,REF,BF16");
+    #ifdef OV_CPU_WITH_MLAS
+    register_executor<gpt2_attention_executor<KT_MLAS, float>>(vem, "gpt2_attention,MLAS,FP32");
     register_executor<gptneox_attention_executor<KT_MLAS, float>>(vem, "gptneox_attention,MLAS,FP32");
+    #endif
+    #ifdef OV_CPU_WITH_LLM
+    register_executor<gpt2_attention_executor<KT_LLMDNN, ov::bfloat16>>(vem, "gpt2_attention,LLMDNN,BF16");
     register_executor<gptneox_attention_executor<KT_LLMDNN, ov::bfloat16>>(vem, "gptneox_attention,LLMDNN,BF16");
+    #endif
     return vem;
 }
 
