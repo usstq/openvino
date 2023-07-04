@@ -23,74 +23,13 @@ namespace ov {
 namespace intel_cpu {
 namespace node {
 
-template <typename TI, typename TO>
-void matmul(bool transA, bool transB, int M, int N, int K, TI* pA, int lda, TI* pB, int ldb, TO* pC, int ldc) {
-    size_t stride_a0 = transA ? 1 : lda;
-    size_t stride_b0 = transB ? 1 : ldb;
-    size_t stride_a1 = transA ? lda : 1;
-    size_t stride_b1 = transB ? ldb : 1;
-
-    for (int m = 0; m < M; m++) {
-        TO* Cm = pC + m * ldc;
-        TI* Am = pA + m * stride_a0;
-        for (int n = 0; n < N; n++) {
-            TI* Bn = pB + n * stride_b1;
-            float sum = 0;
-            for (int k = 0; k < K; k++) {
-                sum += Am[k * stride_a1] * Bn[k * stride_b0];
-            }
-            // if (bias) sum += bias[n];
-            // if (act) sum = act(sum);
-            Cm[n] = sum;
-        }
-    }
-}
-
-// vnode executor with inputs/outputs described in PlainTensor
-struct vnode_executor {
-    std::string signature;
-    std::vector<PlainTensorBase*> inputs;
-    std::vector<PlainTensorBase*> outputs;
-
-    vnode_executor() {}
-
-    void register_inputs() {}
-    template <typename T0, typename... Ts>
-    void register_inputs(PlainTensor<T0>& in0, PlainTensor<Ts>&... ins) {
-        inputs.push_back(&in0);
-        register_inputs(ins...);
-    }
-
-    void register_outputs() {}
-    template <typename T0, typename... Ts>
-    void register_outputs(PlainTensor<T0>& out0, PlainTensor<Ts>&... outs) {
-        outputs.push_back(&out0);
-        register_outputs(outs...);
-    }
-
-    void update_inputs(Node* node) {
-        int ii = 0;
-        for (auto& inp : inputs) {
-            inp->reset(node->getParentEdgeAt(ii++)->getMemoryPtr());
-        }
-    }
-
-    void update_outputs(Node* node) {
-        int oo = 0;
-        for (auto& outp : outputs) {
-            outp->reset(node->getChildEdgeAt(oo++)->getMemoryPtr());
-        }
-    }
-
-    virtual void exec(Node* node, dnnl::stream strm) = 0;
-};
-//============================ MHA kernels ============================
-
+//============================ kernels ============================
 enum KernelTypes { KT_REF, KT_LLMDNN, KT_MLAS };
 
+// default implementation: reference
 template <KernelTypes KType, typename T>
-struct RoPE_kernel_impl {
-    RoPE_kernel_impl() = default;
+struct RoPE_kernel {
+    RoPE_kernel() = default;
 
     void operator()(PlainTensor<T>& qkv_input,
                     PlainTensor<T>& past_key,
@@ -153,9 +92,10 @@ struct RoPE_kernel_impl {
     }
 };
 
+// specialization on llmdnn
 template <>
-struct RoPE_kernel_impl<KT_LLMDNN, ov::bfloat16> {
-    RoPE_kernel_impl() = default;
+struct RoPE_kernel<KT_LLMDNN, ov::bfloat16> {
+    RoPE_kernel() = default;
 
     llmdnn::emb_gpt m_kernel_emb;
     bool m_kernel_initialized = false;
@@ -217,22 +157,10 @@ struct RoPE_kernel_impl<KT_LLMDNN, ov::bfloat16> {
     }
 };
 
+// default implementation: reference
 template <KernelTypes KType, typename T>
-struct MHA_kernel_impl;
-
-template <>
-struct MHA_kernel_impl<KT_MLAS, float> {
-    MHA_kernel_impl() = default;
-    void operator()(PlainTensor<float>& query,
-                    PlainTensor<float>& present_key,
-                    PlainTensor<float>& present_value,
-                    PlainTensor<float>& attention_mask,
-                    PlainTensor<float>& attn_output) {}
-};
-
-template <typename T>
-struct MHA_kernel_impl<KT_REF, T> {
-    MHA_kernel_impl() = default;
+struct MHA_kernel {
+    MHA_kernel() = default;
 
     template <typename D>
     float dot_product(const D* a, const D* b, int len) {
@@ -320,10 +248,10 @@ struct MHA_kernel_impl<KT_REF, T> {
 };
 
 template <>
-struct MHA_kernel_impl<KT_LLMDNN, ov::bfloat16> {
+struct MHA_kernel<KT_LLMDNN, ov::bfloat16> {
     llmdnn::mha_gpt m_kernel;
     bool m_kernel_initialized = false;
-    MHA_kernel_impl() {}
+    MHA_kernel() {}
 
     void operator()(PlainTensor<ov::bfloat16>& query,
                     PlainTensor<ov::bfloat16>& present_key,
@@ -345,8 +273,8 @@ struct MHA_kernel_impl<KT_LLMDNN, ov::bfloat16> {
                     .head_size = head_size,
                     .head_size_aligned =
                         head_size,  // better to aligned to 64 bytes for best performance, apply for qkv
-                    .max_seq_len =
-                        max_position_embeddings,  // max seq length for computing the size of matmul tmp result
+                    .max_seq_len = static_cast<int>(
+                        max_position_embeddings),  // max seq length for computing the size of matmul tmp result
                     .normal_factor = 1.0f / sqrt(head_size),
                     .qkv_precision = llmdnn::data_type_t::dnnl_bf16,
                     .dst_precision = llmdnn::data_type_t::dnnl_bf16,
@@ -388,7 +316,46 @@ struct MHA_kernel_impl<KT_LLMDNN, ov::bfloat16> {
     }
 };
 
-//============================ MHA kernels ============================
+//============================ executors ============================
+// vnode executor with inputs/outputs described in PlainTensor
+struct vnode_executor {
+    std::string signature;
+    std::vector<PlainTensorBase*> inputs;
+    std::vector<PlainTensorBase*> outputs;
+
+    vnode_executor() {}
+
+    void register_inputs() {}
+    template <typename T0, typename... Ts>
+    void register_inputs(PlainTensor<T0>& in0, PlainTensor<Ts>&... ins) {
+        inputs.push_back(&in0);
+        register_inputs(ins...);
+    }
+
+    void register_outputs() {}
+    template <typename T0, typename... Ts>
+    void register_outputs(PlainTensor<T0>& out0, PlainTensor<Ts>&... outs) {
+        outputs.push_back(&out0);
+        register_outputs(outs...);
+    }
+
+    void update_inputs(Node* node) {
+        int ii = 0;
+        for (auto& inp : inputs) {
+            inp->reset(node->getParentEdgeAt(ii++)->getMemoryPtr());
+        }
+    }
+
+    void update_outputs(Node* node) {
+        int oo = 0;
+        for (auto& outp : outputs) {
+            outp->reset(node->getChildEdgeAt(oo++)->getMemoryPtr());
+        }
+    }
+
+    virtual void exec(Node* node, dnnl::stream strm) = 0;
+};
+
 // RT : runtime precision(type)
 template <KernelTypes KType, typename RT>
 struct gpt2_attention_executor : public vnode_executor {
@@ -401,7 +368,7 @@ struct gpt2_attention_executor : public vnode_executor {
     PlainTensor<RT> present_key;    // f32[B, H, L0+L1, 64]
     PlainTensor<RT> present_value;  // f32[B, H, L0+L1, 64]
 
-    MHA_kernel_impl<KType, RT> kernel;
+    MHA_kernel<KType, RT> kernel;
 
     gpt2_attention_executor() {
         register_inputs(qkv_input, past_key, past_value, attention_mask);
@@ -475,8 +442,8 @@ struct gptneox_attention_executor : public vnode_executor {
     PlainTensor<RT> present_key;    // f32[B, H, L0+L1, 64]
     PlainTensor<RT> present_value;  // f32[B, H, L0+L1, 64]
 
-    MHA_kernel_impl<KType, RT> kernel;
-    RoPE_kernel_impl<KType, RT> rope_kernel;
+    MHA_kernel<KType, RT> kernel;
+    RoPE_kernel<KType, RT> rope_kernel;
 
     gptneox_attention_executor() {
         register_inputs(qkv_input,

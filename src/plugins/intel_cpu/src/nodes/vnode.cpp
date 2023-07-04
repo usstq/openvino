@@ -44,21 +44,21 @@ void register_executor(vnode_executor_map& vem, std::string signature) {
     vem[signature] = creator;
 }
 
-vnode_executor_map register_all() {
+static vnode_executor_map register_all() {
     vnode_executor_map vem;
     register_executor<gpt2_attention_executor<KT_REF, float>>(vem, "gpt2_attention,REF,FP32");
-    register_executor<gpt2_attention_executor<KT_REF, ov::bfloat16>>(vem, "gpt2_attention,REF,FP32");
+    register_executor<gpt2_attention_executor<KT_REF, ov::bfloat16>>(vem, "gpt2_attention,REF,BF16");
     register_executor<gpt2_attention_executor<KT_MLAS, float>>(vem, "gpt2_attention,MLAS,FP32");
     register_executor<gpt2_attention_executor<KT_LLMDNN, ov::bfloat16>>(vem, "gpt2_attention,LLMDNN,BF16");
 
     register_executor<gptneox_attention_executor<KT_REF, float>>(vem, "gptneox_attention,REF,FP32");
-    register_executor<gptneox_attention_executor<KT_REF, ov::bfloat16>>(vem, "gptneox_attention,REF,FP32");
+    register_executor<gptneox_attention_executor<KT_REF, ov::bfloat16>>(vem, "gptneox_attention,REF,BF16");
     register_executor<gptneox_attention_executor<KT_MLAS, float>>(vem, "gptneox_attention,MLAS,FP32");
     register_executor<gptneox_attention_executor<KT_LLMDNN, ov::bfloat16>>(vem, "gptneox_attention,LLMDNN,BF16");
     return vem;
 }
 
-std::shared_ptr<vnode_executor> vnode_executor_create(std::string vtype, InferenceEngine::Precision prec) {
+static std::shared_ptr<vnode_executor> vnode_executor_create(std::string vtype, InferenceEngine::Precision prec) {
     static vnode_executor_map registered_executors = register_all();
     static int use_ref = std::getenv("USE_REF") ? atoi(std::getenv("USE_REF")) : 0;
     std::string signature = vtype;

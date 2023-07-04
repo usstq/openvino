@@ -49,22 +49,22 @@ inline void assert_dt<int32_t>(dnnl::memory::data_type dt) {
 
 template <typename T>
 struct data_type_name {
-    static constexpr char* value = "?";
+    static constexpr const char* value = "?";
 };
 
 template <>
 struct data_type_name<float> {
-    static constexpr char* value = "float";
+    static constexpr const char* value = "float";
 };
 
 template <>
 struct data_type_name<bfloat16> {
-    static constexpr char* value = "bfloat16";
+    static constexpr const char* value = "bfloat16";
 };
 
 template <>
 struct data_type_name<uint8_t> {
-    static constexpr char* value = "uint8_t";
+    static constexpr const char* value = "uint8_t";
 };
 
 template <typename T>
@@ -208,7 +208,7 @@ struct PlainTensor : public PlainTensorBase {
         auto sz = shape_size(m_dims);
         auto last_dim_size = m_dims[rank - 1];
         int row_id = 0;
-        int cur_row_lines_left;
+        int cur_row_lines_left = lines_per_row;
         size_t i;
         auto* p = reinterpret_cast<DT*>(m_ptr.get());
         for (i = 0; i < sz && max_total_lines > 0; i++) {
