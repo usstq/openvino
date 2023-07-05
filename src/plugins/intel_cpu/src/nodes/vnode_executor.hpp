@@ -204,7 +204,14 @@ struct gptneox_attention_executor : public vnode_executor {
 
         m_query_emb.resize({B, H, L1, S});
 
-        rope_kernel(qkv_input,
+        // PlainTensor<RT> qkv_input;          // f32[B, L1, H*3*S] => [B, L1, H, 3, S]
+        auto qkv_5d = qkv_input.reshape({B, L1, H, 3, S});
+        auto q_input = qkv_5d.index({{}, {}, {}, {0}, {}});
+        auto k_input = qkv_5d.index({{}, {}, {}, {1}, {}});
+        auto v_input = qkv_5d.index({{}, {}, {}, {2}, {}});
+        rope_kernel(q_input,
+                    k_input,
+                    v_input,
                     past_key,
                     past_value,
                     m_query_emb,
@@ -219,20 +226,19 @@ struct gptneox_attention_executor : public vnode_executor {
     }
 };
 
-#if 0
 template <KernelTypes KType, typename RT>
 struct open_llama_attention_executor : public vnode_executor {
-    PlainTensor<RT> q_proj;          //  "f32[B,L1,H*S]"
-    PlainTensor<RT> k_proj;          //  "f32[B,L1,H*S]"
-    PlainTensor<RT> v_proj;          //  "f32[B,L1,H*S]"
+    PlainTensor<RT> q_proj;  //  "f32[B,L1,H*S]"
+    PlainTensor<RT> k_proj;  //  "f32[B,L1,H*S]"
+    PlainTensor<RT> v_proj;  //  "f32[B,L1,H*S]"
     PlainTensor<int32_t> self_attn_Shape;
-    PlainTensor<RT> past_key;           // f32[B, 32, L0, 100]
+    PlainTensor<RT> past_key;           // f32[B, H, L0, S]
     PlainTensor<RT> past_value;         // f32[B, H, L0, S]
-    PlainTensor<RT> past_0_key;         // f32[B, H, L0, S]
-    PlainTensor<float> attention_mask;  // f32[B, 1, 1, L0 + L1]
+    PlainTensor<float> attention_causal_mask;  // f32[B, 1, L1, L0+L1]
     PlainTensor<float> rotary_emb_cos;  // f32[1,1,2048,100]
     PlainTensor<float> rotary_emb_sin;  // f32[1,1,2048,100]
-    PlainTensor<int32_t> input_ids;     // i32[B, L1]
+    PlainTensor<int32_t> input_ids_shape;    // i32[2]
+    PlainTensor<int32_t> past_key_0_shape;       // i32[4]
 
     PlainTensor<RT> output_emb;     // f32[B, L1, 512]
     PlainTensor<RT> present_key;    // f32[B, H, L0+L1, 64]
@@ -242,14 +248,17 @@ struct open_llama_attention_executor : public vnode_executor {
     RoPE_kernel<KType, RT> rope_kernel;
 
     open_llama_attention_executor() {
-        register_inputs(q_proj, k_proj, v_proj, self_attn_Shape,
+        register_inputs(q_proj,
+                        k_proj,
+                        v_proj,
+                        self_attn_Shape,
                         past_key,
                         past_value,
-                        past_0_key, input_ids,
-                        attention_mask,
+                        attention_causal_mask,
                         rotary_emb_cos,
                         rotary_emb_sin,
-                        input_ids);
+                        input_ids_shape,
+                        past_key_0_shape);
         register_outputs(output_emb, present_key, present_value);
     }
 
@@ -258,15 +267,13 @@ struct open_llama_attention_executor : public vnode_executor {
     void exec(Node* node, dnnl::stream strm) override {
         update_inputs(node);
 
-        auto& dims_past = past_key.get_dims();
-        auto& dims_cur = qkv_input.get_dims();
-        auto B = q_proj.get_dims()[0];
-        auto H = q_proj.get_dims()[1];   // 8
+        auto B = q_proj.size(0);
+        auto L1 = q_proj.size(1);
+        auto H = past_key.size(1);
         auto L0 = past_key.size(2);  // number of tokens to be encoded
         auto S = past_key.size(3);   // 64
-        auto L1 = dims_cur[1];
-        auto max_position_embeddings = rotary_emb_cos.get_dims()[2];
-        auto rotary_dims = rotary_emb_cos.get_dims()[3];
+        auto max_position_embeddings = rotary_emb_cos.size(2);
+        auto rotary_dims = rotary_emb_cos.size(3);
 
         std::vector<VectorDims> outputShapes;
         outputShapes.push_back(VectorDims{B, L1, H * S});
@@ -276,22 +283,31 @@ struct open_llama_attention_executor : public vnode_executor {
 
         update_outputs(node);
 
+        input_ids_shape.assert_dims({2});
+        past_key_0_shape.assert_dims({4});
+
         q_proj.assert_dims({B, L1, H * S});
         k_proj.assert_dims({B, L1, H * S});
         v_proj.assert_dims({B, L1, H * S});
-        attention_mask.assert_dims({B, 1, 1, L0 + L1});
+        attention_causal_mask.assert_dims({B, 1, L1, L0 + L1});
         past_key.assert_dims({B, H, L0, S});
         past_value.assert_dims({B, H, L0, S});
-
-        qkv_input.assert_dims({B, L1, H * 3 * S});
         rotary_emb_cos.assert_dims({1, 1, max_position_embeddings, rotary_dims});
         rotary_emb_sin.assert_dims({1, 1, max_position_embeddings, rotary_dims});
 
         DEBUG_LOG(" B=", B, " H=", H, " S=", S, " L0=", L0, " L1=", L1);
 
+        //std::cout << "attention_causal_mask=" << attention_causal_mask.repr(256) << std::endl;
+        //asm("int3");
+
         m_query_emb.resize({B, H, L1, S});
 
-        rope_kernel(qkv_input,
+        auto q_4d = q_proj.reshape({B, L1, H, S});
+        auto k_4d = k_proj.reshape({B, L1, H, S});
+        auto v_4d = v_proj.reshape({B, L1, H, S});
+        rope_kernel(q_4d,
+                    k_4d,
+                    v_4d,
                     past_key,
                     past_value,
                     m_query_emb,
@@ -302,10 +318,9 @@ struct open_llama_attention_executor : public vnode_executor {
 
         DEBUG_LOG(" m_query_emb=", m_query_emb);
 
-        kernel(m_query_emb, present_key, present_value, attention_mask, output_emb);
+        kernel(m_query_emb, present_key, present_value, attention_causal_mask, output_emb);
     }
 };
-#endif
 
 }  // namespace node
 }  // namespace intel_cpu

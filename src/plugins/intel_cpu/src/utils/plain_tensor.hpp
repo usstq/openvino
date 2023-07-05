@@ -320,16 +320,20 @@ struct PlainTensor : public PlainTensorBase {
     }
 
     void assert_dims(const std::initializer_list<size_t>& expect_dims) {
-        IE_ASSERT(m_rank == expect_dims.size());
+        if (m_rank != expect_dims.size()) {
+            asm("int3");
+            IE_ASSERT(false);
+        }
         if (!std::equal(expect_dims.begin(), expect_dims.end(), m_dims)) {
             std::stringstream ss;
-            ss << "m_dims=[";
-            for (size_t i = 0; i <= m_rank; i++)
+            ss << " m_dims=[";
+            for (size_t i = 0; i < m_rank; i++)
                 ss << m_dims[i] << ",";
             ss << "] expect_dims=[";
             for (auto& i : expect_dims)
                 ss << i << ",";
             ss << "]";
+            asm("int3");
             IE_ASSERT(false) << ss.str();
         }
     }
@@ -371,6 +375,8 @@ struct PlainTensor : public PlainTensorBase {
         auto last_dim_size = m_dims[m_rank - 1];
         int row_id = 0;
         int cur_row_lines_left = lines_per_row;
+        int cur_line_elecnt = 0;
+        int cur_row_elecnt = 0;
         size_t i;
         auto* p = reinterpret_cast<DT*>(m_ptr.get());
         for (i = 0; i < sz && max_total_lines > 0; i++) {
@@ -383,13 +389,21 @@ struct PlainTensor : public PlainTensorBase {
             // display current element if we still have buget
             if (cur_row_lines_left > 0) {
                 ss << p[i] << ",";
-                if ((i % 16) == 15) {
+                cur_line_elecnt++;
+                cur_row_elecnt++;
+                if ((cur_line_elecnt % 16) == 15 || (cur_row_elecnt == last_dim_size)) {
                     max_total_lines--;
                     cur_row_lines_left--;
-                    if (cur_row_lines_left == 0)
-                        ss << "...\n";
-                    else
+                    if (cur_row_lines_left == 0) {
+                        if (cur_row_elecnt == last_dim_size)
+                            ss << ",\n";
+                        else
+                            ss << "...\n";
+                        cur_row_elecnt = 0;
+                    } else {
                         ss << "\n\t\t";
+                    }
+                    cur_line_elecnt = 0;
                 }
             }
         }

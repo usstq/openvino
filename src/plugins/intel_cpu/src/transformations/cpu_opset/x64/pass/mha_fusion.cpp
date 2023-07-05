@@ -615,6 +615,12 @@ public:
     template <typename F>
     VNodeIn(const char* vtype, F func, std::function<bool(OutputVector&)> pred = {}) {
         MATCHER_SCOPE(VNodeIn);
+        std::string vnode_whitelist = std::getenv("VNODE_WLIST") ? std::getenv("VNODE_WLIST") : "";
+
+        if (vnode_whitelist.find(std::string(vtype) + ",") == std::string::npos) {
+            return;
+        }
+
         OutputVector fake_inputs;
         for (int i = 0; i < 32; i++) {
             fake_inputs.push_back(GenInput());
