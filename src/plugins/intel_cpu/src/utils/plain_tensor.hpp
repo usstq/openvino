@@ -226,7 +226,7 @@ struct PlainTensor : public PlainTensorBase {
         return sub_tensor;
     }
 
-    bool is_dense() {
+    bool is_dense() const {
         // check if it's dense tensor
         size_t stride = 1;
         for (int i = m_rank - 1; i >= 0; i--) {

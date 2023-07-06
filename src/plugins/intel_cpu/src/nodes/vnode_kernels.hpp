@@ -322,11 +322,9 @@ struct GPT2_MHA_kernel {
                  float* dst,
                  size_t batchIndex,
                  size_t headIndex) {
-        const auto& qkvDims = qkv.get_dims();
-        const auto& curKeyDims = curKey.get_dims();
-        auto L1 = qkvDims[1];
-        auto S = curKeyDims[3];
-        auto L0 = curKeyDims[2] - L1;
+        auto L1 = qkv.size(1);
+        auto S = curKey.size(3);
+        auto L0 = curKey.size(2) - L1;
         // use dot-product to save memory cost
         float* attn_score = qk;
         std::fill(attn_score, attn_score + L0 + L1, 0.0f);
@@ -404,12 +402,10 @@ struct GPT2_MHA_kernel<KT_MLAS, float> {
                  float* dst,
                  size_t batchIndex,
                  size_t headIndex) {
-        const auto& qkvDims = qkv.get_dims();
-        const auto& curKeyDims = curKey.get_dims();
-        auto L1 = qkvDims[1];
-        auto S = curKeyDims[3];
-        auto L0 = curKeyDims[2] - L1;
-        auto qkvSize = qkvDims[2];
+        auto L1 = qkv.size(1);
+        auto S = curKey.size(3);
+        auto L0 = curKey.size(2) - L1;
+        auto qkvSize = qkv.size(2);
         // use dot-product to save memory cost
         std::vector<float> word_vec(S, 0.0f);
         float d_scale = 1.0f / sqrt(S);

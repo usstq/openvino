@@ -86,20 +86,12 @@ struct gpt2_attention_executor : public vnode_executor {
     void exec(Node* node, dnnl::stream strm) override {
         update_inputs(node);
 
-        auto& dims_past = past_key.get_dims();
-        auto& dims_qkv = qkv_input.get_dims();
-        auto B = dims_past[0];
-        auto H = dims_past[1];   // 12
-        auto L0 = dims_past[2];  // number of tokens have been encoded
-        auto S = dims_past[3];   // 64
-        auto L1 = dims_qkv[1];
-        size_t num_threads = parallel_get_num_threads();
         auto B = past_key.size(0);
         auto H = past_key.size(1);   // 12
         auto L0 = past_key.size(2);  // number of tokens have been encoded
         auto S = past_key.size(3);   // 64
         auto L1 = qkv_input.size(1);
-
+        size_t num_threads = parallel_get_num_threads();
         qkv_input.assert_dims({B, L1, 3 * (H * S)});
         past_key.assert_dims({B, H, L0, S});
         past_value.assert_dims({B, H, L0, S});
@@ -123,15 +115,6 @@ struct gpt2_attention_executor : public vnode_executor {
             int64_t threadID = parallel_get_thread_num();
             memcpy(&present_key.at({b, h, 0, 0}), &past_key.at({b, h, 0, 0}), sizeof(RT) * L0 * S);
             memcpy(&present_value.at({b, h, 0, 0}), &past_value.at({b, h, 0, 0}), sizeof(RT) * L0 * S);
-        // auto query = qkv_input.slice(2, 0, H * S).reshape({B, L1, H, S}).permute({0, 2, 1, 3});
-        // auto query = qkv_input.reshape({B, L1, 3, H, S}).index({{}, {}, {0}, {}, {}}).permute({0, 2, 1, 3});
-        // std::cout << "query=" << query << std::endl; asm("int3");
-        // concat pask_key/value & k/v into present_key/value
-        query.resize({B, H, L1, S});
-        for (size_t b = 0; b < B; b++) {
-            for (size_t h = 0; h < H; h++) {
-                memcpy(&present_key.at({b, h, 0, 0}), &past_key.at({b, h, 0, 0}), sizeof(RT) * L0 * S);
-                memcpy(&present_value.at({b, h, 0, 0}), &past_value.at({b, h, 0, 0}), sizeof(RT) * L0 * S);
 
             for (size_t p = 0; p < L1; p++) {
                 // auto * q = &qkv_input.at({b, p, h*S});
@@ -150,29 +133,6 @@ struct gpt2_attention_executor : public vnode_executor {
                     b,
                     h);
         });
-        // for (size_t b = 0; b < B; b++) {
-        //     for (size_t h = 0; h < H; h++) {
-        //         memcpy(&present_key.at({b, h, 0, 0}), &past_key.at({b, h, 0, 0}), sizeof(RT) * L0 * S);
-        //         memcpy(&present_value.at({b, h, 0, 0}), &past_value.at({b, h, 0, 0}), sizeof(RT) * L0 * S);
-
-        //         for (size_t p = 0; p < L1; p++) {
-        //             // auto * q = &qkv_input.at({b, p, h*S});
-        //             auto* k = &qkv_input.at({b, p, (H + h) * S});
-        //             auto* v = &qkv_input.at({b, p, (2 * H + h) * S});
-        //             memcpy(&present_key.at({b, h, L0 + p, 0}), k, sizeof(RT) * S);
-        //             memcpy(&present_value.at({b, h, L0 + p, 0}), v, sizeof(RT) * S);
-        //         }
-        //         kernel(qkv_input,
-        //                present_key,
-        //                present_value,
-        //                attention_mask,
-        //                output_emb,
-        //                &qk_buffer.at({0, 0, 0}),
-        //                &dst_buffer.at({0, 0, 0}),
-        //                b,
-        //                h);
-        //     }
-        // }
     }
 };
 
@@ -459,7 +419,6 @@ struct bloom_attention_executor : public vnode_executor {
         kernel(query, present_key2, present_value2, attention_mask, output_emb);
     }
 };
-
 }  // namespace node
 }  // namespace intel_cpu
 }  // namespace ov
