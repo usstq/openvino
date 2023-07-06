@@ -14,6 +14,7 @@
 #include <string>
 #include <vector>
 #include "vnode_utils.hpp"
+#include "openvino/core/parallel.hpp"
 
 #ifdef OV_CPU_WITH_LLM
 #include "llm_emb_gpt.hpp"
@@ -276,115 +277,79 @@ struct MHA_kernel {
     }
 };
 
-template <KernelTypes KType, typename T>
-struct GPT2_MHA_kernel {
-    GPT2_MHA_kernel() = default;
-    template <typename D>
-    float dot_product(const D* a, const D* b, int len) {
-        float result = 0;
-        for (int i = 0; i < len; i++)
-            result += static_cast<float>(a[i]) * static_cast<float>(b[i]);
-        return result;
-    }
+template <>
+struct MHA_kernel<KT_MLAS, float> {
+    MHA_kernel() = default;
+    PlainTensor<float>* p_alibi = nullptr;
 
-    void softmax(float* a, int len) {
-        float max = *std::max_element(a, a + len);
-        float sum = 0.0f;
-        for (int i = 0; i < len; i++) {
-            a[i] = exp(a[i] - max);
-            sum += a[i];
-        }
-        float scale = 1.0f / sum;
-        for (int i = 0; i < len; i++) {
-            a[i] *= scale;
-        }
-    }
-
-    template <typename D>
-    void accumulate(float* acc, const D* v, int len, float weight = 1.0f) {
-        for (int i = 0; i < len; i++) {
-            acc[i] += static_cast<float>(v[i]) * weight;
-        }
+    void set_alibi(PlainTensor<float>& alibi) {
+        p_alibi = &alibi;
     }
 
     // Q, K, V is ready, do attention
-    // qkv           [B, L1, 3*(H*S)]
-    // curKey   [B, H, L0+L1, S]
-    // curValue [B, H, L0+L1, S]
-    // attnMask [B, 1, 1, L0+L1]
+    // query         [B, H, L1, S]
+    // present_key   [B, H, L0+L1, S]  stride of last dim maybe > 1
+    // present_value [B, H, L0+L1, S]
+    // attention_mask [B, 1, L1, L0 + L1]
+    // alibi
     // output_emb    [B, L1, H*S]
-    void operator()(PlainTensor<T>& qkv,
-                 PlainTensor<T>& curKey,
-                 PlainTensor<T>& curValue,
-                 PlainTensor<float>& attnMask,
-                 PlainTensor<T>& output,
-                 float* qk,
-                 float* dst,
-                 size_t batchIndex,
-                 size_t headIndex) {
-        auto L1 = qkv.size(1);
-        auto S = curKey.size(3);
-        auto L0 = curKey.size(2) - L1;
-        // use dot-product to save memory cost
-        float* attn_score = qk;
-        std::fill(attn_score, attn_score + L0 + L1, 0.0f);
-        float* word_vec = dst;
-        std::fill(word_vec, word_vec + S, 0.0f);
-        float d_scale = 1.0f / sqrt(S);
-        // Q x K^T =[L1, d] * [L0 + L1, d]^T
-        for (size_t m = 0; m < L1; m++) {
-            // dot-product to get attention scores
-            T* q = &qkv.at({batchIndex, m, 0}) + headIndex * S;
-            auto* mask = &attnMask.at({batchIndex, 0, 0, 0});
-            // causal_mask is applied by above tril-matrix
-            // apply attention mask
-            for (size_t n = 0; n <= L0 + m; n++) {
-                T* k = &curKey.at({batchIndex, headIndex, n, 0});
-                attn_score[n] = dot_product(q, k, S) * d_scale;
-                attn_score[n] += mask[n];
-            }
-            // sofmax
-            softmax(&attn_score[0], L0 + m + 1);
-
-            // linearly combine value
-            std::fill(word_vec, word_vec + S, 0.0f);
-            for (size_t n = 0; n <= L0 + m; n++)
-                accumulate(word_vec, &curValue.at({batchIndex, headIndex, n, 0}), S, attn_score[n]);
-
-            // output [B, L1, H*S]
-            std::copy(word_vec, word_vec + S, &output.at({batchIndex, m, headIndex * S}));
+    void operator()(PlainTensor<float>& query,
+                    PlainTensor<float>& present_key,
+                    PlainTensor<float>& present_value,
+                    PlainTensor<float>& attention_mask,
+                    PlainTensor<float>& output_emb) {
+        auto B = query.size(0);
+        auto H = query.size(1);
+        auto q_len = query.size(2);
+        auto head_size = query.size(3);
+        auto kv_len = present_key.size(2);
+        auto update_len = kv_len - q_len;
+        float d_scale = 1.0f / sqrt(head_size);
+        // initialize temp buffer for qk matmul and  qkv matmul
+        size_t num_threads = parallel_get_num_threads();
+        if (p_qk_buffer == nullptr) {
+            p_qk_buffer.reset(new PlainTensor<float>());
         }
+        p_qk_buffer->resize({num_threads, q_len, kv_len});
+        if (p_dst_buffer == nullptr) {
+            p_dst_buffer.reset(new PlainTensor<float>());
+        }
+        p_dst_buffer->resize({num_threads, q_len, head_size});
+        parallel_for2d(B, H, [&](size_t b, size_t h) {
+            size_t thread_id = static_cast<size_t>(parallel_get_thread_num());
+            const float* q_ptr = &query.at({b, h, 0, 0});
+            const float* k_ptr = &present_key.at({b, h, 0, 0});
+            const float* v_ptr = &present_value.at({b, h, 0, 0});
+            float* qk = &(p_qk_buffer->at({thread_id, 0, 0}));
+            float* dst = &(p_dst_buffer->at({thread_id, 0, 0}));
+            ov_sgemm("N", "T", q_len, kv_len, head_size, 1.0f, q_ptr, head_size, k_ptr, head_size, 0.f, qk, kv_len, 1);
+            auto* mask = &attention_mask.at({b, 0, 0, 0});
+            for (size_t m = 0; m < q_len; m++) {
+                size_t offset = m * kv_len;
+                // apply attention mask
+                // sofmax
+                InferenceEngine::Extensions::Cpu::XARCH::scale_add_softmax(&qk[offset],
+                                                                           d_scale,
+                                                                           mask,
+                                                                           update_len + m + 1,
+                                                                           kv_len);
+            }
+            ov_sgemm("N", "N", q_len, head_size, kv_len, 1.0f, qk, kv_len, v_ptr, head_size, 0.f, dst, head_size, 1);
+            // output [B, L1, H*S]
+            for (size_t m = 0; m < q_len; m++) {
+                const float* src = dst + m * head_size;
+                std::copy(src, src + head_size, &output_emb.at({b, m, h * head_size}));
+            }
+        });
     }
+    // buffer to hold qk temp
+    std::unique_ptr<PlainTensor<float>> p_qk_buffer = nullptr;
+    // buffer to hold qkv output
+    std::unique_ptr<PlainTensor<float>> p_dst_buffer = nullptr;
 };
 
-template <>
-struct GPT2_MHA_kernel<KT_MLAS, float> {
-    GPT2_MHA_kernel() = default;
-    void scale_add_softmax(float* a, float scale, float* mask, size_t len, size_t total_size) {
-        float max = std::numeric_limits<float>::lowest();
-        // scale_add_reduce_max
-        for (size_t i = 0; i < len; i++) {
-            a[i] *= scale;
-            a[i] += mask[i];
-            max = a[i] > max ? a[i] : max;
-        }
-        float sum = 0.0f;
-        // exp sum
-        for (size_t i = 0; i < len; i++) {
-            a[i] = exp(a[i] - max);
-            sum += a[i];
-        }
-        // divide sum
-        float dividend = 1.0f / sum;
-        for (size_t i = 0; i < len; i++) {
-            a[i] *= dividend;
-        }
-        // causual mask with zeros
-        for (size_t i = len; i < total_size; i++) {
-            a[i] = 0.0f;
-        }
-    }
-
+struct MHA_FP32_kernel {
+    MHA_FP32_kernel() = default;
     // Q, K, V is ready, do attention
     // qkv           [B, L1, 3*(H*S)]
     // curKey   [B, H, L0+L1, S]

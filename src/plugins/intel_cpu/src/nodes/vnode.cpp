@@ -46,27 +46,28 @@ void register_executor(vnode_executor_map& vem, std::string signature) {
 
 static vnode_executor_map register_all() {
     vnode_executor_map vem;
+    // gpt2
     register_executor<gpt2_attention_executor<KT_REF, float>>(vem, "gpt2_attention,REF,FP32");
     register_executor<gpt2_attention_executor<KT_REF, ov::bfloat16>>(vem, "gpt2_attention,REF,BF16");
+    // gptneox
     register_executor<gptneox_attention_executor<KT_REF, float>>(vem, "gptneox_attention,REF,FP32");
     register_executor<gptneox_attention_executor<KT_REF, ov::bfloat16>>(vem, "gptneox_attention,REF,BF16");
+    // open_llama
+    register_executor<open_llama_attention_executor<KT_REF, float>>(vem, "open_llama_attention,REF,FP32");
+    register_executor<open_llama_attention_executor<KT_REF, ov::bfloat16>>(vem, "open_llama_attention,REF,BF16");
+    // bloom
+    register_executor<bloom_attention_executor<KT_REF, float>>(vem, "bloom_attention,REF,FP32");
+    register_executor<bloom_attention_executor<KT_REF, ov::bfloat16>>(vem, "bloom_attention,REF,BF16");
     #ifdef OV_CPU_WITH_MLAS
     register_executor<gpt2_attention_executor<KT_MLAS, float>>(vem, "gpt2_attention,MLAS,FP32");
     register_executor<gptneox_attention_executor<KT_MLAS, float>>(vem, "gptneox_attention,MLAS,FP32");
+    register_executor<open_llama_attention_executor<KT_MLAS, float>>(vem, "open_llama_attention,MLAS,FP32");
     #endif
     #ifdef OV_CPU_WITH_LLM
     register_executor<gpt2_attention_executor<KT_LLMDNN, ov::bfloat16>>(vem, "gpt2_attention,LLMDNN,BF16");
     register_executor<gptneox_attention_executor<KT_LLMDNN, ov::bfloat16>>(vem, "gptneox_attention,LLMDNN,BF16");
-    #endif
-
-    register_executor<open_llama_attention_executor<KT_REF, float>>(vem, "open_llama_attention,REF,FP32");
-    register_executor<open_llama_attention_executor<KT_REF, ov::bfloat16>>(vem, "open_llama_attention,REF,BF16");
-    register_executor<open_llama_attention_executor<KT_MLAS, float>>(vem, "open_llama_attention,MLAS,FP32");
     register_executor<open_llama_attention_executor<KT_LLMDNN, ov::bfloat16>>(vem, "open_llama_attention,LLMDNN,BF16");
-
-    register_executor<bloom_attention_executor<KT_REF, float>>(vem, "bloom_attention,REF,FP32");
-    register_executor<bloom_attention_executor<KT_REF, ov::bfloat16>>(vem, "bloom_attention,REF,BF16");
-
+    #endif
     return vem;
 }
 

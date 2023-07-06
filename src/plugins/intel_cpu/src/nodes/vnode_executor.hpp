@@ -73,15 +73,15 @@ struct gpt2_attention_executor : public vnode_executor {
     PlainTensor<RT> output_emb;     // f32[B, L1, 512]
     PlainTensor<RT> present_key;    // f32[B, H, L0+L1, 64]
     PlainTensor<RT> present_value;  // f32[B, H, L0+L1, 64]
-    PlainTensor<float> qk_buffer;   // [threads, L1, L0+L1]
-    PlainTensor<float> dst_buffer;  // [threads, L1, S]
 
-    GPT2_MHA_kernel<KType, RT> kernel;
+    MHA_kernel<KType, RT> kernel;
 
     gpt2_attention_executor() {
         register_inputs(qkv_input, past_key, past_value, attention_mask);
         register_outputs(output_emb, present_key, present_value);
     }
+
+    PlainTensor<RT> query;
 
     void exec(Node* node, dnnl::stream strm) override {
         update_inputs(node);
@@ -91,13 +91,12 @@ struct gpt2_attention_executor : public vnode_executor {
         auto L0 = past_key.size(2);  // number of tokens have been encoded
         auto S = past_key.size(3);   // 64
         auto L1 = qkv_input.size(1);
-        size_t num_threads = parallel_get_num_threads();
+
         qkv_input.assert_dims({B, L1, 3 * (H * S)});
         past_key.assert_dims({B, H, L0, S});
         past_value.assert_dims({B, H, L0, S});
         attention_mask.assert_dims({B, 1, 1, L0 + L1});
-        qk_buffer.resize({num_threads, L1, L0 + L1});
-        dst_buffer.resize({num_threads, L1, S});
+
         std::vector<VectorDims> outputShapes{VectorDims{B, L1, H * S},
                                              VectorDims{B, H, L0 + L1, S},
                                              VectorDims{B, H, L0 + L1, S}};
@@ -107,34 +106,101 @@ struct gpt2_attention_executor : public vnode_executor {
 
         DEBUG_LOG(" B=", B, " H=", H, " S=", S, " L0=", L0, " L1=", L1);
 
-        // qkv_input.max_repr_len = 99999;
-        DEBUG_LOG("qkv_input=", qkv_input.repr(256, 8));
-
-        // concat past_key/value & k/v into present_key/value
+        // auto query = qkv_input.slice(2, 0, H * S).reshape({B, L1, H, S}).permute({0, 2, 1, 3});
+        // auto query = qkv_input.reshape({B, L1, 3, H, S}).index({{}, {}, {0}, {}, {}}).permute({0, 2, 1, 3});
+        // std::cout << "query=" << query << std::endl; asm("int3");
+        // concat pask_key/value & k/v into present_key/value
+        query.resize({B, H, L1, S});
         parallel_for2d(B, H, [&](size_t b, size_t h) {
-            int64_t threadID = parallel_get_thread_num();
-            memcpy(&present_key.at({b, h, 0, 0}), &past_key.at({b, h, 0, 0}), sizeof(RT) * L0 * S);
-            memcpy(&present_value.at({b, h, 0, 0}), &past_value.at({b, h, 0, 0}), sizeof(RT) * L0 * S);
+                memcpy(&present_key.at({b, h, 0, 0}), &past_key.at({b, h, 0, 0}), sizeof(RT) * L0 * S);
+                memcpy(&present_value.at({b, h, 0, 0}), &past_value.at({b, h, 0, 0}), sizeof(RT) * L0 * S);
 
-            for (size_t p = 0; p < L1; p++) {
-                // auto * q = &qkv_input.at({b, p, h*S});
-                auto* k = &qkv_input.at({b, p, (H + h) * S});
-                auto* v = &qkv_input.at({b, p, (2 * H + h) * S});
-                memcpy(&present_key.at({b, h, L0 + p, 0}), k, sizeof(RT) * S);
-                memcpy(&present_value.at({b, h, L0 + p, 0}), v, sizeof(RT) * S);
-            }
-            kernel(qkv_input,
-                    present_key,
-                    present_value,
-                    attention_mask,
-                    output_emb,
-                    &qk_buffer.at({threadID, 0, 0}),
-                    &dst_buffer.at({threadID, 0, 0}),
-                    b,
-                    h);
+                for (size_t p = 0; p < L1; p++) {
+                    auto* q = &qkv_input.at({b, p, h * S});
+                    auto* k = &qkv_input.at({b, p, (H + h) * S});
+                    auto* v = &qkv_input.at({b, p, (2 * H + h) * S});
+                    memcpy(&query.at({b, h, p, 0}), q, sizeof(RT) * S);
+                    memcpy(&present_key.at({b, h, L0 + p, 0}), k, sizeof(RT) * S);
+                    memcpy(&present_value.at({b, h, L0 + p, 0}), v, sizeof(RT) * S);
+                }
         });
+
+        kernel(query, present_key, present_value, attention_mask, output_emb);
     }
 };
+
+// template <>
+// struct gpt2_attention_executor<KT_MLAS, float> : public vnode_executor {
+//     PlainTensor<float> qkv_input;          // "f32[?,?,2304]"
+//     PlainTensor<float> past_key;           // "f32[?,12,?,64]"
+//     PlainTensor<float> past_value;         // "f32[?,12,?,64]"
+//     PlainTensor<float> attention_mask;  // "f32[?,1,1,?]"
+
+//     PlainTensor<float> output_emb;     // f32[B, L1, 512]
+//     PlainTensor<float> present_key;    // f32[B, H, L0+L1, 64]
+//     PlainTensor<float> present_value;  // f32[B, H, L0+L1, 64]
+//     PlainTensor<float> qk_buffer;   // [threads, L1, L0+L1]
+//     PlainTensor<float> dst_buffer;  // [threads, L1, S]
+
+//     MHA_FP32_kernel kernel;
+
+//     gpt2_attention_executor() {
+//         register_inputs(qkv_input, past_key, past_value, attention_mask);
+//         register_outputs(output_emb, present_key, present_value);
+//     }
+
+//     void exec(Node* node, dnnl::stream strm) override {
+//         update_inputs(node);
+
+//         auto B = past_key.size(0);
+//         auto H = past_key.size(1);   // 12
+//         auto L0 = past_key.size(2);  // number of tokens have been encoded
+//         auto S = past_key.size(3);   // 64
+//         auto L1 = qkv_input.size(1);
+//         size_t num_threads = parallel_get_num_threads();
+//         qkv_input.assert_dims({B, L1, 3 * (H * S)});
+//         past_key.assert_dims({B, H, L0, S});
+//         past_value.assert_dims({B, H, L0, S});
+//         attention_mask.assert_dims({B, 1, 1, L0 + L1});
+//         qk_buffer.resize({num_threads, L1, L0 + L1});
+//         dst_buffer.resize({num_threads, L1, S});
+//         std::vector<VectorDims> outputShapes{VectorDims{B, L1, H * S},
+//                                              VectorDims{B, H, L0 + L1, S},
+//                                              VectorDims{B, H, L0 + L1, S}};
+//         node->redefineOutputMemory(outputShapes);
+
+//         update_outputs(node);
+
+//         DEBUG_LOG(" B=", B, " H=", H, " S=", S, " L0=", L0, " L1=", L1);
+
+//         // qkv_input.max_repr_len = 99999;
+//         DEBUG_LOG("qkv_input=", qkv_input.repr(256, 8));
+
+//         // concat past_key/value & k/v into present_key/value
+//         parallel_for2d(B, H, [&](size_t b, size_t h) {
+//             size_t threadID = static_cast<size_t>(parallel_get_thread_num());
+//             memcpy(&present_key.at({b, h, 0, 0}), &past_key.at({b, h, 0, 0}), sizeof(float) * L0 * S);
+//             memcpy(&present_value.at({b, h, 0, 0}), &past_value.at({b, h, 0, 0}), sizeof(float) * L0 * S);
+
+//             for (size_t p = 0; p < L1; p++) {
+//                 // auto * q = &qkv_input.at({b, p, h*S});
+//                 auto* k = &qkv_input.at({b, p, (H + h) * S});
+//                 auto* v = &qkv_input.at({b, p, (2 * H + h) * S});
+//                 memcpy(&present_key.at({b, h, L0 + p, 0}), k, sizeof(float) * S);
+//                 memcpy(&present_value.at({b, h, L0 + p, 0}), v, sizeof(float) * S);
+//             }
+//             kernel(qkv_input,
+//                     present_key,
+//                     present_value,
+//                     attention_mask,
+//                     output_emb,
+//                     &qk_buffer.at({threadID, 0, 0}),
+//                     &dst_buffer.at({threadID, 0, 0}),
+//                     b,
+//                     h);
+//         });
+//     }
+// };
 
 template <KernelTypes KType, typename RT>
 struct gptneox_attention_executor : public vnode_executor {
