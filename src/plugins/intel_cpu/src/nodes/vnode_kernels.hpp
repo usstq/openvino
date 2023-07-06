@@ -102,9 +102,9 @@ struct RoPE_kernel<KT_LLMDNN, ov::bfloat16> {
     llmdnn::emb_gpt m_kernel_emb;
     bool m_kernel_initialized = false;
 
-    void operator()(PlainTensor<ov::bfloat16>& cur_query,              // B,L,H,S
-                    PlainTensor<ov::bfloat16>& cur_key,                // B,L,H,S
-                    PlainTensor<ov::bfloat16>& cur_value,              // B,L,H,S
+    void operator()(PlainTensor<ov::bfloat16>& cur_query,   // B,L,H,S
+                    PlainTensor<ov::bfloat16>& cur_key,     // B,L,H,S
+                    PlainTensor<ov::bfloat16>& cur_value,   // B,L,H,S
                     PlainTensor<ov::bfloat16>& past_key,    // f32[B, H, L0, S]
                     PlainTensor<ov::bfloat16>& past_value,  // f32[B, H, L0, S]
                     PlainTensor<ov::bfloat16>& query_emb,
@@ -167,10 +167,15 @@ struct MHA_kernel {
     MHA_kernel() = default;
 
     template <typename D>
-    float dot_product(const D* a, const D* b, int len) {
+    float dot_product(const D* a, const D* b, int len, int stride_b = 1) {
         float result = 0;
-        for (int i = 0; i < len; i++)
-            result += static_cast<float>(a[i]) * static_cast<float>(b[i]);
+        if (stride_b == 1) {
+            for (int i = 0; i < len; i++)
+                result += static_cast<float>(a[i]) * static_cast<float>(b[i]);
+        } else {
+            for (int i = 0; i < len; i++)
+                result += static_cast<float>(a[i]) * static_cast<float>(b[i * stride_b]);
+        }
         return result;
     }
 
@@ -194,10 +199,18 @@ struct MHA_kernel {
         }
     }
 
+    PlainTensor<float>* p_alibi = nullptr;
+
+    void set_alibi(PlainTensor<float>& alibi) {
+        p_alibi = &alibi;
+    }
+
     // Q, K, V is ready, do attention
     // query         [B, H, L1, S]
-    // present_key   [B, H, L0+L1, S]
+    // present_key   [B, H, L0+L1, S]  stride of last dim maybe > 1
     // present_value [B, H, L0+L1, S]
+    // attention_mask [B, 1, L1, L0 + L1]
+    // alibi
     // output_emb    [B, L1, H*S]
     void operator()(PlainTensor<T>& query,
                     PlainTensor<T>& present_key,
@@ -213,34 +226,44 @@ struct MHA_kernel {
         std::vector<float> word_vec(head_size, 0.0f);
         float d_scale = 1.0f / sqrt(head_size);
 
+        auto k_stride_s = present_key.stride(3);
         for (size_t b = 0; b < B; b++) {
             for (size_t h = 0; h < H; h++) {
-                auto key = &present_key.at({b, h, 0, 0});
-                auto value = &present_value.at({b, h, 0, 0});
-                auto output = &output_emb.at({b, 0, h * head_size});
+                // auto key = &present_key.at({b, h, 0, 0});
+                // auto value = &present_value.at({b, h, 0, 0});
+                // auto output = &output_emb.at({b, 0, h * head_size});
                 for (size_t m = 0; m < q_len; m++) {
                     // dot-product to get attention scores
                     auto* q = &query.at({b, h, m, 0});
                     // how many key/values can be accessed causally
                     auto ncausal = kv_len - q_len + m + 1;
-                    for (size_t n = 0; n < ncausal; n++) {
-                        auto* k = key + n * head_size;
-                        attn_score[n] = dot_product(q, k, head_size) * d_scale;
+                    auto attn_mask_qlen = attention_mask.size(2);
+                    auto* attn_mask = &attention_mask.at({b, 0, std::min(m, attn_mask_qlen - 1), 0});
+                    if (attn_mask_qlen > 1) {
+                        // this imply attn mask is combined with causal mask
+                        ncausal = kv_len;
                     }
-                    // apply causal_mask
-                    // apply attention mask
+                    for (size_t n = 0; n < ncausal; n++) {
+                        auto* k = &present_key.at({b, h, n, 0});
+                        attn_score[n] = dot_product(q, k, head_size, k_stride_s) * d_scale;
+                        if (p_alibi)
+                            attn_score[n] += p_alibi->at({h, 0, n});
+                        // apply attention mask (maybe combined with causal_mask)
+                        attn_score[n] += attn_mask[n];
+                    }
+
                     // softmax
                     softmax(&attn_score[0], ncausal);
 
                     // linearly combine value
                     word_vec.assign(head_size, 0.0f);
                     for (size_t n = 0; n < ncausal; n++) {
-                        auto* v = value + n * head_size;
+                        auto* v = &present_value.at({b, h, n, 0});
                         accumulate(word_vec.data(), v, head_size, attn_score[n]);
                     }
 
                     // output [B, L1, H*head_size]
-                    auto* out = output + m * H * head_size;
+                    auto* out = &output_emb.at({b, m, h * head_size});
                     std::copy(word_vec.begin(), word_vec.end(), out);
                 }
             }
@@ -254,11 +277,18 @@ struct MHA_kernel<KT_LLMDNN, ov::bfloat16> {
     bool m_kernel_initialized = false;
     MHA_kernel() {}
 
+    PlainTensor<float>* p_alibi = nullptr;
+
+    void set_alibi(PlainTensor<float>& alibi) {
+        p_alibi = &alibi;
+    }
+
     void operator()(PlainTensor<ov::bfloat16>& query,
                     PlainTensor<ov::bfloat16>& present_key,
                     PlainTensor<ov::bfloat16>& present_value,
-                    PlainTensor<float>& attention_mask,     // [batch, 1, query_seq_len, key_seq_len]
+                    PlainTensor<float>& attention_mask,  // [batch, 1, query_seq_len, key_seq_len]
                     PlainTensor<ov::bfloat16>& attn_output) {
+        assert(p_alibi == nullptr);
         int max_position_embeddings = 2048;
         auto B = query.size(0);
         auto H = query.size(1);
@@ -289,7 +319,8 @@ struct MHA_kernel<KT_LLMDNN, ov::bfloat16> {
             .batch = B,
             .query_seq_len = q_len,
             .key_seq_len = kv_len,
-            .is_causal_in_attention = is_causal_in_attention,  // causal mask is fused in attention mask: chatglm uses it.
+            .is_causal_in_attention =
+                is_causal_in_attention,  // causal mask is fused in attention mask: chatglm uses it.
             .q = reinterpret_cast<uint8_t*>(
                 query.data()),        // q buffer, compact, shape: [batch, num_heads, query_seq_len, head_size]
             .k = batched_ptrs_key,    // k buffer, k[N] stands different batch which may be discreted

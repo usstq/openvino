@@ -1,0 +1,71 @@
+OutputVector vnode_bloom_attn(const OutputVector& inputs) {
+    int ii = 0;
+
+    //auto _transformer_h_1_self_attention_query_key_value_Add = GenPattern<opset1::Add>({Constant_111676, _transformer_h_1_self_attention_query_key_value_MatMul}, "f32[?,?,3072]", {{"auto_broadcast", "numpy"}});   //  /transformer/h.1/self_attention/query_key_value/Add
+
+    auto _transformer_h_1_self_attention_query_key_value_Add = inputs[ii++]; // qkv_input : "f32[B, L, H*3*S]"
+    auto past_key_values_1_key = inputs[ii++];                               // past_key_values_1_key : f32[B, S, L]
+    auto past_key_values_1_value = inputs[ii++];                             // past_key_values_1_value: f32[B, L, S]
+    auto _transformer_Reshape = inputs[ii++]; // alibi tensor :    f32[H, 1, key_length] will be broadcasted add to 
+    auto _transformer_Or = inputs[ii++]; // (attention + causal) : u8[?,1,?,?]  False means no change, True means set to -FLT_MAX
+
+    auto H = Symbol("H"); // num_attention_heads             8
+    auto S = Symbol("S"); // hidden_size/num_attention_heads 
+
+    auto _transformer_h_1_self_attention_Reshape = GenPattern<opset1::Reshape>({_transformer_h_1_self_attention_query_key_value_Add, {0, 0, H, 3, S}}, "f32[?,?,?,3,?]", {{"special_zero", 1}});   //  /transformer/h.1/self_attention/Reshape
+    auto _transformer_h_1_self_attention_Gather_2 = GenPattern<opset8::Gather>({_transformer_h_1_self_attention_Reshape, 0, 3}, "f32[?,?,?,?]", {{"batch_dims", 0}});   //  /transformer/h.1/self_attention/Gather_2
+    auto _transformer_h_1_self_attention_Transpose = GenPattern<opset1::Transpose>({_transformer_h_1_self_attention_Gather_2, {0, 2, 1, 3}}, "f32[?,?,?,?]");   //  /transformer/h.1/self_attention/Transpose
+    auto _transformer_h_1_self_attention_Shape_2 = GenPattern<opset1::ShapeOf>({_transformer_h_1_self_attention_Gather_2}, "i32[4]", {});   //  /transformer/h.1/self_attention/Shape_2
+    auto _transformer_h_1_self_attention_Gather_5 = GenPattern<opset8::Gather>({_transformer_h_1_self_attention_Shape_2, 0, 0}, "i32[]", {{"batch_dims", 0}});   //  /transformer/h.1/self_attention/Gather_5
+    auto _transformer_h_1_self_attention_Mul = GenPattern<opset1::Multiply>({_transformer_h_1_self_attention_Gather_5, H}, "i32[]", {{"auto_broadcast", "numpy"}});   //  /transformer/h.1/self_attention/Mul
+    auto _transformer_h_1_self_attention_Unsqueeze_2 = GenPattern<opset1::Reshape>({_transformer_h_1_self_attention_Mul, {1}}, "i32[1]", {{"special_zero", 0}});   //  /transformer/h.1/self_attention/Unsqueeze_2
+    auto _transformer_h_1_self_attention_Gather_6 = GenPattern<opset8::Gather>({_transformer_h_1_self_attention_Shape_2, {1}, 0}, "i32[1]", {{"batch_dims", 0}});   //  /transformer/h.1/self_attention/Gather_6
+    auto _transformer_h_1_self_attention_Concat_1 = GenPattern<opset1::Concat>({_transformer_h_1_self_attention_Unsqueeze_2, _transformer_h_1_self_attention_Gather_6, {S}}, "i32[3]", {{"axis", 0}});   //  /transformer/h.1/self_attention/Concat_1
+    auto _transformer_h_1_self_attention_Reshape_1 = GenPattern<opset1::Reshape>({_transformer_h_1_self_attention_Transpose, _transformer_h_1_self_attention_Concat_1}, "f32[?,?,?]", {{"special_zero", 1}});   //  /transformer/h.1/self_attention/Reshape_1
+    auto _transformer_h_1_self_attention_Gather_3 = GenPattern<opset8::Gather>({_transformer_h_1_self_attention_Reshape, 1, 3}, "f32[?,?,?,?]", {{"batch_dims", 0}});   //  /transformer/h.1/self_attention/Gather_3
+    auto _transformer_h_1_self_attention_Transpose_1 = GenPattern<opset1::Transpose>({_transformer_h_1_self_attention_Gather_3, {0, 2, 3, 1}}, "f32[?,?,?,?]");   //  /transformer/h.1/self_attention/Transpose_1
+    auto _transformer_h_1_self_attention_Unsqueeze_6 = GenPattern<opset1::Reshape>({_transformer_h_1_self_attention_Mul, {1}}, "i32[1]", {{"special_zero", 0}});   //  /transformer/h.1/self_attention/Unsqueeze_6
+    auto _transformer_h_1_self_attention_Gather_61 = GenPattern<opset8::Gather>({_transformer_h_1_self_attention_Shape_2, {1}, 0}, "i32[1]", {{"batch_dims", 0}});   //  /transformer/h.1/self_attention/Gather_6
+    auto _transformer_h_1_self_attention_Concat_3 = GenPattern<opset1::Concat>({_transformer_h_1_self_attention_Unsqueeze_6, {S}, _transformer_h_1_self_attention_Gather_61}, "i32[3]", {{"axis", 0}});   //  /transformer/h.1/self_attention/Concat_3
+    auto _transformer_h_1_self_attention_Reshape_2 = GenPattern<opset1::Reshape>({_transformer_h_1_self_attention_Transpose_1, _transformer_h_1_self_attention_Concat_3}, "f32[?,?,?]", {{"special_zero", 1}});   //  /transformer/h.1/self_attention/Reshape_2
+    auto present_1_key = GenPattern<opset1::Concat>({past_key_values_1_key, _transformer_h_1_self_attention_Reshape_2}, "f32[?,?,?]", {{"axis", 2}});   //  present.1.key
+
+    auto Multiply_109831 = GenPattern<opset1::Multiply>({present_1_key, 1.0f/sqrt(S)}, "f32[?,?,?]", {{"auto_broadcast", "numpy"}});   //  Multiply_109831
+    auto _transformer_h_1_self_attention_Mul_1 = GenPattern<opset1::MatMul>({_transformer_h_1_self_attention_Reshape_1, Multiply_109831}, "f32[?,?,?]", {{"transpose_a", 0}, {"transpose_b", 0}});   //  /transformer/h.1/self_attention/Mul_1
+    auto _transformer_h_1_self_attention_Add = GenPattern<opset1::Add>({_transformer_h_1_self_attention_Mul_1, _transformer_Reshape}, "f32[?,?,?]", {{"auto_broadcast", "numpy"}});   //  /transformer/h.1/self_attention/Add
+    auto _transformer_h_1_self_attention_Gather_51 = GenPattern<opset8::Gather>({_transformer_h_1_self_attention_Shape_2, {0}, 0}, "i32[1]", {{"batch_dims", 0}});   //  /transformer/h.1/self_attention/Gather_5
+    auto _transformer_h_1_self_attention_Gather_62 = GenPattern<opset8::Gather>({_transformer_h_1_self_attention_Shape_2, {1}, 0}, "i32[1]", {{"batch_dims", 0}});   //  /transformer/h.1/self_attention/Gather_6
+    auto _transformer_h_1_self_attention_Shape_4 = GenPattern<opset1::ShapeOf>({present_1_key}, "i32[3]", {});   //  /transformer/h.1/self_attention/Shape_4
+    auto _transformer_h_1_self_attention_Gather_7 = GenPattern<opset8::Gather>({_transformer_h_1_self_attention_Shape_4, {2}, 0}, "i32[1]", {{"batch_dims", 0}});   //  /transformer/h.1/self_attention/Gather_7
+    auto _transformer_h_1_self_attention_Concat_6 = GenPattern<opset1::Concat>({_transformer_h_1_self_attention_Gather_51, {H}, _transformer_h_1_self_attention_Gather_62, _transformer_h_1_self_attention_Gather_7}, "i32[4]", {{"axis", 0}});   //  /transformer/h.1/self_attention/Concat_6
+    auto _transformer_h_1_self_attention_Reshape_4 = GenPattern<opset1::Reshape>({_transformer_h_1_self_attention_Add, _transformer_h_1_self_attention_Concat_6}, "f32[?,?,?,?]", {{"special_zero", 1}});   //  /transformer/h.1/self_attention/Reshape_4
+    auto _transformer_h_1_self_attention_Where = GenPattern<opset1::Select>({_transformer_Or, -FLT_MAX, _transformer_h_1_self_attention_Reshape_4}, "f32[?,?,?,?]", {{"auto_broadcast", "numpy"}});   //  /transformer/h.1/self_attention/Where
+    auto _transformer_h_1_self_attention_Softmax = GenPattern<opset1::Softmax>({_transformer_h_1_self_attention_Where}, "f32[?,?,?,?]", {{"axis", 3}});   //  /transformer/h.1/self_attention/Softmax
+    auto _transformer_h_1_self_attention_Unsqueeze_11 = GenPattern<opset1::Reshape>({_transformer_h_1_self_attention_Mul, {1}}, "i32[1]", {{"special_zero", 0}});   //  /transformer/h.1/self_attention/Unsqueeze_11
+    auto _transformer_h_1_self_attention_Gather_63 = GenPattern<opset8::Gather>({_transformer_h_1_self_attention_Shape_2, {1}, 0}, "i32[1]", {{"batch_dims", 0}});   //  /transformer/h.1/self_attention/Gather_6
+    auto _transformer_h_1_self_attention_Gather_71 = GenPattern<opset8::Gather>({_transformer_h_1_self_attention_Shape_4, {2}, 0}, "i32[1]", {{"batch_dims", 0}});   //  /transformer/h.1/self_attention/Gather_7
+    auto _transformer_h_1_self_attention_Concat_7 = GenPattern<opset1::Concat>({_transformer_h_1_self_attention_Unsqueeze_11, _transformer_h_1_self_attention_Gather_63, _transformer_h_1_self_attention_Gather_71}, "i32[3]", {{"axis", 0}});   //  /transformer/h.1/self_attention/Concat_7
+    auto _transformer_h_1_self_attention_Reshape_5 = GenPattern<opset1::Reshape>({_transformer_h_1_self_attention_Softmax, _transformer_h_1_self_attention_Concat_7}, "f32[?,?,?]", {{"special_zero", 1}});   //  /transformer/h.1/self_attention/Reshape_5
+    auto _transformer_h_1_self_attention_Gather_4 = GenPattern<opset8::Gather>({_transformer_h_1_self_attention_Reshape, 2, 3}, "f32[?,?,?,?]", {{"batch_dims", 0}});   //  /transformer/h.1/self_attention/Gather_4
+    auto _transformer_h_1_self_attention_Transpose_2 = GenPattern<opset1::Transpose>({_transformer_h_1_self_attention_Gather_4, {0, 2, 1, 3}}, "f32[?,?,?,?]");   //  /transformer/h.1/self_attention/Transpose_2
+    auto _transformer_h_1_self_attention_Unsqueeze_4 = GenPattern<opset1::Reshape>({_transformer_h_1_self_attention_Mul, {1}}, "i32[1]", {{"special_zero", 0}});   //  /transformer/h.1/self_attention/Unsqueeze_4
+    auto _transformer_h_1_self_attention_Gather_64 = GenPattern<opset8::Gather>({_transformer_h_1_self_attention_Shape_2, {1}, 0}, "i32[1]", {{"batch_dims", 0}});   //  /transformer/h.1/self_attention/Gather_6
+    auto _transformer_h_1_self_attention_Concat_2 = GenPattern<opset1::Concat>({_transformer_h_1_self_attention_Unsqueeze_4, _transformer_h_1_self_attention_Gather_64, {S}}, "i32[3]", {{"axis", 0}});   //  /transformer/h.1/self_attention/Concat_2
+    auto _transformer_h_1_self_attention_Reshape_3 = GenPattern<opset1::Reshape>({_transformer_h_1_self_attention_Transpose_2, _transformer_h_1_self_attention_Concat_2}, "f32[?,?,?]", {{"special_zero", 1}});   //  /transformer/h.1/self_attention/Reshape_3
+    auto present_1_value = GenPattern<opset1::Concat>({past_key_values_1_value, _transformer_h_1_self_attention_Reshape_3}, "f32[?,?,?]", {{"axis", 1}});   //  present.1.value
+    auto _transformer_h_1_self_attention_MatMul_1 = GenPattern<opset1::MatMul>({_transformer_h_1_self_attention_Reshape_5, present_1_value}, "f32[?,?,?]", {{"transpose_a", 0}, {"transpose_b", 0}});   //  /transformer/h.1/self_attention/MatMul_1
+    auto _transformer_h_1_self_attention_Shape_5 = GenPattern<opset1::ShapeOf>({_transformer_h_1_self_attention_MatMul_1}, "i32[3]", {});   //  /transformer/h.1/self_attention/Shape_5
+    auto _transformer_h_1_self_attention_Gather_8 = GenPattern<opset8::Gather>({_transformer_h_1_self_attention_Shape_5, 0, 0}, "i32[]", {{"batch_dims", 0}});   //  /transformer/h.1/self_attention/Gather_8
+    auto _transformer_h_1_self_attention_Div = GenPattern<opset1::Divide>({_transformer_h_1_self_attention_Gather_8, H}, "i32[]", {{"auto_broadcast", "numpy"}, {"m_pythondiv", 1}});   //  /transformer/h.1/self_attention/Div
+    auto _transformer_h_1_self_attention_Unsqueeze_14 = GenPattern<opset1::Reshape>({_transformer_h_1_self_attention_Div, {1}}, "i32[1]", {{"special_zero", 0}});   //  /transformer/h.1/self_attention/Unsqueeze_14
+    auto _transformer_h_1_self_attention_Gather_9 = GenPattern<opset8::Gather>({_transformer_h_1_self_attention_Shape_5, {1}, 0}, "i32[1]", {{"batch_dims", 0}});   //  /transformer/h.1/self_attention/Gather_9
+    auto _transformer_h_1_self_attention_Concat_8 = GenPattern<opset1::Concat>({_transformer_h_1_self_attention_Unsqueeze_14, {H}, _transformer_h_1_self_attention_Gather_9, {S}}, "i32[4]", {{"axis", 0}});   //  /transformer/h.1/self_attention/Concat_8
+    auto _transformer_h_1_self_attention_Reshape_6 = GenPattern<opset1::Reshape>({_transformer_h_1_self_attention_MatMul_1, _transformer_h_1_self_attention_Concat_8}, "f32[?,?,?,?]", {{"special_zero", 1}});   //  /transformer/h.1/self_attention/Reshape_6
+    auto _transformer_h_1_self_attention_Transpose_3 = GenPattern<opset1::Transpose>({_transformer_h_1_self_attention_Reshape_6, {0, 2, 1, 3}}, "f32[?,?,?,?]");   //  /transformer/h.1/self_attention/Transpose_3
+    auto _transformer_h_1_self_attention_Unsqueeze_16 = GenPattern<opset1::Reshape>({_transformer_h_1_self_attention_Div, {1}}, "i32[1]", {{"special_zero", 0}});   //  /transformer/h.1/self_attention/Unsqueeze_16
+    auto _transformer_h_1_self_attention_Gather_91 = GenPattern<opset8::Gather>({_transformer_h_1_self_attention_Shape_5, {1}, 0}, "i32[1]", {{"batch_dims", 0}});   //  /transformer/h.1/self_attention/Gather_9
+    auto _transformer_h_1_self_attention_Concat_9 = GenPattern<opset1::Concat>({_transformer_h_1_self_attention_Unsqueeze_16, _transformer_h_1_self_attention_Gather_91, {H*S}}, "i32[3]", {{"axis", 0}});   //  /transformer/h.1/self_attention/Concat_9
+    auto _transformer_h_1_self_attention_Reshape_7 = GenPattern<opset1::Reshape>({_transformer_h_1_self_attention_Transpose_3, _transformer_h_1_self_attention_Concat_9}, "f32[?,?,?]", {{"special_zero", 1}});   //  /transformer/h.1/self_attention/Reshape_7
+
+    return {_transformer_h_1_self_attention_Reshape_7, present_1_key, present_1_value};
+}

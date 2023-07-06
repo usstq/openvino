@@ -105,6 +105,10 @@ struct PlainTensorBase {
     uint8_t* batched_ptr_buff[8];
     std::vector<uint8_t*> batched_ptr_backup;
 
+    operator bool() {
+        return static_cast<bool>(m_ptr);
+    }
+
     size_t size(int i) {
         assert(i < m_rank);
         return m_dims[i];

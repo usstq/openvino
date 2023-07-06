@@ -671,12 +671,14 @@ public:
 #include "vnode_gpt2.txt"
 #include "vnode_opt.txt"
 #include "vnode_llama.txt"
+#include "vnode_bloom.txt"
 
 MHADynamicVNodeIn::MHADynamicVNodeIn() {
     add_matcher<VNodeIn>("gptneox_attention", vnode_gptneox_attn);
     add_matcher<VNodeIn>("gpt2_attention", vnode_gpt2);
     add_matcher<VNodeIn>("opt_attention", vnode_opt_attn);
     add_matcher<VNodeIn>("open_llama_attention", vnode_llama_attn);
+    add_matcher<VNodeIn>("bloom_attention", vnode_bloom_attn);
 }
 
 MHADynamicVNodeOut::MHADynamicVNodeOut() {

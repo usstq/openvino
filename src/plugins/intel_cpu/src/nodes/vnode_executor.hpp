@@ -232,13 +232,13 @@ struct open_llama_attention_executor : public vnode_executor {
     PlainTensor<RT> k_proj;  //  "f32[B,L1,H*S]"
     PlainTensor<RT> v_proj;  //  "f32[B,L1,H*S]"
     PlainTensor<int32_t> self_attn_Shape;
-    PlainTensor<RT> past_key;           // f32[B, H, L0, S]
-    PlainTensor<RT> past_value;         // f32[B, H, L0, S]
+    PlainTensor<RT> past_key;                  // f32[B, H, L0, S]
+    PlainTensor<RT> past_value;                // f32[B, H, L0, S]
     PlainTensor<float> attention_causal_mask;  // f32[B, 1, L1, L0+L1]
-    PlainTensor<float> rotary_emb_cos;  // f32[1,1,2048,100]
-    PlainTensor<float> rotary_emb_sin;  // f32[1,1,2048,100]
-    PlainTensor<int32_t> input_ids_shape;    // i32[2]
-    PlainTensor<int32_t> past_key_0_shape;       // i32[4]
+    PlainTensor<float> rotary_emb_cos;         // f32[1,1,2048,100]
+    PlainTensor<float> rotary_emb_sin;         // f32[1,1,2048,100]
+    PlainTensor<int32_t> input_ids_shape;      // i32[2]
+    PlainTensor<int32_t> past_key_0_shape;     // i32[4]
 
     PlainTensor<RT> output_emb;     // f32[B, L1, 512]
     PlainTensor<RT> present_key;    // f32[B, H, L0+L1, 64]
@@ -297,8 +297,8 @@ struct open_llama_attention_executor : public vnode_executor {
 
         DEBUG_LOG(" B=", B, " H=", H, " S=", S, " L0=", L0, " L1=", L1);
 
-        //std::cout << "attention_causal_mask=" << attention_causal_mask.repr(256) << std::endl;
-        //asm("int3");
+        // std::cout << "attention_causal_mask=" << attention_causal_mask.repr(256) << std::endl;
+        // asm("int3");
 
         m_query_emb.resize({B, H, L1, S});
 
@@ -319,6 +319,99 @@ struct open_llama_attention_executor : public vnode_executor {
         DEBUG_LOG(" m_query_emb=", m_query_emb);
 
         kernel(m_query_emb, present_key, present_value, attention_causal_mask, output_emb);
+    }
+};
+
+template <KernelTypes KType, typename RT>
+struct bloom_attention_executor : public vnode_executor {
+    PlainTensor<RT> qkv_input;   //"f32[B, L, H*3*S]"
+    PlainTensor<RT> past_key;    // f32[B*H, S, L]
+    PlainTensor<RT> past_value;  // f32[B*H, L, S]
+    PlainTensor<float> alibi;    // f32[H, 1, kv_len] will be broadcasted add to attention weights [B, H, q_len, kv_len]
+    PlainTensor<uint8_t> combined_attention_mask;  // (attention + causal) : u8[B,1,q_len,kv_len]  False means add 0,
+                                                   // True means set to -FLT_MAX
+
+    PlainTensor<RT> output_emb;     // f32[B, L1, H*S]
+    PlainTensor<RT> present_key;    // f32[B*H, S, L0+L1]
+    PlainTensor<RT> present_value;  // f32[B*H, L0+L1, S]
+
+    MHA_kernel<KType, RT> kernel;
+
+    bloom_attention_executor() {
+        register_inputs(qkv_input, past_key, past_value, alibi, combined_attention_mask);
+        register_outputs(output_emb, present_key, present_value);
+    }
+
+    PlainTensor<RT> query;  // query with embed
+    PlainTensor<float> attention_mask;
+
+    void exec(Node* node, dnnl::stream strm) override {
+        update_inputs(node);
+
+        auto B = qkv_input.size(0);
+        auto L1 = qkv_input.size(1);
+        auto H3S = qkv_input.size(2);
+        auto L0 = past_value.size(1);
+        auto S = past_value.size(2);
+        auto H = H3S / (3 * S);
+        DEBUG_LOG(" B=", B, " H=", H, " S=", S, " L0=", L0, " L1=", L1);
+
+        std::vector<VectorDims> outputShapes;
+        outputShapes.push_back(VectorDims{B, L1, H * S});
+        outputShapes.push_back(VectorDims{B * H, S, L0 + L1});
+        outputShapes.push_back(VectorDims{B * H, L0 + L1, S});
+        node->redefineOutputMemory(outputShapes);
+
+        update_outputs(node);
+
+        qkv_input.assert_dims({B, L1, H * 3 * S});
+        past_key.assert_dims({B * H, S, L0});
+        past_value.assert_dims({B * H, L0, S});
+        alibi.assert_dims({H, 1, L0 + L1});
+        combined_attention_mask.assert_dims({B, 1, L1, L0 + L1});
+
+        // transform u8 mask to f32 additive mask
+        attention_mask.resize({B, 1, L1, L0 + L1});
+        auto* psrc = combined_attention_mask.data();
+        auto* pdst = attention_mask.data();
+        for (int i = 0; i < B * L1 * (L0 + L1); i++) {
+            pdst[i] = psrc[i] ? -FLT_MAX : 0;
+        }
+
+        auto qkv_5d = qkv_input.reshape({B, L1, H, 3, S});
+        auto present_key2 = present_key.reshape({B, H, S, L0 + L1});
+        auto past_key2 = past_key.reshape({B, H, S, L0});
+        auto present_value2 = present_value.reshape({B, H, L0 + L1, S});
+        auto past_value2 = past_value.reshape({B, H, L0, S});
+
+        query.resize({B, H, L1, S});
+        for (size_t b = 0; b < B; b++) {
+            for (size_t h = 0; h < H; h++) {
+                // past_key
+                for (size_t s = 0; s < S; s++) {
+                    memcpy(&present_key2.at({b, h, s, 0}), &past_key2.at({b, h, s, 0}), sizeof(RT) * L0);
+                    for (size_t p = 0; p < L1; p++) {
+                        present_key2.at({b, h, s, L0 + p}) = qkv_5d.at({b, p, h, 1, s});
+                    }
+                }
+
+                // past_value
+                for (size_t p = 0; p < L0; p++) {
+                    memcpy(&present_value2.at({b, h, p, 0}), &past_value2.at({b, h, p, 0}), sizeof(RT) * S);
+                }
+                for (size_t p = 0; p < L1; p++) {
+                    // current q,k,v
+                    auto* q = &qkv_5d.at({b, p, h, 0, 0});
+                    auto* v = &qkv_5d.at({b, p, h, 2, 0});
+                    memcpy(&query.at({b, h, p, 0}), q, sizeof(RT) * S);
+                    memcpy(&present_value2.at({b, h, L0 + p, 0}), v, sizeof(RT) * S);
+                }
+            }
+        }
+
+        present_key2 = present_key2.permute({0, 1, 3, 2});
+        kernel.set_alibi(alibi);
+        kernel(query, present_key2, present_value2, attention_mask, output_emb);
     }
 };
 
