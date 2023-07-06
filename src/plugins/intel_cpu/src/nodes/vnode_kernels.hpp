@@ -13,6 +13,7 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include "vnode_utils.hpp"
 
 #ifdef OV_CPU_WITH_LLM
 #include "llm_emb_gpt.hpp"
@@ -361,7 +362,7 @@ struct GPT2_MHA_kernel<KT_MLAS, float> {
             a[i] = 0.0f;
         }
     }
-    void
+
     // Q, K, V is ready, do attention
     // qkv           [B, L1, 3*(H*S)]
     // curKey   [B, H, L0+L1, S]
@@ -399,7 +400,7 @@ struct GPT2_MHA_kernel<KT_MLAS, float> {
             size_t offset = m * (L0 + L1);
             // apply attention mask
             // sofmax
-            scale_add_softmax(&qk[offset], d_scale, mask, L0 + m + 1, L0 + L1);
+            InferenceEngine::Extensions::Cpu::XARCH::scale_add_softmax(&qk[offset], d_scale, mask, L0 + m + 1, L0 + L1);
         }
 
         ov_sgemm("N", "N", L1, S, L0 + L1, 1.0f, qk, L0 + L1, vBasePtr, S, 0.f, dst, S, 1);
