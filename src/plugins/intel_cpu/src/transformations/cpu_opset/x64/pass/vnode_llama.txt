@@ -1,0 +1,104 @@
+OutputVector vnode_llama_attn(const OutputVector& inputs) {
+    int ii = 0;
+
+    //auto _model_layers_1_self_attn_q_proj_MatMul = GenPattern<opset1::MatMul>({_model_layers_1_input_layernorm_Mul_1, Transpose_115106}, "f32[?,?,3200]", {{"transpose_a", 0}, {"transpose_b", 1}});   //  /model/layers.1/self_attn/q_proj/MatMul
+    //auto _model_layers_1_self_attn_k_proj_MatMul = GenPattern<opset1::MatMul>({_model_layers_1_input_layernorm_Mul_1, Transpose_115109}, "f32[?,?,3200]", {{"transpose_a", 0}, {"transpose_b", 1}});   //  /model/layers.1/self_attn/k_proj/MatMul
+    //auto _model_layers_1_self_attn_v_proj_MatMul = GenPattern<opset1::MatMul>({_model_layers_1_input_layernorm_Mul_1, Transpose_115112}, "f32[?,?,3200]", {{"transpose_a", 0}, {"transpose_b", 1}});   //  /model/layers.1/self_attn/v_proj/MatMul
+    //auto _model_layers_1_self_attn_Shape = GenPattern<opset1::ShapeOf>({_model_layers_1_input_layernorm_Mul_1}, "i32[3]", {});   //  /model/layers.1/self_attn/Shape
+    //auto past_key_values_1_value = GenPattern<opset1::Parameter>({}, "f32[?,32,?,100]", {{"shape", "[?,32,?,100]"}, {"element_type", "f32"}});   //  past_key_values.1.value
+    //auto past_key_values_1_key = GenPattern<opset1::Parameter>({}, "f32[?,32,?,100]", {{"shape", "[?,32,?,100]"}, {"element_type", "f32"}});   //  past_key_values.1.key
+    //auto past_key_values_0_key = GenPattern<opset1::Parameter>({}, "f32[?,32,?,100]", {{"shape", "[?,32,?,100]"}, {"element_type", "f32"}});   //  past_key_values.0.key
+    //auto input_ids = GenPattern<opset1::Parameter>({}, "i32[?,?]", {{"shape", "[?,?]"}, {"element_type", "i32"}});   //  input_ids
+    //auto _model_Add_2 = GenPattern<opset1::Broadcast>({Add_99533, Maximum_99535, Constant_131609}, "f32[?,1,?,?]", {{"mode", "numpy"}});   //  /model/Add_2
+
+    auto _model_layers_1_self_attn_q_proj_MatMul = inputs[ii++];
+    auto _model_layers_1_self_attn_k_proj_MatMul = inputs[ii++];
+    auto _model_layers_1_self_attn_v_proj_MatMul = inputs[ii++];
+    auto _model_layers_1_self_attn_Shape = inputs[ii++];
+    auto past_key_values_1_key = inputs[ii++];
+    auto past_key_values_1_value = inputs[ii++];
+    auto _model_Add_2 = inputs[ii++];       // mask
+
+    //auto Constant_208 = GenPattern<opset1::Constant>({/*1,1,1,...*/}, "f32[1,1,2048,100]");
+    //auto Constant_216 = GenPattern<opset1::Constant>({/*0,0,0,...*/}, "f32[1,1,2048,100]");
+    auto Constant_208 = inputs[ii++];   // cos
+    auto Constant_216 = inputs[ii++];   // sin
+
+    auto input_ids_shape = inputs[ii++];
+    auto past_key_values_0_key_shape = inputs[ii++];
+
+    auto H = Symbol("H"); // num_attention_heads             8
+    auto S = Symbol("S"); // hidden_size/num_attention_heads 
+
+    //auto _model_Shape_2 = GenPattern<opset1::ShapeOf>({past_key_values_0_key}, "i32[4]", {});   //  /model/Shape_2
+    auto _model_Gather_2 = GenPattern<opset8::Gather>({past_key_values_0_key_shape, 2, 0}, "i32[]", {{"batch_dims", 0}});   //  /model/Gather_2
+    //auto _model_Shape_1 = GenPattern<opset1::ShapeOf>({input_ids}, "i32[2]", {});   //  /model/Shape_1
+    auto _model_Gather_1 = GenPattern<opset8::Gather>({input_ids_shape, 1, 0}, "i32[]", {{"batch_dims", 0}});   //  /model/Gather_1
+    auto _model_Add = GenPattern<opset1::Add>({_model_Gather_1, _model_Gather_2}, "i32[]", {{"auto_broadcast", "numpy"}});   //  /model/Add
+    auto _model_Range = GenPattern<opset4::Range>({_model_Gather_2, _model_Add, 1}, "i32[?]", {{"output_type", "i32"}});   //  /model/Range
+    auto _model_Unsqueeze = GenPattern<opset1::Reshape>({_model_Range, {1, -1}}, "i32[1,?]", {{"special_zero", 0}});   //  /model/Unsqueeze
+    auto _model_Gather_11 = GenPattern<opset8::Gather>({input_ids_shape, {1}, 0}, "i32[1]", {{"batch_dims", 0}});   //  /model/Gather_1
+    auto _model_Concat = GenPattern<opset1::Concat>({{-1}, _model_Gather_11}, "i32[2]", {{"axis", 0}});   //  /model/Concat
+    auto _model_Reshape = GenPattern<opset1::Reshape>({_model_Unsqueeze, _model_Concat}, "i32[?,?]", {{"special_zero", 1}});   //  /model/Reshape
+
+    auto Gather_108712 = GenPattern<opset8::Gather>({_model_layers_1_self_attn_Shape, {0, 1}, 0}, "i32[2]", {{"batch_dims", 0}});   //  Gather_108712
+    auto _model_layers_1_self_attn_Concat = GenPattern<opset1::Concat>({Gather_108712, {H}, {S}}, "i32[4]", {{"axis", 0}});   //  /model/layers.1/self_attn/Concat
+    auto _model_layers_1_self_attn_Reshape = GenPattern<opset1::Reshape>({_model_layers_1_self_attn_q_proj_MatMul, _model_layers_1_self_attn_Concat}, "f32[?,?,?,?]", {{"special_zero", 1}});   //  /model/layers.1/self_attn/Reshape
+    auto _model_layers_1_self_attn_Transpose = GenPattern<opset1::Transpose>({_model_layers_1_self_attn_Reshape, {0, 2, 1, 3}}, "f32[?,?,?,?]");   //  /model/layers.1/self_attn/Transpose
+    auto Gather_108717 = GenPattern<opset8::Gather>({_model_layers_1_self_attn_Shape, {0, 1}, 0}, "i32[2]", {{"batch_dims", 0}});   //  Gather_108717
+    auto _model_layers_1_self_attn_Concat_1 = GenPattern<opset1::Concat>({Gather_108717, {H}, {S}}, "i32[4]", {{"axis", 0}});   //  /model/layers.1/self_attn/Concat_1
+    auto _model_layers_1_self_attn_Reshape_1 = GenPattern<opset1::Reshape>({_model_layers_1_self_attn_k_proj_MatMul, _model_layers_1_self_attn_Concat_1}, "f32[?,?,?,?]", {{"special_zero", 1}});   //  /model/layers.1/self_attn/Reshape_1
+    auto _model_layers_1_self_attn_Transpose_1 = GenPattern<opset1::Transpose>({_model_layers_1_self_attn_Reshape_1, {0, 2, 1, 3}}, "f32[?,?,?,?]");   //  /model/layers.1/self_attn/Transpose_1
+    auto _model_layers_1_self_attn_Shape_2 = GenPattern<opset1::ShapeOf>({_model_layers_1_self_attn_Transpose_1}, "i32[4]", {});   //  /model/layers.1/self_attn/Shape_2
+    auto _model_layers_1_self_attn_Gather_2 = GenPattern<opset8::Gather>({_model_layers_1_self_attn_Shape_2, 2, 0}, "i32[]", {{"batch_dims", 0}});   //  /model/layers.1/self_attn/Gather_2
+    auto _model_layers_1_self_attn_Shape_3 = GenPattern<opset1::ShapeOf>({past_key_values_1_key}, "i32[4]", {});   //  /model/layers.1/self_attn/Shape_3
+    auto _model_layers_1_self_attn_Gather_3 = GenPattern<opset8::Gather>({_model_layers_1_self_attn_Shape_3, 2, 0}, "i32[]", {{"batch_dims", 0}});   //  /model/layers.1/self_attn/Gather_3
+    auto _model_layers_1_self_attn_Add = GenPattern<opset1::Add>({_model_layers_1_self_attn_Gather_2, _model_layers_1_self_attn_Gather_3}, "i32[]", {{"auto_broadcast", "numpy"}});   //  /model/layers.1/self_attn/Add
+    auto _model_layers_1_self_attn_rotary_emb_Unsqueeze = GenPattern<opset1::Reshape>({_model_layers_1_self_attn_Add, {1}}, "i32[1]", {{"special_zero", 0}});   //  /model/layers.1/self_attn/rotary_emb/Unsqueeze
+    auto _model_layers_1_self_attn_rotary_emb_Slice = GenPattern<opset8::Slice>({Constant_208, {0}, _model_layers_1_self_attn_rotary_emb_Unsqueeze, {1}, {2}}, "f32[1,1,..2048,?]");   //  /model/layers.1/self_attn/rotary_emb/Slice
+    auto _model_layers_1_self_attn_Squeeze_output_0 = GenPattern<opset1::Squeeze>({_model_layers_1_self_attn_rotary_emb_Slice, {1}}, "f32[1,..2048,?]");   //  /model/layers.1/self_attn/Squeeze_output_0
+    auto _model_layers_1_self_attn_Squeeze_1_output_0 = GenPattern<opset1::Squeeze>({_model_layers_1_self_attn_Squeeze_output_0, {0}}, "f32[..2048,?]");   //  /model/layers.1/self_attn/Squeeze_1_output_0
+    auto _model_layers_1_self_attn_Gather_8 = GenPattern<opset8::Gather>({_model_layers_1_self_attn_Squeeze_1_output_0, _model_Reshape, 0}, "f32[?,?,?]", {{"batch_dims", 0}});   //  /model/layers.1/self_attn/Gather_8
+    auto _model_layers_1_self_attn_Unsqueeze_6 = GenPattern<opset1::Unsqueeze>({_model_layers_1_self_attn_Gather_8, {1}}, "f32[?,1,?,?]");   //  /model/layers.1/self_attn/Unsqueeze_6
+    auto _model_layers_1_self_attn_Mul = GenPattern<opset1::Multiply>({_model_layers_1_self_attn_Transpose, _model_layers_1_self_attn_Unsqueeze_6}, "f32[?,?,?,?]", {{"auto_broadcast", "numpy"}});   //  /model/layers.1/self_attn/Mul
+    auto _model_layers_1_self_attn_Slice_1 = GenPattern<opset8::Slice>({_model_layers_1_self_attn_Transpose, {S/2}, {2147483647}, {1}, {3}}, "f32[?,?,?,?]");   //  /model/layers.1/self_attn/Slice_1
+    auto Constant_124226 = GenConst({-1.0f}, "f32[1,1,1,1]");
+    auto _model_layers_1_self_attn_Neg = GenPattern<opset1::Multiply>({_model_layers_1_self_attn_Slice_1, Constant_124226}, "f32[?,?,?,?]", {{"auto_broadcast", "numpy"}});   //  /model/layers.1/self_attn/Neg
+    auto _model_layers_1_self_attn_Slice = GenPattern<opset8::Slice>({_model_layers_1_self_attn_Transpose, {0}, {S/2}, {1}, {3}}, "f32[?,?,?,?]");   //  /model/layers.1/self_attn/Slice
+    auto _model_layers_1_self_attn_Concat_3 = GenPattern<opset1::Concat>({_model_layers_1_self_attn_Neg, _model_layers_1_self_attn_Slice}, "f32[?,?,?,?]", {{"axis", -1}});   //  /model/layers.1/self_attn/Concat_3
+    auto _model_layers_1_self_attn_rotary_emb_Unsqueeze_1 = GenPattern<opset1::Reshape>({_model_layers_1_self_attn_Add, {1}}, "i32[1]", {{"special_zero", 0}});   //  /model/layers.1/self_attn/rotary_emb/Unsqueeze_1
+    auto _model_layers_1_self_attn_rotary_emb_Slice_1 = GenPattern<opset8::Slice>({Constant_216, {0}, _model_layers_1_self_attn_rotary_emb_Unsqueeze_1, {1}, {2}}, "f32[1,1,..2048,?]");   //  /model/layers.1/self_attn/rotary_emb/Slice_1
+    auto _model_layers_1_self_attn_Squeeze_2_output_0 = GenPattern<opset1::Squeeze>({_model_layers_1_self_attn_rotary_emb_Slice_1, {1}}, "f32[1,..2048,?]");   //  /model/layers.1/self_attn/Squeeze_2_output_0
+    auto _model_layers_1_self_attn_Squeeze_3_output_0 = GenPattern<opset1::Squeeze>({_model_layers_1_self_attn_Squeeze_2_output_0, {0}}, "f32[..2048,?]");   //  /model/layers.1/self_attn/Squeeze_3_output_0
+    auto _model_layers_1_self_attn_Gather_9 = GenPattern<opset8::Gather>({_model_layers_1_self_attn_Squeeze_3_output_0, _model_Reshape, 0}, "f32[?,?,?]", {{"batch_dims", 0}});   //  /model/layers.1/self_attn/Gather_9
+    auto _model_layers_1_self_attn_Unsqueeze_7 = GenPattern<opset1::Unsqueeze>({_model_layers_1_self_attn_Gather_9, {1}}, "f32[?,1,?,?]");   //  /model/layers.1/self_attn/Unsqueeze_7
+    auto _model_layers_1_self_attn_Mul_1 = GenPattern<opset1::Multiply>({_model_layers_1_self_attn_Concat_3, _model_layers_1_self_attn_Unsqueeze_7}, "f32[?,?,?,?]", {{"auto_broadcast", "numpy"}});   //  /model/layers.1/self_attn/Mul_1
+    auto _model_layers_1_self_attn_Add_1 = GenPattern<opset1::Add>({_model_layers_1_self_attn_Mul, _model_layers_1_self_attn_Mul_1}, "f32[?,?,?,?]", {{"auto_broadcast", "numpy"}});   //  /model/layers.1/self_attn/Add_1
+    auto _model_layers_1_self_attn_Mul_2 = GenPattern<opset1::Multiply>({_model_layers_1_self_attn_Transpose_1, _model_layers_1_self_attn_Unsqueeze_6}, "f32[?,?,?,?]", {{"auto_broadcast", "numpy"}});   //  /model/layers.1/self_attn/Mul_2
+    auto _model_layers_1_self_attn_Slice_3 = GenPattern<opset8::Slice>({_model_layers_1_self_attn_Transpose_1, {S/2}, {2147483647}, {1}, {3}}, "f32[?,?,?,?]");   //  /model/layers.1/self_attn/Slice_3
+    auto Constant_124227 = GenConst({-1.0f}, "f32[1,1,1,1]");
+    auto _model_layers_1_self_attn_Neg_1 = GenPattern<opset1::Multiply>({_model_layers_1_self_attn_Slice_3, Constant_124227}, "f32[?,?,?,?]", {{"auto_broadcast", "numpy"}});   //  /model/layers.1/self_attn/Neg_1
+    auto _model_layers_1_self_attn_Slice_2 = GenPattern<opset8::Slice>({_model_layers_1_self_attn_Transpose_1, {0}, {S/2}, {1}, {3}}, "f32[?,?,?,?]");   //  /model/layers.1/self_attn/Slice_2
+    auto _model_layers_1_self_attn_Concat_4 = GenPattern<opset1::Concat>({_model_layers_1_self_attn_Neg_1, _model_layers_1_self_attn_Slice_2}, "f32[?,?,?,?]", {{"axis", -1}});   //  /model/layers.1/self_attn/Concat_4
+    auto _model_layers_1_self_attn_Mul_3 = GenPattern<opset1::Multiply>({_model_layers_1_self_attn_Concat_4, _model_layers_1_self_attn_Unsqueeze_7}, "f32[?,?,?,?]", {{"auto_broadcast", "numpy"}});   //  /model/layers.1/self_attn/Mul_3
+    auto _model_layers_1_self_attn_Add_2 = GenPattern<opset1::Add>({_model_layers_1_self_attn_Mul_2, _model_layers_1_self_attn_Mul_3}, "f32[?,?,?,?]", {{"auto_broadcast", "numpy"}});   //  /model/layers.1/self_attn/Add_2
+    auto present_1_key = GenPattern<opset1::Concat>({past_key_values_1_key, _model_layers_1_self_attn_Add_2}, "f32[?,?,?,?]", {{"axis", 2}});   //  present.1.key
+    auto Multiply_115868 = GenPattern<opset1::Multiply>({present_1_key, 1/sqrt(S)}, "f32[?,?,?,?]", {{"auto_broadcast", "numpy"}});   //  Multiply_115868
+    auto _model_layers_1_self_attn_Div_2 = GenPattern<opset1::MatMul>({_model_layers_1_self_attn_Add_1, Multiply_115868}, "f32[?,?,?,?]", {{"transpose_a", 0}, {"transpose_b", 1}});   //  /model/layers.1/self_attn/Div_2
+    auto _model_layers_1_self_attn_Add_3 = GenPattern<opset1::Add>({_model_layers_1_self_attn_Div_2, _model_Add_2}, "f32[?,?,?,?]", {{"auto_broadcast", "numpy"}});   //  /model/layers.1/self_attn/Add_3
+    auto Constant_124229 = GenConst({-FLT_MAX}, "f32[1,1,1,1]");
+    auto _model_layers_1_self_attn_Max = GenPattern<opset1::Maximum>({_model_layers_1_self_attn_Add_3, Constant_124229}, "f32[?,?,?,?]", {{"auto_broadcast", "numpy"}});   //  /model/layers.1/self_attn/Max
+    auto _model_layers_1_self_attn_Softmax = GenPattern<opset1::Softmax>({_model_layers_1_self_attn_Max}, "f32[?,?,?,?]", {{"axis", 3}});   //  /model/layers.1/self_attn/Softmax
+    auto Gather_108722 = GenPattern<opset8::Gather>({_model_layers_1_self_attn_Shape, {0, 1}, 0}, "i32[2]", {{"batch_dims", 0}});   //  Gather_108722
+    auto _model_layers_1_self_attn_Concat_2 = GenPattern<opset1::Concat>({Gather_108722, {H}, {S}}, "i32[4]", {{"axis", 0}});   //  /model/layers.1/self_attn/Concat_2
+    auto _model_layers_1_self_attn_Reshape_2 = GenPattern<opset1::Reshape>({_model_layers_1_self_attn_v_proj_MatMul, _model_layers_1_self_attn_Concat_2}, "f32[?,?,?,?]", {{"special_zero", 1}});   //  /model/layers.1/self_attn/Reshape_2
+    auto _model_layers_1_self_attn_Transpose_2 = GenPattern<opset1::Transpose>({_model_layers_1_self_attn_Reshape_2, {0, 2, 1, 3}}, "f32[?,?,?,?]");   //  /model/layers.1/self_attn/Transpose_2
+    auto present_1_value = GenPattern<opset1::Concat>({past_key_values_1_value, _model_layers_1_self_attn_Transpose_2}, "f32[?,?,?,?]", {{"axis", 2}});   //  present.1.value
+    auto _model_layers_1_self_attn_MatMul_1 = GenPattern<opset1::MatMul>({_model_layers_1_self_attn_Softmax, present_1_value}, "f32[?,?,?,?]", {{"transpose_a", 0}, {"transpose_b", 0}});   //  /model/layers.1/self_attn/MatMul_1
+    auto _model_layers_1_self_attn_Transpose_4 = GenPattern<opset1::Transpose>({_model_layers_1_self_attn_MatMul_1, {0, 2, 1, 3}}, "f32[?,?,?,?]");   //  /model/layers.1/self_attn/Transpose_4
+    auto Gather_108727 = GenPattern<opset8::Gather>({_model_layers_1_self_attn_Shape, {0, 1}, 0}, "i32[2]", {{"batch_dims", 0}});   //  Gather_108727
+    auto _model_layers_1_self_attn_Concat_7 = GenPattern<opset1::Concat>({Gather_108727, {H*S}}, "i32[3]", {{"axis", 0}});   //  /model/layers.1/self_attn/Concat_7
+    auto _model_layers_1_self_attn_Reshape_3 = GenPattern<opset1::Reshape>({_model_layers_1_self_attn_Transpose_4, _model_layers_1_self_attn_Concat_7}, "f32[?,?,?]", {{"special_zero", 1}});   //  /model/layers.1/self_attn/Reshape_3
+
+    return {_model_layers_1_self_attn_Reshape_3, present_1_key, present_1_value};
+}

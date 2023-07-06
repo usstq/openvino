@@ -58,6 +58,15 @@ static vnode_executor_map register_all() {
     register_executor<gpt2_attention_executor<KT_LLMDNN, ov::bfloat16>>(vem, "gpt2_attention,LLMDNN,BF16");
     register_executor<gptneox_attention_executor<KT_LLMDNN, ov::bfloat16>>(vem, "gptneox_attention,LLMDNN,BF16");
     #endif
+
+    register_executor<open_llama_attention_executor<KT_REF, float>>(vem, "open_llama_attention,REF,FP32");
+    register_executor<open_llama_attention_executor<KT_REF, ov::bfloat16>>(vem, "open_llama_attention,REF,BF16");
+    register_executor<open_llama_attention_executor<KT_MLAS, float>>(vem, "open_llama_attention,MLAS,FP32");
+    register_executor<open_llama_attention_executor<KT_LLMDNN, ov::bfloat16>>(vem, "open_llama_attention,LLMDNN,BF16");
+
+    register_executor<bloom_attention_executor<KT_REF, float>>(vem, "bloom_attention,REF,FP32");
+    register_executor<bloom_attention_executor<KT_REF, ov::bfloat16>>(vem, "bloom_attention,REF,BF16");
+
     return vem;
 }
 

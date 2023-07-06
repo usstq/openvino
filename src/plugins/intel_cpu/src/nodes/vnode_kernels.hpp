@@ -34,20 +34,22 @@ template <KernelTypes KType, typename T>
 struct RoPE_kernel {
     RoPE_kernel() = default;
 
-    void operator()(PlainTensor<T>& qkv_input,
+    void operator()(PlainTensor<T>& cur_query,  // B,L,H,S
+                    PlainTensor<T>& cur_key,    // B,L,H,S
+                    PlainTensor<T>& cur_value,  // B,L,H,S
                     PlainTensor<T>& past_key,
                     PlainTensor<T>& past_value,
-                    PlainTensor<T>& query_emb,
+                    PlainTensor<T>& query_emb,  // B,H,L,S
                     PlainTensor<T>& present_key,
                     PlainTensor<T>& present_value,
                     PlainTensor<float>& rotary_emb_cos,
                     PlainTensor<float>& rotary_emb_sin) {
-        auto B = qkv_input.get_dims()[0];
-        auto L1 = qkv_input.get_dims()[1];
-        auto H = past_key.get_dims()[1];
-        auto L0 = past_key.get_dims()[2];
-        auto S = past_key.get_dims()[3];
-        auto rotary_dims = rotary_emb_cos.get_dims()[3];
+        auto B = cur_query.size(0);
+        auto L1 = cur_query.size(1);
+        auto H = past_key.size(1);
+        auto L0 = past_key.size(2);
+        auto S = past_key.size(3);
+        auto rotary_dims = rotary_emb_cos.size(3);
         auto half_rotary_dims = rotary_dims / 2;
         // copy past kv into present
         for (size_t b = 0; b < B; b++) {
@@ -62,9 +64,9 @@ struct RoPE_kernel {
         for (size_t b = 0; b < B; b++) {
             for (size_t h = 0; h < H; h++) {
                 for (size_t p = L0; p < L0 + L1; p++) {
-                    auto* q = &qkv_input.at({b, p - L0, (h * 3 + 0) * S + 0});
-                    auto* k = &qkv_input.at({b, p - L0, (h * 3 + 1) * S + 0});
-                    auto* v = &qkv_input.at({b, p - L0, (h * 3 + 2) * S + 0});
+                    auto* q = &cur_query.at({b, p - L0, h, 0});
+                    auto* k = &cur_key.at({b, p - L0, h, 0});
+                    auto* v = &cur_value.at({b, p - L0, h, 0});
                     auto* present_k = &present_key.at({b, h, p, 0});    // f32[B, H, L0+L1, 64]
                     auto* present_v = &present_value.at({b, h, p, 0});  // f32[B, H, L0+L1, 64]
                     auto* q_embed = &query_emb.at({b, h, p - L0, 0});
@@ -104,7 +106,9 @@ struct RoPE_kernel<KT_LLMDNN, ov::bfloat16> {
     llmdnn::emb_gpt m_kernel_emb;
     bool m_kernel_initialized = false;
 
-    void operator()(PlainTensor<ov::bfloat16>& qkv_input,   // f32[B, L1, H*3*S] => [B, L1, H, 3, S]
+    void operator()(PlainTensor<ov::bfloat16>& cur_query,   // B,L,H,S
+                    PlainTensor<ov::bfloat16>& cur_key,     // B,L,H,S
+                    PlainTensor<ov::bfloat16>& cur_value,   // B,L,H,S
                     PlainTensor<ov::bfloat16>& past_key,    // f32[B, H, L0, S]
                     PlainTensor<ov::bfloat16>& past_value,  // f32[B, H, L0, S]
                     PlainTensor<ov::bfloat16>& query_emb,
@@ -112,12 +116,12 @@ struct RoPE_kernel<KT_LLMDNN, ov::bfloat16> {
                     PlainTensor<ov::bfloat16>& present_value,
                     PlainTensor<float>& rotary_emb_cos,
                     PlainTensor<float>& rotary_emb_sin) {
-        auto B = qkv_input.get_dims()[0];
-        auto L1 = qkv_input.get_dims()[1];
-        auto H = past_key.get_dims()[1];
-        auto L0 = past_key.get_dims()[2];
-        auto S = past_key.get_dims()[3];
-        auto rotary_dims = rotary_emb_cos.get_dims()[3];
+        auto B = cur_query.size(0);
+        auto L1 = cur_query.size(1);
+        auto H = past_key.size(1);
+        auto L0 = past_key.size(2);
+        auto S = past_key.size(3);
+        auto rotary_dims = rotary_emb_cos.size(3);
         if (!m_kernel_initialized) {
             std::cout << "::::::::::::::;  " << __func__ << " llmdnn::emb_gpt " << std::endl;
             if (!m_kernel_emb.create(llmdnn::emb_gpt::create_param{
@@ -138,12 +142,12 @@ struct RoPE_kernel<KT_LLMDNN, ov::bfloat16> {
             .batch = B,
             .query_seq_len = L1,
             .past_seq_len = L0,
-            .q = reinterpret_cast<uint8_t*>(&qkv_input.at({0, 0, 0})),      // [B, L1,  H*3*S]
-            .k = reinterpret_cast<uint8_t*>(&qkv_input.at({0, 0, S})),      // [B, L1,  H*3*S]
-            .v = reinterpret_cast<uint8_t*>(&qkv_input.at({0, 0, 2 * S})),  // [B, L1,  H*3*S]
-            .ldq = 3 * S,
-            .ldk = 3 * S,
-            .ldv = 3 * S,
+            .q = reinterpret_cast<uint8_t*>(cur_query.data()),  // [B, L1, H, S]
+            .k = reinterpret_cast<uint8_t*>(cur_key.data()),    // [B, L1, H, S]
+            .v = reinterpret_cast<uint8_t*>(cur_value.data()),  // [B, L1, H, S]
+            .ldq = cur_query.stride(2),
+            .ldk = cur_key.stride(2),
+            .ldv = cur_value.stride(2),
             .query_dst = reinterpret_cast<uint8_t*>(query_emb.data()),  // rotary embbeding dst
             .layer_past_key_src = past_key.get_batched_ptrs(),          // past key src
             .layer_past_value_src = past_value.get_batched_ptrs(),      // past value src
@@ -168,10 +172,15 @@ struct MHA_kernel {
     MHA_kernel() = default;
 
     template <typename D>
-    float dot_product(const D* a, const D* b, int len) {
+    float dot_product(const D* a, const D* b, int len, int stride_b = 1) {
         float result = 0;
-        for (int i = 0; i < len; i++)
-            result += static_cast<float>(a[i]) * static_cast<float>(b[i]);
+        if (stride_b == 1) {
+            for (int i = 0; i < len; i++)
+                result += static_cast<float>(a[i]) * static_cast<float>(b[i]);
+        } else {
+            for (int i = 0; i < len; i++)
+                result += static_cast<float>(a[i]) * static_cast<float>(b[i * stride_b]);
+        }
         return result;
     }
 
@@ -195,56 +204,71 @@ struct MHA_kernel {
         }
     }
 
+    PlainTensor<float>* p_alibi = nullptr;
+
+    void set_alibi(PlainTensor<float>& alibi) {
+        p_alibi = &alibi;
+    }
+
     // Q, K, V is ready, do attention
     // query         [B, H, L1, S]
-    // present_key   [B, H, L0+L1, S]
+    // present_key   [B, H, L0+L1, S]  stride of last dim maybe > 1
     // present_value [B, H, L0+L1, S]
+    // attention_mask [B, 1, L1, L0 + L1]
+    // alibi
     // output_emb    [B, L1, H*S]
     void operator()(PlainTensor<T>& query,
                     PlainTensor<T>& present_key,
                     PlainTensor<T>& present_value,
                     PlainTensor<float>& attention_mask,
                     PlainTensor<T>& output_emb) {
-        auto& query_dims = query.get_dims();
-        auto B = query_dims[0];
-        auto H = query_dims[1];
-        auto q_len = query_dims[2];
-        auto head_size = query_dims[3];
-        auto& present_key_dims = present_key.get_dims();
-        auto kv_len = present_key_dims[2];
+        auto B = query.size(0);
+        auto H = query.size(1);
+        auto q_len = query.size(2);
+        auto head_size = query.size(3);
+        auto kv_len = present_key.size(2);
         std::vector<float> attn_score(kv_len, 0.0f);
         std::vector<float> word_vec(head_size, 0.0f);
         float d_scale = 1.0f / sqrt(head_size);
 
+        auto k_stride_s = present_key.stride(3);
         for (size_t b = 0; b < B; b++) {
             for (size_t h = 0; h < H; h++) {
-                auto cquery = &query.at({b, h, 0, 0});
-                auto key = &present_key.at({b, h, 0, 0});
-                auto value = &present_value.at({b, h, 0, 0});
-                auto output = &output_emb.at({b, 0, h * head_size});
+                // auto key = &present_key.at({b, h, 0, 0});
+                // auto value = &present_value.at({b, h, 0, 0});
+                // auto output = &output_emb.at({b, 0, h * head_size});
                 for (size_t m = 0; m < q_len; m++) {
                     // dot-product to get attention scores
-                    auto* q = cquery + m * head_size;
+                    auto* q = &query.at({b, h, m, 0});
                     // how many key/values can be accessed causally
                     auto ncausal = kv_len - q_len + m + 1;
-                    for (size_t n = 0; n < ncausal; n++) {
-                        auto* k = key + n * head_size;
-                        attn_score[n] = dot_product(q, k, head_size) * d_scale;
+                    auto attn_mask_qlen = attention_mask.size(2);
+                    auto* attn_mask = &attention_mask.at({b, 0, std::min(m, attn_mask_qlen - 1), 0});
+                    if (attn_mask_qlen > 1) {
+                        // this imply attn mask is combined with causal mask
+                        ncausal = kv_len;
                     }
-                    // apply causal_mask
-                    // apply attention mask
+                    for (size_t n = 0; n < ncausal; n++) {
+                        auto* k = &present_key.at({b, h, n, 0});
+                        attn_score[n] = dot_product(q, k, head_size, k_stride_s) * d_scale;
+                        if (p_alibi)
+                            attn_score[n] += p_alibi->at({h, 0, n});
+                        // apply attention mask (maybe combined with causal_mask)
+                        attn_score[n] += attn_mask[n];
+                    }
+
                     // softmax
                     softmax(&attn_score[0], ncausal);
 
                     // linearly combine value
                     word_vec.assign(head_size, 0.0f);
                     for (size_t n = 0; n < ncausal; n++) {
-                        auto* v = value + n * head_size;
+                        auto* v = &present_value.at({b, h, n, 0});
                         accumulate(word_vec.data(), v, head_size, attn_score[n]);
                     }
 
                     // output [B, L1, H*head_size]
-                    auto* out = output + m * H * head_size;
+                    auto* out = &output_emb.at({b, m, h * head_size});
                     std::copy(word_vec.begin(), word_vec.end(), out);
                 }
             }
@@ -420,19 +444,25 @@ struct MHA_kernel<KT_LLMDNN, ov::bfloat16> {
     bool m_kernel_initialized = false;
     MHA_kernel() {}
 
+    PlainTensor<float>* p_alibi = nullptr;
+
+    void set_alibi(PlainTensor<float>& alibi) {
+        p_alibi = &alibi;
+    }
+
     void operator()(PlainTensor<ov::bfloat16>& query,
                     PlainTensor<ov::bfloat16>& present_key,
                     PlainTensor<ov::bfloat16>& present_value,
-                    PlainTensor<float>& attention_mask,
+                    PlainTensor<float>& attention_mask,  // [batch, 1, query_seq_len, key_seq_len]
                     PlainTensor<ov::bfloat16>& attn_output) {
+        assert(p_alibi == nullptr);
         int max_position_embeddings = 2048;
-        auto& query_dims = query.get_dims();
-        auto B = query_dims[0];
-        auto H = query_dims[1];
-        auto q_len = query_dims[2];
-        auto head_size = query_dims[3];
-        auto& present_key_dims = present_key.get_dims();
-        auto kv_len = present_key_dims[2];
+        auto B = query.size(0);
+        auto H = query.size(1);
+        auto q_len = query.size(2);
+        auto head_size = query.size(3);
+        auto kv_len = present_key.size(2);
+        auto is_causal_in_attention = attention_mask.size(2) > 1;
         if (!m_kernel_initialized) {
             std::cout << "::::::::::::::;  " << __func__ << " llmdnn::mha_gpt " << std::endl;
             if (!m_kernel.create(llmdnn::mha_gpt::create_param{
@@ -456,7 +486,8 @@ struct MHA_kernel<KT_LLMDNN, ov::bfloat16> {
             .batch = B,
             .query_seq_len = q_len,
             .key_seq_len = kv_len,
-            .is_causal_in_attention = false,  // causal mask is fused in attention mask: chatglm uses it.
+            .is_causal_in_attention =
+                is_causal_in_attention,  // causal mask is fused in attention mask: chatglm uses it.
             .q = reinterpret_cast<uint8_t*>(
                 query.data()),        // q buffer, compact, shape: [batch, num_heads, query_seq_len, head_size]
             .k = batched_ptrs_key,    // k buffer, k[N] stands different batch which may be discreted
