@@ -39,6 +39,7 @@ private:
     std::shared_ptr<ov::intel_cpu::VNode> m_vnode;
 
     std::shared_ptr<vnode_executor> m_executor;
+    ov::element::Type inType;
 };
 
 }   // namespace node

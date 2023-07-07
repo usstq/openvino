@@ -64,6 +64,10 @@ if(NOT (AARCH64 OR ARM))
     list(APPEND EXCLUDE_PATHS ${CMAKE_CURRENT_SOURCE_DIR}/src/transformations/cpu_opset/arm/*)
 endif()
 
+if (NOT ENABLE_MLAS)
+    list(APPEND EXCLUDE_PATHS ${CMAKE_CURRENT_SOURCE_DIR}/src/gemm/*)
+endif()
+
 file(GLOB_RECURSE FILES_TO_REMOVE ${EXCLUDE_PATHS})
 list(REMOVE_ITEM SOURCES ${FILES_TO_REMOVE})
 list(REMOVE_ITEM HEADERS ${FILES_TO_REMOVE})
@@ -94,11 +98,17 @@ target_link_libraries(${TARGET_NAME} PRIVATE dnnl
 
 target_compile_definitions(${TARGET_NAME} PRIVATE IMPLEMENT_INFERENCE_EXTENSION_API)
 target_include_directories(${TARGET_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+if (ENABLE_MLAS)
+    target_link_libraries(${TARGET_NAME} PRIVATE mlas)
+    target_include_directories(${TARGET_NAME} SYSTEM PRIVATE $<TARGET_PROPERTY:mlas,INCLUDE_DIRECTORIES>)
+    add_definitions(-DOV_CPU_WITH_MLAS)
+endif()
 target_include_directories(${TARGET_NAME} SYSTEM PRIVATE $<TARGET_PROPERTY:dnnl,INCLUDE_DIRECTORIES>)
 
 # Please specify cpu_extensions install path by env var: cpu_extensions_DIR 
 find_package(cpu_extensions CONFIG REQUIRED)
 target_link_libraries(${TARGET_NAME} PRIVATE cpu_extensions::cpu_extensions)
+add_definitions(-DOV_CPU_WITH_LLMDNN)
 
 # Cross compiled function
 # TODO: The same for proposal, proposalONNX, topk
@@ -107,6 +117,14 @@ cross_compiled_file(${TARGET_NAME}
                     src/nodes/proposal_imp.cpp
         API         src/nodes/proposal_imp.hpp
         NAME        proposal_exec
+        NAMESPACE   InferenceEngine::Extensions::Cpu::XARCH
+)
+
+cross_compiled_file(${TARGET_NAME}
+        ARCH AVX512F ANY
+                    src/nodes/vnode_utils.cpp
+        API         src/nodes/vnode_utils.hpp
+        NAME        scale_add_softmax
         NAMESPACE   InferenceEngine::Extensions::Cpu::XARCH
 )
 
@@ -137,6 +155,10 @@ if(BUILD_SHARED_LIBS)
             $<TARGET_PROPERTY:openvino::conditional_compilation,INTERFACE_INCLUDE_DIRECTORIES>)
 
     target_include_directories(${TARGET_NAME}_obj SYSTEM PUBLIC $<TARGET_PROPERTY:dnnl,INCLUDE_DIRECTORIES>)
+
+    if(ENABLE_MLAS)
+        target_include_directories(${TARGET_NAME}_obj SYSTEM PUBLIC $<TARGET_PROPERTY:mlas,INCLUDE_DIRECTORIES>)
+    endif()
 
     set_ie_threading_interface_for(${TARGET_NAME}_obj)
 

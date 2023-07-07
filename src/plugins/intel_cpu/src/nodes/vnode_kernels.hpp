@@ -13,12 +13,16 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include "vnode_utils.hpp"
+#include "openvino/core/parallel.hpp"
 
+#ifdef OV_CPU_WITH_LLM
 #include "llm_emb_gpt.hpp"
 #include "llm_mha_gpt.hpp"
 #include "llm_mm.hpp"
+#endif
 #include "utils/plain_tensor.hpp"
-
+#include "gemm/ov_cpu_gemm.h"
 namespace ov {
 namespace intel_cpu {
 namespace node {
@@ -94,6 +98,7 @@ struct RoPE_kernel {
     }
 };
 
+#ifdef OV_CPU_WITH_LLM
 // specialization on llmdnn
 template <>
 struct RoPE_kernel<KT_LLMDNN, ov::bfloat16> {
@@ -159,6 +164,7 @@ struct RoPE_kernel<KT_LLMDNN, ov::bfloat16> {
         });
     }
 };
+#endif
 
 // default implementation: reference
 template <KernelTypes KType, typename T>
@@ -271,6 +277,78 @@ struct MHA_kernel {
 };
 
 template <>
+struct MHA_kernel<KT_MLAS, float> {
+    MHA_kernel() = default;
+    PlainTensor<float>* p_alibi = nullptr;
+
+    void set_alibi(PlainTensor<float>& alibi) {
+        p_alibi = &alibi;
+    }
+
+    // Q, K, V is ready, do attention
+    // query         [B, H, L1, S]
+    // present_key   [B, H, L0+L1, S]  stride of last dim maybe > 1
+    // present_value [B, H, L0+L1, S]
+    // attention_mask [B, 1, L1, L0 + L1]
+    // alibi
+    // output_emb    [B, L1, H*S]
+    void operator()(PlainTensor<float>& query,
+                    PlainTensor<float>& present_key,
+                    PlainTensor<float>& present_value,
+                    PlainTensor<float>& attention_mask,
+                    PlainTensor<float>& output_emb) {
+        auto B = query.size(0);
+        auto H = query.size(1);
+        auto q_len = query.size(2);
+        auto head_size = query.size(3);
+        auto kv_len = present_key.size(2);
+        auto update_len = kv_len - q_len;
+        float d_scale = 1.0f / sqrt(head_size);
+        // initialize temp buffer for qk matmul and  qkv matmul
+        size_t num_threads = parallel_get_num_threads();
+        if (p_qk_buffer == nullptr) {
+            p_qk_buffer.reset(new PlainTensor<float>());
+        }
+        p_qk_buffer->resize({num_threads, q_len, kv_len});
+        if (p_dst_buffer == nullptr) {
+            p_dst_buffer.reset(new PlainTensor<float>());
+        }
+        p_dst_buffer->resize({num_threads, q_len, head_size});
+        parallel_for2d(B, H, [&](size_t b, size_t h) {
+            size_t thread_id = static_cast<size_t>(parallel_get_thread_num());
+            const float* q_ptr = &query.at({b, h, 0, 0});
+            const float* k_ptr = &present_key.at({b, h, 0, 0});
+            const float* v_ptr = &present_value.at({b, h, 0, 0});
+            float* qk = &(p_qk_buffer->at({thread_id, 0, 0}));
+            float* dst = &(p_dst_buffer->at({thread_id, 0, 0}));
+            ov_sgemm("N", "T", q_len, kv_len, head_size, 1.0f, q_ptr, head_size, k_ptr, head_size, 0.f, qk, kv_len, 1);
+            auto* mask = &attention_mask.at({b, 0, 0, 0});
+            for (size_t m = 0; m < q_len; m++) {
+                size_t offset = m * kv_len;
+                // apply attention mask
+                // sofmax
+                InferenceEngine::Extensions::Cpu::XARCH::scale_add_softmax(&qk[offset],
+                                                                           d_scale,
+                                                                           mask,
+                                                                           update_len + m + 1,
+                                                                           kv_len);
+            }
+            ov_sgemm("N", "N", q_len, head_size, kv_len, 1.0f, qk, kv_len, v_ptr, head_size, 0.f, dst, head_size, 1);
+            // output [B, L1, H*S]
+            for (size_t m = 0; m < q_len; m++) {
+                const float* src = dst + m * head_size;
+                std::copy(src, src + head_size, &output_emb.at({b, m, h * head_size}));
+            }
+        });
+    }
+    // buffer to hold qk temp
+    std::unique_ptr<PlainTensor<float>> p_qk_buffer = nullptr;
+    // buffer to hold qkv output
+    std::unique_ptr<PlainTensor<float>> p_dst_buffer = nullptr;
+};
+
+#ifdef OV_CPU_WITH_LLM
+template <>
 struct MHA_kernel<KT_LLMDNN, ov::bfloat16> {
     llmdnn::mha_gpt m_kernel;
     bool m_kernel_initialized = false;
@@ -345,6 +423,7 @@ struct MHA_kernel<KT_LLMDNN, ov::bfloat16> {
         });
     }
 };
+#endif
 
 }  // namespace node
 }  // namespace intel_cpu

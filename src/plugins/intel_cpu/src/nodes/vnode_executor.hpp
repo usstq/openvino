@@ -1,4 +1,3 @@
-
 // Copyright (C) 2018-2023 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
@@ -13,6 +12,7 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include "openvino/core/parallel.hpp"
 
 #include "utils/plain_tensor.hpp"
 #include "vnode_kernels.hpp"
@@ -111,8 +111,7 @@ struct gpt2_attention_executor : public vnode_executor {
         // std::cout << "query=" << query << std::endl; asm("int3");
         // concat pask_key/value & k/v into present_key/value
         query.resize({B, H, L1, S});
-        for (size_t b = 0; b < B; b++) {
-            for (size_t h = 0; h < H; h++) {
+        parallel_for2d(B, H, [&](size_t b, size_t h) {
                 memcpy(&present_key.at({b, h, 0, 0}), &past_key.at({b, h, 0, 0}), sizeof(RT) * L0 * S);
                 memcpy(&present_value.at({b, h, 0, 0}), &past_value.at({b, h, 0, 0}), sizeof(RT) * L0 * S);
 
@@ -124,8 +123,7 @@ struct gpt2_attention_executor : public vnode_executor {
                     memcpy(&present_key.at({b, h, L0 + p, 0}), k, sizeof(RT) * S);
                     memcpy(&present_value.at({b, h, L0 + p, 0}), v, sizeof(RT) * S);
                 }
-            }
-        }
+        });
 
         kernel(query, present_key, present_value, attention_mask, output_emb);
     }
@@ -414,7 +412,6 @@ struct bloom_attention_executor : public vnode_executor {
         kernel(query, present_key2, present_value2, attention_mask, output_emb);
     }
 };
-
 }  // namespace node
 }  // namespace intel_cpu
 }  // namespace ov

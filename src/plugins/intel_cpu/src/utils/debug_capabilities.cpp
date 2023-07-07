@@ -7,9 +7,9 @@
 #include <oneapi/dnnl/dnnl.hpp>
 #include "memory_desc/blocked_memory_desc.h"
 #include "onednn/iml_type_mapper.h"
+#include "debug_capabilities.h"
 #ifdef CPU_DEBUG_CAPS
 
-#include "debug_capabilities.h"
 #include "node.h"
 #include "edge.h"
 #include <iomanip>

@@ -686,7 +686,7 @@ MHADynamicVNodeIn::MHADynamicVNodeIn() {
 MHADynamicVNodeOut::MHADynamicVNodeOut() {
     MATCHER_SCOPE(MHADynamicVNodeOut);
     auto vnode = ov::pass::pattern::wrap_type<VNode>();
-    std::string vnode_whitelist = std::getenv("VNODE_WLIST") ? std::getenv("VNODE_WLIST") : "";
+    std::string vnode_whitelist = std::getenv("VNODE_WLIST") ? std::getenv("VNODE_WLIST") : "gpt2_attention,";
 
     matcher_pass_callback callback = [=](ngraph::pattern::Matcher& m) {
         auto& pattern_to_output = m.get_pattern_value_map();
