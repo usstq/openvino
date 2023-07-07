@@ -381,24 +381,25 @@ std::shared_ptr<Node> GenConst(std::initializer_list<T> v, values_info vt = null
 template <class... Args>
 std::shared_ptr<Node> GenPattern(const std::vector<GenPatternNode>& inputs,
                                  values_info vt,
-                                 const std::vector<attr>& attrs = {}) {
+                                 const std::vector<attr>& attrs = {},
+                                 const char * friendly_name = "") {
     OutputVector ovs;
     for (auto& i : inputs) {
         ovs.push_back(i.node);
     }
 
-    auto pattern_node = ov::pass::pattern::wrap_type<Args...>(ovs, [vt, attrs](const Output<Node>& value) {
+    auto pattern_node = ov::pass::pattern::wrap_type<Args...>(ovs, [vt, attrs, friendly_name](const Output<Node>& value) {
         if (!vt.predicate(value)) {
-            verbose_log("*mismatched GenPattern vt ", value);
+            verbose_log("*mismatched GenPattern ", friendly_name, "  vt ", value);
             return false;
         }
 
         // match parent node with attribute a0/a1/...
         if (!attr_compatible(*value.get_node_shared_ptr(), attrs)) {
-            verbose_log("*mismatched GenPattern attr ", value);
+            verbose_log("*mismatched GenPattern ", friendly_name, " attr ", value);
             return false;
         }
-        verbose_log(" matched GenPattern ", value);
+        verbose_log(" matched GenPattern ", friendly_name, " == ", value);
         return true;
     });
 

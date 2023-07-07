@@ -325,8 +325,6 @@ std::atomic<uint64_t> tsc_ticks_base(0);
 bool profile_enabled = false;
 std::shared_ptr<ProfileData> profile_data_null;
 
-static std::mutex finalize_mutex;
-static std::vector<ProfilerManager*> active_profilers;
 static const char* dump_file_name = "ov_profile.json";
 static bool dump_file_created = false;
 
@@ -354,27 +352,22 @@ ProfilerManager::ProfilerManager() {
     tid = std::this_thread::get_id();
     std::stringstream ss;
     serial = totalProfilerManagers.fetch_add(1);
-    ss << "=== ProfilerManager #" << serial << " : is " << (enabled? "enabled":"disabled") << " ====" << std::endl;
+    ss << "=== ProfilerManager #" << serial << "(" << this << ") : is " << (enabled? "enabled":"disabled") << " ====" << std::endl;
     std::cout << ss.str();
-
-    std::lock_guard<std::mutex> lock_g(finalize_mutex);
-    active_profilers.push_back(this);
 }
 
 void ProfilerManager::finalize() {
     // finalization is serialized by this mutex
-    std::lock_guard<std::mutex> lock_g(finalize_mutex);
-    for (auto & p : active_profilers) {
-        p->_do_finalize();
-    }
-    active_profilers.clear();
+    _do_finalize();
 }
 
 void ProfilerManager::_do_finalize() {
+    static std::mutex g_mutex;
+    std::lock_guard<std::mutex> guard(g_mutex);
     // collect all entries
+    if (!enabled) return;
     if (finalized) return;
     finalized = true;
-    if (!enabled) return;
     auto data_size = all_data.size();
     auto counter_size = all_counters.size();
     if (data_size) {

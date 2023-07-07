@@ -6,6 +6,7 @@
 
 #include "openvino/core/graph_util.hpp"
 #include "transformations/itt.hpp"
+#include "utils/debug_capabilities.h"
 
 void dump_subgraph(const ngraph::OutputVector& inputs, const ngraph::OutputVector& outputs, std::string model_name) {
     static bool dump_vnode = std::getenv("DUMP_VNODE") ? atoi(std::getenv("DUMP_VNODE")) : 1;
@@ -26,8 +27,10 @@ void dump_subgraph(const ngraph::OutputVector& inputs, const ngraph::OutputVecto
     // build model and serialize
     {
         auto model = std::make_shared<ov::Model>(outputs, params);
-        ov::serialize(model, model_name + ".xml", "/dev/null");
-        std::cout << " VNode: " << model_name << " is dumpped into " << model_name << ".xml" << std::endl;
+        ov::intel_cpu::DumpModel dumpper(model_name);
+        dumpper.run_on_model(model);
+        //ov::serialize(model, model_name + ".xml", "/dev/null");
+        //std::cout << " VNode: " << model_name << " is dumpped into " << model_name << ".xml" << std::endl;
     }
 
     // recover inputs
@@ -42,7 +45,7 @@ ov::intel_cpu::VNode::VNode(const ngraph::OutputVector& args,
     : Op({args}),
       m_org_outputs(org_outputs),
       m_vtype(vtype) {
-    dump_subgraph(args, m_org_outputs, get_friendly_name());
+    dump_subgraph(args, m_org_outputs, vtype + "_" + get_friendly_name());
     validate_and_infer_types();
 }
 

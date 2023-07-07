@@ -744,7 +744,10 @@ std::ostream & operator<<(std::ostream & os, const dnnl::memory::format_tag form
     return os;
 }
 
-DumpModel::DumpModel(const std::string& file_name) : file_name(file_name) {
+DumpModel::DumpModel(const std::string& _file_name) {
+    static int dump_index = 0;
+    file_name = "dump_model" + std::to_string(dump_index) + "_" + _file_name;
+    dump_index++;
 }
 
 void stream_output_constant(std::ostream & os, op::v0::Constant * constop) {
