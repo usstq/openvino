@@ -127,9 +127,11 @@ inline void exp_reduce_sum(float* a, const float max, const size_t size, float& 
     size_t len = size;
     size_t i = 0;
     __m512 v_a;
+    auto v_max = _mm512_set1_ps(max);
     auto v_sum = _mm512_set1_ps(0.0f);
     while (len > 15) {
         v_a = _mm512_loadu_ps(a + i);
+        v_a = _mm512_sub_ps(v_a, v_max);
         exp_ps_avx512(v_a);
         v_sum = _mm512_add_ps(v_sum, v_a);
         _mm512_storeu_ps(a + i, v_a);
@@ -140,6 +142,7 @@ inline void exp_reduce_sum(float* a, const float max, const size_t size, float& 
     if (len > 0) {
         __mmask16 mask = (1 << (size - i)) - 1;
         v_a = _mm512_maskz_loadu_ps(mask, a + i);
+        v_a = _mm512_sub_ps(v_a, v_max);
         exp_ps_avx512(v_a);
         v_sum = _mm512_mask_add_ps(v_sum, mask, v_a, v_sum);
         _mm512_mask_storeu_ps(a + i, mask, v_a);
