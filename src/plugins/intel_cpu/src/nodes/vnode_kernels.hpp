@@ -348,56 +348,6 @@ struct MHA_kernel<KT_MLAS, float> {
     std::unique_ptr<PlainTensor<float>> p_dst_buffer = nullptr;
 };
 
-struct MHA_FP32_kernel {
-    MHA_FP32_kernel() = default;
-    // Q, K, V is ready, do attention
-    // qkv           [B, L1, 3*(H*S)]
-    // curKey   [B, H, L0+L1, S]
-    // curValue [B, H, L0+L1, S]
-    // attnMask [B, 1, 1, L0+L1]
-    // output_emb    [B, L1, H*S]
-    // qk        [L1, L0+L1]
-    // dst       [L1, S]
-    void operator()(PlainTensor<float>& qkv,
-                 PlainTensor<float>& curKey,
-                 PlainTensor<float>& curValue,
-                 PlainTensor<float>& attnMask,
-                 PlainTensor<float>& output,
-                 float* qk,
-                 float* dst,
-                 size_t batchIndex,
-                 size_t headIndex) {
-        auto L1 = qkv.size(1);
-        auto S = curKey.size(3);
-        auto L0 = curKey.size(2) - L1;
-        auto qkvSize = qkv.size(2);
-        // use dot-product to save memory cost
-        std::vector<float> word_vec(S, 0.0f);
-        float d_scale = 1.0f / sqrt(S);
-        // Q x K^T =[L1, d] * [L0 + L1, d]^T
-        const float* qBasePtr = &qkv.at({batchIndex, 0, 0}) + headIndex * S;
-        const float* kBasePtr = &curKey.at({batchIndex, headIndex, 0, 0});
-        const float* vBasePtr = &curValue.at({batchIndex, headIndex, 0, 0});
-        ov_sgemm("N", "T", L1, L0 + L1, S, 1.0f, qBasePtr, qkvSize, kBasePtr, S, 0.f, qk, L0 + L1, 1);
-        // iterate m
-        auto* mask = &attnMask.at({batchIndex, 0, 0, 0});
-        for (size_t m = 0; m < L1; m++) {
-            size_t offset = m * (L0 + L1);
-            // apply attention mask
-            // sofmax
-            InferenceEngine::Extensions::Cpu::XARCH::scale_add_softmax(&qk[offset], d_scale, mask, L0 + m + 1, L0 + L1);
-        }
-
-        ov_sgemm("N", "N", L1, S, L0 + L1, 1.0f, qk, L0 + L1, vBasePtr, S, 0.f, dst, S, 1);
-
-        // output [B, L1, H*S]
-        for (size_t m = 0; m < L1; m++) {
-            const float * src = dst + m * S;
-            std::copy(src, src + S, &output.at({batchIndex, m, headIndex * S}));
-        }
-    }
-};
-
 #ifdef OV_CPU_WITH_LLM
 template <>
 struct MHA_kernel<KT_LLMDNN, ov::bfloat16> {
