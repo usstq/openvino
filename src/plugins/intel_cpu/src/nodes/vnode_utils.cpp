@@ -53,6 +53,51 @@ inline void scale_add_reduce_max(float* a, const float scale, const float* b, co
     }
 #endif
 }
+
+inline void scale_add2_reduce_max(float* a, const float scale, const float* b, const float* c, const size_t size, float& max) {
+#if defined(HAVE_AVX512F)
+    auto v_max = _mm512_set1_ps(std::numeric_limits<float>::lowest());
+    auto v_scale = _mm512_set1_ps(scale);
+    auto v_a = v_max;
+    auto v_b = v_max;
+    auto v_c = v_max;
+    size_t i = 0;
+    size_t len = size;
+    // process vector body
+    while (len > 15) {
+        v_a = _mm512_loadu_ps(a + i);
+        v_b = _mm512_loadu_ps(b + i);
+        v_c = _mm512_loadu_ps(c + i);
+        v_a = _mm512_fmadd_ps(v_a, v_scale, v_b);
+        v_a = _mm512_add_ps(v_a, v_c);
+        v_max = _mm512_max_ps(v_max, v_a);
+        _mm512_storeu_ps(a + i, v_a);
+        len -= 16;
+        i += 16;
+    }
+
+    // process tails
+    if (len > 0) {
+        __mmask16 mask = (1 << (size - i)) - 1;
+        v_a = _mm512_maskz_loadu_ps(mask, a + i);
+        v_b = _mm512_maskz_loadu_ps(mask, b + i);
+        v_c = _mm512_maskz_loadu_ps(mask, c + i);
+        v_a = _mm512_fmadd_ps(v_a, v_scale, v_b);
+        v_a = _mm512_add_ps(v_a, v_c);
+        v_max = _mm512_mask_max_ps(v_max, mask, v_a, v_max);
+        _mm512_mask_storeu_ps(a + i, mask, v_a);
+    }
+
+    max = _mm512_reduce_max_ps(v_max);
+#else
+    for (size_t i = 0; i < size; i++) {
+        a[i] *= scale;
+        a[i] += b[i];
+        max = a[i] > max ? a[i] : max;
+    }
+#endif
+}
+
 #if defined(HAVE_AVX512F)
 inline void exp_ps_avx512(__m512 & src) {
     static __m512 exp_ln_flt_min_f = _mm512_castsi512_ps(_mm512_set1_epi32(0xc2aeac50));    // log(FLT_MIN)
@@ -182,9 +227,12 @@ inline void multiply_scalar(float* a, const float val, const size_t size) {
 #endif
 }
 
-void scale_add_softmax(float* a, float scale, float* mask, size_t len, size_t total_size) {
+void scale_add_softmax(float* a, float scale, float* mask, float* aliba, size_t len, size_t total_size) {
     float max = std::numeric_limits<float>::lowest();
-    scale_add_reduce_max(a, scale, mask, len, max);
+    if (aliba == nullptr)
+        scale_add_reduce_max(a, scale, mask, len, max);
+    else
+        scale_add2_reduce_max(a, scale, mask, aliba, len, max);
     float sum = 0.0f;
     // exp sum
     exp_reduce_sum(a, max, len, sum);

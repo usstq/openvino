@@ -383,29 +383,28 @@ struct bloom_attention_executor : public vnode_executor {
         auto past_value2 = past_value.reshape({B, H, L0, S});
 
         query.resize({B, H, L1, S});
-        for (size_t b = 0; b < B; b++) {
-            for (size_t h = 0; h < H; h++) {
-                // past_key
-                for (size_t s = 0; s < S; s++) {
-                    memcpy(&present_key2.at({b, h, s, 0}), &past_key2.at({b, h, s, 0}), sizeof(RT) * L0);
-                    for (size_t p = 0; p < L1; p++) {
-                        present_key2.at({b, h, s, L0 + p}) = qkv_5d.at({b, p, h, 1, s});
-                    }
-                }
 
-                // past_value
-                for (size_t p = 0; p < L0; p++) {
-                    memcpy(&present_value2.at({b, h, p, 0}), &past_value2.at({b, h, p, 0}), sizeof(RT) * S);
-                }
+        parallel_for2d(B, H, [&](size_t b, size_t h) {
+            // past_key
+            for (size_t s = 0; s < S; s++) {
+                memcpy(&present_key2.at({b, h, s, 0}), &past_key2.at({b, h, s, 0}), sizeof(RT) * L0);
                 for (size_t p = 0; p < L1; p++) {
-                    // current q,k,v
-                    auto* q = &qkv_5d.at({b, p, h, 0, 0});
-                    auto* v = &qkv_5d.at({b, p, h, 2, 0});
-                    memcpy(&query.at({b, h, p, 0}), q, sizeof(RT) * S);
-                    memcpy(&present_value2.at({b, h, L0 + p, 0}), v, sizeof(RT) * S);
+                    present_key2.at({b, h, s, L0 + p}) = qkv_5d.at({b, p, h, 1, s});
                 }
             }
-        }
+
+            // past_value
+            for (size_t p = 0; p < L0; p++) {
+                memcpy(&present_value2.at({b, h, p, 0}), &past_value2.at({b, h, p, 0}), sizeof(RT) * S);
+            }
+            for (size_t p = 0; p < L1; p++) {
+                // current q,k,v
+                auto* q = &qkv_5d.at({b, p, h, 0, 0});
+                auto* v = &qkv_5d.at({b, p, h, 2, 0});
+                memcpy(&query.at({b, h, p, 0}), q, sizeof(RT) * S);
+                memcpy(&present_value2.at({b, h, L0 + p, 0}), v, sizeof(RT) * S);
+            }
+        });
 
         present_key2 = present_key2.permute({0, 1, 3, 2});
         kernel.set_alibi(alibi);

@@ -62,6 +62,7 @@ static vnode_executor_map register_all() {
     register_executor<gpt2_attention_executor<KT_MLAS, float>>(vem, "gpt2_attention,MLAS,FP32");
     register_executor<gptneox_attention_executor<KT_MLAS, float>>(vem, "gptneox_attention,MLAS,FP32");
     register_executor<open_llama_attention_executor<KT_MLAS, float>>(vem, "open_llama_attention,MLAS,FP32");
+    register_executor<bloom_attention_executor<KT_MLAS, float>>(vem, "bloom_attention,MLAS,FP32");
     #endif
     #ifdef OV_CPU_WITH_LLM
     register_executor<gpt2_attention_executor<KT_LLMDNN, ov::bfloat16>>(vem, "gpt2_attention,LLMDNN,BF16");
@@ -91,6 +92,7 @@ static std::shared_ptr<vnode_executor> vnode_executor_create(std::string vtype, 
         exec->signature = signature;
         return exec;
     }
+    std::cout << " vnode_executor_create failed for " << signature << std::endl;
     return nullptr;
 }
 
@@ -136,7 +138,7 @@ void VNode::initSupportedPrimitiveDescriptors() {
 
     m_executor = vnode_executor_create(m_vtype, runtime_precision);
     if (!m_executor) {
-        IE_THROW() << errorPrefix << " unsupported vnode " << m_vtype;
+        IE_THROW() << errorPrefix << " unsupported vnode " << m_vtype << " with " << runtime_precision;
     }
 
     std::cout << getName() << " created executor: " << m_executor->signature << std::endl;

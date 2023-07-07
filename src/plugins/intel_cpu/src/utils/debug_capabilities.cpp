@@ -404,6 +404,7 @@ std::ostream & operator<<(std::ostream & os, const Node &c_node) {
     }
 
     // output result values
+    /*
     for (int i = 0; i < num_output_port; i++) {
         auto edge = node.getChildEdgeAt(i);
         if (edge->getStatus() != Edge::Status::NotAllocated) {
@@ -413,6 +414,7 @@ std::ostream & operator<<(std::ostream & os, const Node &c_node) {
             }
         }
     }
+    */
     // primArgs
     /*
     if (node.primArgs.size()) {

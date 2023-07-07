@@ -53,48 +53,43 @@ struct RoPE_kernel {
         auto rotary_dims = rotary_emb_cos.size(3);
         auto half_rotary_dims = rotary_dims / 2;
         // copy past kv into present
-        for (size_t b = 0; b < B; b++) {
-            for (size_t h = 0; h < H; h++) {
-                memcpy(&present_key.at({b, h, 0, 0}), &past_key.at({b, h, 0, 0}), sizeof(T) * L0 * S);
-                memcpy(&present_value.at({b, h, 0, 0}), &past_value.at({b, h, 0, 0}), sizeof(T) * L0 * S);
-            }
-        }
+        parallel_for2d(B, H, [&](size_t b, size_t h) {
+            memcpy(&present_key.at({b, h, 0, 0}), &past_key.at({b, h, 0, 0}), sizeof(T) * L0 * S);
+            memcpy(&present_value.at({b, h, 0, 0}), &past_value.at({b, h, 0, 0}), sizeof(T) * L0 * S);
+        });
 
         // rotary embedding for word vector at each position p
         // meanwhile concat is performed
-        for (size_t b = 0; b < B; b++) {
-            for (size_t h = 0; h < H; h++) {
-                for (size_t p = L0; p < L0 + L1; p++) {
-                    auto* q = &cur_query.at({b, p - L0, h, 0});
-                    auto* k = &cur_key.at({b, p - L0, h, 0});
-                    auto* v = &cur_value.at({b, p - L0, h, 0});
-                    auto* present_k = &present_key.at({b, h, p, 0});    // f32[B, H, L0+L1, 64]
-                    auto* present_v = &present_value.at({b, h, p, 0});  // f32[B, H, L0+L1, 64]
-                    auto* q_embed = &query_emb.at({b, h, p - L0, 0});
-                    // q_embed = (q * cos) + (rotate_half(q) * sin)
-                    // k_embed = (k * cos) + (rotate_half(k) * sin)
-                    auto* cos = &rotary_emb_cos({0, 0, p, 0});
-                    auto* sin = &rotary_emb_sin({0, 0, p, 0});
+        parallel_for3d(B, H, L1, [&](size_t b, size_t h, size_t p) {
+            p += L0;
+            auto* q = &cur_query.at({b, p - L0, h, 0});
+            auto* k = &cur_key.at({b, p - L0, h, 0});
+            auto* v = &cur_value.at({b, p - L0, h, 0});
+            auto* present_k = &present_key.at({b, h, p, 0});    // f32[B, H, L0+L1, 64]
+            auto* present_v = &present_value.at({b, h, p, 0});  // f32[B, H, L0+L1, 64]
+            auto* q_embed = &query_emb.at({b, h, p - L0, 0});
+            // q_embed = (q * cos) + (rotate_half(q) * sin)
+            // k_embed = (k * cos) + (rotate_half(k) * sin)
+            auto* cos = &rotary_emb_cos({0, 0, p, 0});
+            auto* sin = &rotary_emb_sin({0, 0, p, 0});
 
-                    size_t s = 0;
-                    for (; s < half_rotary_dims; s++) {
-                        q_embed[s] = cos[s] * q[s] + sin[s] * (-q[s + half_rotary_dims]);
-                        present_k[s] = cos[s] * k[s] + sin[s] * (-k[s + half_rotary_dims]);
-                        present_v[s] = v[s];
-                    }
-                    for (; s < rotary_dims; s++) {
-                        q_embed[s] = cos[s] * q[s] + sin[s] * (q[s - half_rotary_dims]);
-                        present_k[s] = cos[s] * k[s] + sin[s] * (k[s - half_rotary_dims]);
-                        present_v[s] = v[s];
-                    }
-                    for (; s < S; s++) {
-                        q_embed[s] = q[s];
-                        present_k[s] = k[s];
-                        present_v[s] = v[s];
-                    }
-                }
+            size_t s = 0;
+            for (; s < half_rotary_dims; s++) {
+                q_embed[s] = cos[s] * q[s] + sin[s] * (-q[s + half_rotary_dims]);
+                present_k[s] = cos[s] * k[s] + sin[s] * (-k[s + half_rotary_dims]);
+                present_v[s] = v[s];
             }
-        }
+            for (; s < rotary_dims; s++) {
+                q_embed[s] = cos[s] * q[s] + sin[s] * (q[s - half_rotary_dims]);
+                present_k[s] = cos[s] * k[s] + sin[s] * (k[s - half_rotary_dims]);
+                present_v[s] = v[s];
+            }
+            for (; s < S; s++) {
+                q_embed[s] = q[s];
+                present_k[s] = k[s];
+                present_v[s] = v[s];
+            }
+        });
     }
 };
 
@@ -302,6 +297,7 @@ struct MHA_kernel<KT_MLAS, float> {
         auto q_len = query.size(2);
         auto head_size = query.size(3);
         auto kv_len = present_key.size(2);
+        auto attn_mask_qlen = attention_mask.size(2);
         auto update_len = kv_len - q_len;
         float d_scale = 1.0f / sqrt(head_size);
         // initialize temp buffer for qk matmul and  qkv matmul
@@ -314,6 +310,7 @@ struct MHA_kernel<KT_MLAS, float> {
             p_dst_buffer.reset(new PlainTensor<float>());
         }
         p_dst_buffer->resize({num_threads, q_len, head_size});
+        auto k_stride_s = present_key.stride(3);
         parallel_for2d(B, H, [&](size_t b, size_t h) {
             size_t thread_id = static_cast<size_t>(parallel_get_thread_num());
             const float* q_ptr = &query.at({b, h, 0, 0});
@@ -321,16 +318,26 @@ struct MHA_kernel<KT_MLAS, float> {
             const float* v_ptr = &present_value.at({b, h, 0, 0});
             float* qk = &(p_qk_buffer->at({thread_id, 0, 0}));
             float* dst = &(p_dst_buffer->at({thread_id, 0, 0}));
-            ov_sgemm("N", "T", q_len, kv_len, head_size, 1.0f, q_ptr, head_size, k_ptr, head_size, 0.f, qk, kv_len, 1);
-            auto* mask = &attention_mask.at({b, 0, 0, 0});
+            if (k_stride_s == 1)
+                ov_sgemm("N", "T", q_len, kv_len, head_size, 1.0f, q_ptr, head_size, k_ptr, head_size, 0.f, qk, kv_len, 1);
+            else
+                ov_sgemm("N", "N", q_len, kv_len, head_size, 1.0f, q_ptr, head_size, k_ptr, kv_len, 0.f, qk, kv_len, 1);
+
             for (size_t m = 0; m < q_len; m++) {
                 size_t offset = m * kv_len;
                 // apply attention mask
                 // sofmax
+                auto ncausal = update_len + m + 1;
+                if (attn_mask_qlen > 1) {
+                    // this imply attn mask is combined with causal mask
+                    ncausal = kv_len;
+                }
+                auto* mask = &attention_mask.at({b, 0, std::min(m, attn_mask_qlen - 1), 0});
                 InferenceEngine::Extensions::Cpu::XARCH::scale_add_softmax(&qk[offset],
                                                                            d_scale,
                                                                            mask,
-                                                                           update_len + m + 1,
+                                                                           p_alibi ? &p_alibi->at({h, 0, 0}) : nullptr,
+                                                                           ncausal,
                                                                            kv_len);
             }
             ov_sgemm("N", "N", q_len, head_size, kv_len, 1.0f, qk, kv_len, v_ptr, head_size, 0.f, dst, head_size, 1);
