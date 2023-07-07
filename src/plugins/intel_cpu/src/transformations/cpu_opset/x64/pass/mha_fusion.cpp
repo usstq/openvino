@@ -617,8 +617,10 @@ public:
         MATCHER_SCOPE(VNodeIn);
         std::string vnode_whitelist = std::getenv("VNODE_WLIST") ? std::getenv("VNODE_WLIST") : "";
 
-        if (vnode_whitelist.find(std::string(vtype) + ",") == std::string::npos) {
-            return;
+        if (!vnode_whitelist.empty()) {
+            if (vnode_whitelist.find(std::string(vtype) + ",") == std::string::npos) {
+                return;
+            }
         }
 
         OutputVector fake_inputs;

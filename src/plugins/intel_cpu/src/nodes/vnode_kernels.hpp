@@ -119,7 +119,6 @@ struct RoPE_kernel<KT_LLMDNN, ov::bfloat16> {
         auto S = past_key.size(3);
         auto rotary_dims = rotary_emb_cos.size(3);
         if (!m_kernel_initialized) {
-            std::cout << "::::::::::::::;  " << __func__ << " llmdnn::emb_gpt " << std::endl;
             if (!m_kernel_emb.create(llmdnn::emb_gpt::create_param{
                     .num_heads = H,
                     .head_size = S,
@@ -288,7 +287,6 @@ struct MHA_kernel<KT_LLMDNN, ov::bfloat16> {
                     PlainTensor<ov::bfloat16>& present_value,
                     PlainTensor<float>& attention_mask,  // [batch, 1, query_seq_len, key_seq_len]
                     PlainTensor<ov::bfloat16>& attn_output) {
-        assert(p_alibi == nullptr);
         int max_position_embeddings = 2048;
         auto B = query.size(0);
         auto H = query.size(1);
@@ -297,7 +295,6 @@ struct MHA_kernel<KT_LLMDNN, ov::bfloat16> {
         auto kv_len = present_key.size(2);
         auto is_causal_in_attention = attention_mask.size(2) > 1;
         if (!m_kernel_initialized) {
-            std::cout << "::::::::::::::;  " << __func__ << " llmdnn::mha_gpt " << std::endl;
             if (!m_kernel.create(llmdnn::mha_gpt::create_param{
                     .num_heads = H,
                     .head_size = head_size,
@@ -308,6 +305,7 @@ struct MHA_kernel<KT_LLMDNN, ov::bfloat16> {
                     .normal_factor = 1.0f / sqrt(head_size),
                     .qkv_precision = llmdnn::data_type_t::dnnl_bf16,
                     .dst_precision = llmdnn::data_type_t::dnnl_bf16,
+                    .is_bloom = p_alibi != nullptr,
                 })) {
                 IE_THROW() << __func__ << " llmdnn::mha_gpt::create failed " << std::endl;
             }
@@ -338,6 +336,7 @@ struct MHA_kernel<KT_LLMDNN, ov::bfloat16> {
                 (kv_len)*head_size,  // kv stride for next head; kv may be preallocated a big buffer
                                      // expected quant schema:
                                      //   q,k,v use per tensor quant, attn_output may use per tensor/channel quant
+            .alibi = p_alibi ? p_alibi->data() : nullptr,
             .q_dequant = 1.0f,
             .k_dequant = 1.0f,
             .v_dequant = 1.0f,

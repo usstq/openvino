@@ -63,6 +63,7 @@ static vnode_executor_map register_all() {
 
     register_executor<bloom_attention_executor<KT_REF, float>>(vem, "bloom_attention,REF,FP32");
     register_executor<bloom_attention_executor<KT_REF, ov::bfloat16>>(vem, "bloom_attention,REF,BF16");
+    register_executor<bloom_attention_executor<KT_LLMDNN, ov::bfloat16>>(vem, "bloom_attention,LLMDNN,BF16");
 
     return vem;
 }
