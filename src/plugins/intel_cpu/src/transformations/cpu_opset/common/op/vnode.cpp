@@ -9,7 +9,7 @@
 #include "utils/debug_capabilities.h"
 
 void dump_subgraph(const ngraph::OutputVector& inputs, const ngraph::OutputVector& outputs, std::string model_name) {
-    static bool dump_vnode = std::getenv("DUMP_VNODE") ? atoi(std::getenv("DUMP_VNODE")) : 1;
+    static bool dump_vnode = std::getenv("DUMP_VNODE") ? atoi(std::getenv("DUMP_VNODE")) : 0;
 
     if (!dump_vnode)
         return;

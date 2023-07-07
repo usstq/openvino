@@ -619,9 +619,14 @@ void Transformations::PostLpt() {
     CPU_REGISTER_PASS_X64(postLPTPassManager, ConvertFqRnnToQuantizedRnn);
 
     // Execute VNode before snippets. Otherwise some part in VNode will be converted to Subgraph
-    CPU_REGISTER_PASS_X64(postLPTPassManager, DumpModel, "VNode0.txt");
+    bool dump_vnode = std::getenv("DUMP_VNODE") ? atoi(std::getenv("DUMP_VNODE")) : 0;
+    if (dump_vnode)
+        CPU_REGISTER_PASS_X64(postLPTPassManager, DumpModel, "VNode0.txt");
+
     CPU_REGISTER_PASS_X64(postLPTPassManager, MHADynamicVNodeIn);
-    CPU_REGISTER_PASS_X64(postLPTPassManager, DumpModel, "VNode1.txt");
+
+    if (dump_vnode)
+        CPU_REGISTER_PASS_X64(postLPTPassManager, DumpModel, "VNode1.txt");
     //CPU_REGISTER_PASS_COMMON(manager, ov::pass::Validate);
     //CPU_REGISTER_PASS_X64(postLPTPassManager, MHADynamicVNodeOut);
     //CPU_REGISTER_PASS_X64(postLPTPassManager, DumpModel, "VNode2.txt");
