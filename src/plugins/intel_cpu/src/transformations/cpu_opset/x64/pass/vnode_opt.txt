@@ -11,77 +11,79 @@ OPTForCausalLM
 OutputVector vnode_opt_attn(const OutputVector& inputs) {
     int ii = 0;
 
-    // _decoder_layers_1_self_attn_v_proj_Add   : "f32[?,?,2560]"   v_proj
-    // _decoder_layers_1_self_attn_k_proj_Add   : "f32[?,?,2560]"   k_proj
-    // _decoder_layers_1_self_attn_Mul          : "f32[?,?,2560]"   q_proj
+    // v_proj_Add   : "f32[?,?,2560]"   v_proj
+    // k_proj_Add   : "f32[?,?,2560]"   k_proj
+    // Mul          : "f32[?,?,2560]"   q_proj
     // auto past_key_values_1_value = GenPattern<opset1::Parameter>({}, "f32[?,32,?,80]", {{"shape", "[?,32,?,80]"}, {"element_type", "f32"}});   //  past_key_values.1.value
     // auto past_key_values_1_key = GenPattern<opset1::Parameter>({}, "f32[?,32,?,80]", {{"shape", "[?,32,?,80]"}, {"element_type", "f32"}});   //  past_key_values.1.key
     // auto _decoder_Add_2 = GenPattern<opset1::Broadcast>({Add_85865, Maximum_85867, Constant_145033}, "f32[?,1,?,?]", {{"mode", "numpy"}});   //  /decoder/Add_2
-    // auto _decoder_layers_1_self_attn_Shape = GenPattern<opset1::ShapeOf>({_decoder_layers_1_self_attn_layer_norm_Add_1}, "i32[3]", {{"type_relax", 1}, {"input_data_types", "[]"}, {"output_data_types", "[i32]"}});   //  /decoder/layers.1/self_attn/Shape
+    // auto Shape = GenPattern<opset1::ShapeOf>({layer_norm_Add_1}, "i32[3]", {{"type_relax", 1}, {"input_data_types", "[]"}, {"output_data_types", "[i32]"}});   //  /decoder/layers.1/self_attn/Shape
 
-    auto _decoder_layers_1_self_attn_Shape = inputs[ii++];
+    auto Mul = inputs[ii++];         // "f32[B,L,H*S]"
+    auto k_proj_Add = inputs[ii++];  // "f32[B,L,H*S]"
+    auto v_proj_Add = inputs[ii++];  // "f32[B,L,H*S]"
+    auto past_key_values_1_key = inputs[ii++];                   // "f32[B,32,L,80]"
+    auto past_key_values_1_value = inputs[ii++];                 // "f32[B,32,L,80]"
+    auto _decoder_Add_2 = inputs[ii++];                          // "f32[?,1,?,?]" attention mask + causal mask
+    auto Shape = inputs[ii++];       // "i32[3]"
 
-    auto _decoder_layers_1_self_attn_Mul = inputs[ii++];
-    auto _decoder_layers_1_self_attn_k_proj_Add = inputs[ii++];
-    auto _decoder_layers_1_self_attn_v_proj_Add = inputs[ii++];
-    auto past_key_values_1_key = inputs[ii++];
-    auto past_key_values_1_value = inputs[ii++];
-    auto _decoder_Add_2 = inputs[ii++];                // attention mask + causal mask
+    auto H = Symbol("H"); // num_attention_heads             8
+    auto S = Symbol("S"); // hidden_size/num_attention_heads 
 
-    auto Gather_103550 = GenPattern<opset8::Gather>({_decoder_layers_1_self_attn_Shape, {0, 1}, 0}, "i32[2]", {{"batch_dims", 0}});   //  Gather_103550
-    auto _decoder_layers_1_self_attn_Concat_4 = GenPattern<opset1::Concat>({Gather_103550, {32}, {80}}, "i32[4]", {{"axis", 0}});   //  /decoder/layers.1/self_attn/Concat_4
-    auto _decoder_layers_1_self_attn_Reshape_2 = GenPattern<opset1::Reshape>({_decoder_layers_1_self_attn_Mul, _decoder_layers_1_self_attn_Concat_4}, "f32[?,?,32,80]", {{"special_zero", 1}});   //  /decoder/layers.1/self_attn/Reshape_2
+    auto Gather_103550 = GenPattern<opset8::Gather>({Shape, {0, 1}, 0}, "i32[2]", {{"batch_dims", 0}});   //  Gather_103550
+    auto Concat_4 = GenPattern<opset1::Concat>({Gather_103550, {H}, {S}}, "i32[4]", {{"axis", 0}});   //  /decoder/layers.1/self_attn/Concat_4
+    auto Reshape_2 = GenPattern<opset1::Reshape>({Mul, Concat_4}, "f32[?,?,?,?]", {{"special_zero", 1}});   //  /decoder/layers.1/self_attn/Reshape_2
 
-    auto _decoder_layers_1_self_attn_Transpose_2 = GenPattern<opset1::Transpose>({_decoder_layers_1_self_attn_Reshape_2, {0, 2, 1, 3}}, "f32[?,32,?,80]");   //  /decoder/layers.1/self_attn/Transpose_2
-    auto _decoder_layers_1_self_attn_Gather = GenPattern<opset8::Gather>({_decoder_layers_1_self_attn_Shape, 0, 0}, "i32[]", {{"batch_dims", 0}});   //  /decoder/layers.1/self_attn/Gather
-    auto _decoder_layers_1_self_attn_Mul_1 = GenPattern<opset1::Multiply>({_decoder_layers_1_self_attn_Gather, 32}, "i32[]", {{"auto_broadcast", "numpy"}});   //  /decoder/layers.1/self_attn/Mul_1
-    auto _decoder_layers_1_self_attn_Unsqueeze_4 = GenPattern<opset1::Reshape>({_decoder_layers_1_self_attn_Mul_1, {1}}, "i32[1]", {{"special_zero", 0}});   //  /decoder/layers.1/self_attn/Unsqueeze_4
-    auto _decoder_layers_1_self_attn_Concat_5 = GenPattern<opset1::Concat>({_decoder_layers_1_self_attn_Unsqueeze_4, {-1}, {80}}, "i32[3]", {{"axis", 0}});   //  /decoder/layers.1/self_attn/Concat_5
-    auto _decoder_layers_1_self_attn_Reshape_3 = GenPattern<opset1::Reshape>({_decoder_layers_1_self_attn_Transpose_2, _decoder_layers_1_self_attn_Concat_5}, "f32[?,?,80]", {{"special_zero", 1}});   //  /decoder/layers.1/self_attn/Reshape_3
+    auto Transpose_2 = GenPattern<opset1::Transpose>({Reshape_2, {0, 2, 1, 3}}, "f32[?,?,?,?]");   //  /decoder/layers.1/self_attn/Transpose_2
+    auto Gather = GenPattern<opset8::Gather>({Shape, 0, 0}, "i32[]", {{"batch_dims", 0}});   //  /decoder/layers.1/self_attn/Gather
+    auto Mul_1 = GenPattern<opset1::Multiply>({Gather, H}, "i32[]", {{"auto_broadcast", "numpy"}});   //  /decoder/layers.1/self_attn/Mul_1
+    auto Unsqueeze_4 = GenPattern<opset1::Reshape>({Mul_1, {1}}, "i32[1]", {{"special_zero", 0}});   //  /decoder/layers.1/self_attn/Unsqueeze_4
+    auto Concat_5 = GenPattern<opset1::Concat>({Unsqueeze_4, {-1}, {S}}, "i32[3]", {{"axis", 0}});   //  /decoder/layers.1/self_attn/Concat_5
+    auto Reshape_3 = GenPattern<opset1::Reshape>({Transpose_2, Concat_5}, "f32[?,?,?]", {{"special_zero", 1}});   //  /decoder/layers.1/self_attn/Reshape_3
 
 
-    auto _decoder_layers_1_self_attn_Gather1 = GenPattern<opset8::Gather>({_decoder_layers_1_self_attn_Shape, {0}, 0}, "i32[1]", {{"batch_dims", 0}});   //  /decoder/layers.1/self_attn/Gather
-    auto _decoder_layers_1_self_attn_Concat = GenPattern<opset1::Concat>({_decoder_layers_1_self_attn_Gather1, {-1}, {32}, {80}}, "i32[4]", {{"axis", 0}});   //  /decoder/layers.1/self_attn/Concat
-    auto _decoder_layers_1_self_attn_Reshape = GenPattern<opset1::Reshape>({_decoder_layers_1_self_attn_k_proj_Add, _decoder_layers_1_self_attn_Concat}, "f32[?,?,32,80]", {{"special_zero", 1}});   //  /decoder/layers.1/self_attn/Reshape
-    auto _decoder_layers_1_self_attn_Transpose = GenPattern<opset1::Transpose>({_decoder_layers_1_self_attn_Reshape, {0, 2, 1, 3}}, "f32[?,32,?,80]");   //  /decoder/layers.1/self_attn/Transpose
-    auto present_1_key = GenPattern<opset1::Concat>({past_key_values_1_key, _decoder_layers_1_self_attn_Transpose}, "f32[?,32,?,80]", {{"axis", 2}});   //  present.1.key
-    auto _decoder_layers_1_self_attn_Unsqueeze_5 = GenPattern<opset1::Reshape>({_decoder_layers_1_self_attn_Mul_1, {1}}, "i32[1]", {{"special_zero", 0}});   //  /decoder/layers.1/self_attn/Unsqueeze_5
-    auto _decoder_layers_1_self_attn_Concat_6 = GenPattern<opset1::Concat>({_decoder_layers_1_self_attn_Unsqueeze_5, {-1}, {80}}, "i32[3]", {{"axis", 0}});   //  /decoder/layers.1/self_attn/Concat_6
-    auto _decoder_layers_1_self_attn_Reshape_4 = GenPattern<opset1::Reshape>({present_1_key, _decoder_layers_1_self_attn_Concat_6}, "f32[?,?,80]", {{"special_zero", 1}});   //  /decoder/layers.1/self_attn/Reshape_4
-    auto _decoder_layers_1_self_attn_MatMul = GenPattern<opset1::MatMul>({_decoder_layers_1_self_attn_Reshape_3, _decoder_layers_1_self_attn_Reshape_4}, "f32[?,?,?]", {{"transpose_a", 0}, {"transpose_b", 1}});   //  /decoder/layers.1/self_attn/MatMul
-    auto _decoder_layers_1_self_attn_Gather2 = GenPattern<opset8::Gather>({_decoder_layers_1_self_attn_Shape, {0}, 0}, "i32[1]", {{"batch_dims", 0}});   //  /decoder/layers.1/self_attn/Gather
-    auto _decoder_layers_1_self_attn_Gather_1 = GenPattern<opset8::Gather>({_decoder_layers_1_self_attn_Shape, {1}, 0}, "i32[1]", {{"batch_dims", 0}});   //  /decoder/layers.1/self_attn/Gather_1
-    auto _decoder_layers_1_self_attn_Shape_2 = GenPattern<opset1::ShapeOf>({_decoder_layers_1_self_attn_Reshape_4}, "i32[3]", {});   //  /decoder/layers.1/self_attn/Shape_2
-    auto _decoder_layers_1_self_attn_Gather_2 = GenPattern<opset8::Gather>({_decoder_layers_1_self_attn_Shape_2, {1}, 0}, "i32[1]", {{"batch_dims", 0}});   //  /decoder/layers.1/self_attn/Gather_2
-    auto _decoder_layers_1_self_attn_Concat_8 = GenPattern<opset1::Concat>({_decoder_layers_1_self_attn_Gather2, {32}, _decoder_layers_1_self_attn_Gather_1, _decoder_layers_1_self_attn_Gather_2}, "i32[4]", {{"axis", 0}});   //  /decoder/layers.1/self_attn/Concat_8
-    auto _decoder_layers_1_self_attn_Reshape_6 = GenPattern<opset1::Reshape>({_decoder_layers_1_self_attn_MatMul, _decoder_layers_1_self_attn_Concat_8}, "f32[?,32,?,?]", {{"special_zero", 1}});   //  /decoder/layers.1/self_attn/Reshape_6
-    auto _decoder_layers_1_self_attn_Add = GenPattern<opset1::Add>({_decoder_layers_1_self_attn_Reshape_6, _decoder_Add_2}, "f32[?,32,?,?]", {{"auto_broadcast", "numpy"}});   //  /decoder/layers.1/self_attn/Add
+    auto Gather1 = GenPattern<opset8::Gather>({Shape, {0}, 0}, "i32[1]", {{"batch_dims", 0}});   //  /decoder/layers.1/self_attn/Gather
+    auto Concat = GenPattern<opset1::Concat>({Gather1, {-1}, {H}, {S}}, "i32[4]", {{"axis", 0}});   //  /decoder/layers.1/self_attn/Concat
+    auto Reshape = GenPattern<opset1::Reshape>({k_proj_Add, Concat}, "f32[?,?,?,?]", {{"special_zero", 1}});   //  /decoder/layers.1/self_attn/Reshape
+    auto Transpose = GenPattern<opset1::Transpose>({Reshape, {0, 2, 1, 3}}, "f32[?,?,?,?]");   //  /decoder/layers.1/self_attn/Transpose
+    auto present_1_key = GenPattern<opset1::Concat>({past_key_values_1_key, Transpose}, "f32[?,?,?,?]", {{"axis", 2}});   //  present.1.key
+    auto Unsqueeze_5 = GenPattern<opset1::Reshape>({Mul_1, {1}}, "i32[1]", {{"special_zero", 0}});   //  /decoder/layers.1/self_attn/Unsqueeze_5
+    auto Concat_6 = GenPattern<opset1::Concat>({Unsqueeze_5, {-1}, {S}}, "i32[3]", {{"axis", 0}});   //  /decoder/layers.1/self_attn/Concat_6
+    auto Reshape_4 = GenPattern<opset1::Reshape>({present_1_key, Concat_6}, "f32[?,?,?]", {{"special_zero", 1}});   //  /decoder/layers.1/self_attn/Reshape_4
+    auto MatMul = GenPattern<opset1::MatMul>({Reshape_3, Reshape_4}, "f32[?,?,?]", {{"transpose_a", 0}, {"transpose_b", 1}});   //  /decoder/layers.1/self_attn/MatMul
+    auto Gather2 = GenPattern<opset8::Gather>({Shape, {0}, 0}, "i32[1]", {{"batch_dims", 0}});   //  /decoder/layers.1/self_attn/Gather
+    auto Gather_1 = GenPattern<opset8::Gather>({Shape, {1}, 0}, "i32[1]", {{"batch_dims", 0}});   //  /decoder/layers.1/self_attn/Gather_1
+    auto Shape_2 = GenPattern<opset1::ShapeOf>({Reshape_4}, "i32[3]", {});   //  /decoder/layers.1/self_attn/Shape_2
+    auto Gather_2 = GenPattern<opset8::Gather>({Shape_2, {1}, 0}, "i32[1]", {{"batch_dims", 0}});   //  /decoder/layers.1/self_attn/Gather_2
+    auto Concat_8 = GenPattern<opset1::Concat>({Gather2, {H}, Gather_1, Gather_2}, "i32[4]", {{"axis", 0}});   //  /decoder/layers.1/self_attn/Concat_8
+    auto Reshape_6 = GenPattern<opset1::Reshape>({MatMul, Concat_8}, "f32[?,?,?,?]", {{"special_zero", 1}});   //  /decoder/layers.1/self_attn/Reshape_6
+    auto Add = GenPattern<opset1::Add>({Reshape_6, _decoder_Add_2}, "f32[?,?,?,?]", {{"auto_broadcast", "numpy"}});   //  /decoder/layers.1/self_attn/Add
     auto Constant_129564 = GenPattern<opset1::Constant>({/*-3.40282e+38*/}, "f32[1,1,1,1]");
-    auto _decoder_layers_1_self_attn_Max = GenPattern<opset1::Maximum>({_decoder_layers_1_self_attn_Add, Constant_129564}, "f32[?,32,?,?]", {{"auto_broadcast", "numpy"}});   //  /decoder/layers.1/self_attn/Max
-    auto _decoder_layers_1_self_attn_Unsqueeze_10 = GenPattern<opset1::Reshape>({_decoder_layers_1_self_attn_Mul_1, {1}}, "i32[1]", {{"special_zero", 0}});   //  /decoder/layers.1/self_attn/Unsqueeze_10
-    auto _decoder_layers_1_self_attn_Gather_11 = GenPattern<opset8::Gather>({_decoder_layers_1_self_attn_Shape, {1}, 0}, "i32[1]", {{"batch_dims", 0}});   //  /decoder/layers.1/self_attn/Gather_1
-    auto _decoder_layers_1_self_attn_Gather_21 = GenPattern<opset8::Gather>({_decoder_layers_1_self_attn_Shape_2, {1}, 0}, "i32[1]", {{"batch_dims", 0}});   //  /decoder/layers.1/self_attn/Gather_2
-    auto _decoder_layers_1_self_attn_Concat_9 = GenPattern<opset1::Concat>({_decoder_layers_1_self_attn_Unsqueeze_10, _decoder_layers_1_self_attn_Gather_11, _decoder_layers_1_self_attn_Gather_21}, "i32[3]", {{"axis", 0}});   //  /decoder/layers.1/self_attn/Concat_9
-    auto _decoder_layers_1_self_attn_Reshape_7 = GenPattern<opset1::Reshape>({_decoder_layers_1_self_attn_Max, _decoder_layers_1_self_attn_Concat_9}, "f32[?,?,?]", {{"special_zero", 1}});   //  /decoder/layers.1/self_attn/Reshape_7
-    auto _decoder_layers_1_self_attn_Softmax = GenPattern<opset1::Softmax>({_decoder_layers_1_self_attn_Reshape_7}, "f32[?,?,?]", {{"axis", 2}});   //  /decoder/layers.1/self_attn/Softmax
+    auto Max = GenPattern<opset1::Maximum>({Add, Constant_129564}, "f32[?,?,?,?]", {{"auto_broadcast", "numpy"}});   //  /decoder/layers.1/self_attn/Max
+    auto Unsqueeze_10 = GenPattern<opset1::Reshape>({Mul_1, {1}}, "i32[1]", {{"special_zero", 0}});   //  /decoder/layers.1/self_attn/Unsqueeze_10
+    auto Gather_11 = GenPattern<opset8::Gather>({Shape, {1}, 0}, "i32[1]", {{"batch_dims", 0}});   //  /decoder/layers.1/self_attn/Gather_1
+    auto Gather_21 = GenPattern<opset8::Gather>({Shape_2, {1}, 0}, "i32[1]", {{"batch_dims", 0}});   //  /decoder/layers.1/self_attn/Gather_2
+    auto Concat_9 = GenPattern<opset1::Concat>({Unsqueeze_10, Gather_11, Gather_21}, "i32[3]", {{"axis", 0}});   //  /decoder/layers.1/self_attn/Concat_9
+    auto Reshape_7 = GenPattern<opset1::Reshape>({Max, Concat_9}, "f32[?,?,?]", {{"special_zero", 1}});   //  /decoder/layers.1/self_attn/Reshape_7
+    auto Softmax = GenPattern<opset1::Softmax>({Reshape_7}, "f32[?,?,?]", {{"axis", 2}});   //  /decoder/layers.1/self_attn/Softmax
 
-    auto _decoder_layers_1_self_attn_Gather3 = GenPattern<opset8::Gather>({_decoder_layers_1_self_attn_Shape, {0}, 0}, "i32[1]", {{"batch_dims", 0}});   //  /decoder/layers.1/self_attn/Gather
-    auto _decoder_layers_1_self_attn_Concat_1 = GenPattern<opset1::Concat>({_decoder_layers_1_self_attn_Gather3, {-1}, {32}, {80}}, "i32[4]", {{"axis", 0}});   //  /decoder/layers.1/self_attn/Concat_1
-    auto _decoder_layers_1_self_attn_Reshape_1 = GenPattern<opset1::Reshape>({_decoder_layers_1_self_attn_v_proj_Add, _decoder_layers_1_self_attn_Concat_1}, "f32[?,?,32,80]", {{"special_zero", 1}});   //  /decoder/layers.1/self_attn/Reshape_1
-    auto _decoder_layers_1_self_attn_Transpose_1 = GenPattern<opset1::Transpose>({_decoder_layers_1_self_attn_Reshape_1, {0, 2, 1, 3}}, "f32[?,32,?,80]");   //  /decoder/layers.1/self_attn/Transpose_1
-    auto present_1_value = GenPattern<opset1::Concat>({past_key_values_1_value, _decoder_layers_1_self_attn_Transpose_1}, "f32[?,32,?,80]", {{"axis", 2}});   //  present.1.value
-    auto _decoder_layers_1_self_attn_Unsqueeze_6 = GenPattern<opset1::Reshape>({_decoder_layers_1_self_attn_Mul_1, {1}}, "i32[1]", {{"special_zero", 0}});   //  /decoder/layers.1/self_attn/Unsqueeze_6
-    auto _decoder_layers_1_self_attn_Concat_7 = GenPattern<opset1::Concat>({_decoder_layers_1_self_attn_Unsqueeze_6, {-1}, {80}}, "i32[3]", {{"axis", 0}});   //  /decoder/layers.1/self_attn/Concat_7
-    auto _decoder_layers_1_self_attn_Reshape_5 = GenPattern<opset1::Reshape>({present_1_value, _decoder_layers_1_self_attn_Concat_7}, "f32[?,?,80]", {{"special_zero", 1}});   //  /decoder/layers.1/self_attn/Reshape_5
-    auto _decoder_layers_1_self_attn_MatMul_1 = GenPattern<opset1::MatMul>({_decoder_layers_1_self_attn_Softmax, _decoder_layers_1_self_attn_Reshape_5}, "f32[?,?,80]", {{"transpose_a", 0}, {"transpose_b", 0}});   //  /decoder/layers.1/self_attn/MatMul_1
-    auto _decoder_layers_1_self_attn_Gather4 = GenPattern<opset8::Gather>({_decoder_layers_1_self_attn_Shape, {0}, 0}, "i32[1]", {{"batch_dims", 0}});   //  /decoder/layers.1/self_attn/Gather
-    auto _decoder_layers_1_self_attn_Gather_12 = GenPattern<opset8::Gather>({_decoder_layers_1_self_attn_Shape, {1}, 0}, "i32[1]", {{"batch_dims", 0}});   //  /decoder/layers.1/self_attn/Gather_1
-    auto _decoder_layers_1_self_attn_Concat_10 = GenPattern<opset1::Concat>({_decoder_layers_1_self_attn_Gather4, {32}, _decoder_layers_1_self_attn_Gather_12, {80}}, "i32[4]", {{"axis", 0}});   //  /decoder/layers.1/self_attn/Concat_10
-    auto _decoder_layers_1_self_attn_Reshape_8 = GenPattern<opset1::Reshape>({_decoder_layers_1_self_attn_MatMul_1, _decoder_layers_1_self_attn_Concat_10}, "f32[?,32,?,80]", {{"special_zero", 1}});   //  /decoder/layers.1/self_attn/Reshape_8
-    auto _decoder_layers_1_self_attn_Transpose_4 = GenPattern<opset1::Transpose>({_decoder_layers_1_self_attn_Reshape_8, {0, 2, 1, 3}}, "f32[?,?,32,80]");   //  /decoder/layers.1/self_attn/Transpose_4
-    auto Gather_103555 = GenPattern<opset8::Gather>({_decoder_layers_1_self_attn_Shape, {0, 1}, 0}, "i32[2]", {{"batch_dims", 0}});   //  Gather_103555
-    auto _decoder_layers_1_self_attn_Concat_11 = GenPattern<opset1::Concat>({Gather_103555, {2560}}, "i32[3]", {{"axis", 0}});   //  /decoder/layers.1/self_attn/Concat_11
-    auto _decoder_layers_1_self_attn_Reshape_9 = GenPattern<opset1::Reshape>({_decoder_layers_1_self_attn_Transpose_4, _decoder_layers_1_self_attn_Concat_11}, "f32[?,?,2560]", {{"special_zero", 1}});   //  /decoder/layers.1/self_attn/Reshape_9
+    auto Gather3 = GenPattern<opset8::Gather>({Shape, {0}, 0}, "i32[1]", {{"batch_dims", 0}});   //  /decoder/layers.1/self_attn/Gather
+    auto Concat_1 = GenPattern<opset1::Concat>({Gather3, {-1}, {H}, {S}}, "i32[4]", {{"axis", 0}});   //  /decoder/layers.1/self_attn/Concat_1
+    auto Reshape_1 = GenPattern<opset1::Reshape>({v_proj_Add, Concat_1}, "f32[?,?,?,?]", {{"special_zero", 1}});   //  /decoder/layers.1/self_attn/Reshape_1
+    auto Transpose_1 = GenPattern<opset1::Transpose>({Reshape_1, {0, 2, 1, 3}}, "f32[?,?,?,?]");   //  /decoder/layers.1/self_attn/Transpose_1
+    auto present_1_value = GenPattern<opset1::Concat>({past_key_values_1_value, Transpose_1}, "f32[?,?,?,?]", {{"axis", 2}});   //  present.1.value
+    auto Unsqueeze_6 = GenPattern<opset1::Reshape>({Mul_1, {1}}, "i32[1]", {{"special_zero", 0}});   //  /decoder/layers.1/self_attn/Unsqueeze_6
+    auto Concat_7 = GenPattern<opset1::Concat>({Unsqueeze_6, {-1}, {S}}, "i32[3]", {{"axis", 0}});   //  /decoder/layers.1/self_attn/Concat_7
+    auto Reshape_5 = GenPattern<opset1::Reshape>({present_1_value, Concat_7}, "f32[?,?,?]", {{"special_zero", 1}});   //  /decoder/layers.1/self_attn/Reshape_5
+    auto MatMul_1 = GenPattern<opset1::MatMul>({Softmax, Reshape_5}, "f32[?,?,?]", {{"transpose_a", 0}, {"transpose_b", 0}});   //  /decoder/layers.1/self_attn/MatMul_1
+    auto Gather4 = GenPattern<opset8::Gather>({Shape, {0}, 0}, "i32[1]", {{"batch_dims", 0}});   //  /decoder/layers.1/self_attn/Gather
+    auto Gather_12 = GenPattern<opset8::Gather>({Shape, {1}, 0}, "i32[1]", {{"batch_dims", 0}});   //  /decoder/layers.1/self_attn/Gather_1
+    auto Concat_10 = GenPattern<opset1::Concat>({Gather4, {H}, Gather_12, {S}}, "i32[4]", {{"axis", 0}});   //  /decoder/layers.1/self_attn/Concat_10
+    auto Reshape_8 = GenPattern<opset1::Reshape>({MatMul_1, Concat_10}, "f32[?,?,?,?]", {{"special_zero", 1}});   //  /decoder/layers.1/self_attn/Reshape_8
+    auto Transpose_4 = GenPattern<opset1::Transpose>({Reshape_8, {0, 2, 1, 3}}, "f32[?,?,?,?]");   //  /decoder/layers.1/self_attn/Transpose_4
+    auto Gather_103555 = GenPattern<opset8::Gather>({Shape, {0, 1}, 0}, "i32[2]", {{"batch_dims", 0}});   //  Gather_103555
+    auto Concat_11 = GenPattern<opset1::Concat>({Gather_103555, {H*S}}, "i32[3]", {{"axis", 0}});   //  /decoder/layers.1/self_attn/Concat_11
+    auto Reshape_9 = GenPattern<opset1::Reshape>({Transpose_4, Concat_11}, "f32[?,?,?]", {{"special_zero", 1}});   //  /decoder/layers.1/self_attn/Reshape_9
 
-    return {_decoder_layers_1_self_attn_Reshape_9, present_1_key, present_1_value};
+    return {Reshape_9, present_1_key, present_1_value};
 }

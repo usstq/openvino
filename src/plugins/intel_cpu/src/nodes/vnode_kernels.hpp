@@ -216,7 +216,8 @@ struct MHA_kernel {
                     PlainTensor<T>& present_key,
                     PlainTensor<T>& present_value,
                     PlainTensor<float>& attention_mask,
-                    PlainTensor<T>& output_emb) {
+                    PlainTensor<T>& output_emb,
+                    float d_scale = 0.0f) {
         auto B = query.size(0);
         auto H = query.size(1);
         auto q_len = query.size(2);
@@ -224,7 +225,8 @@ struct MHA_kernel {
         auto kv_len = present_key.size(2);
         std::vector<float> attn_score(kv_len, 0.0f);
         std::vector<float> word_vec(head_size, 0.0f);
-        float d_scale = 1.0f / sqrt(head_size);
+        if (d_scale == 0.0f)
+            d_scale = 1.0f / sqrt(head_size);
 
         auto k_stride_s = present_key.stride(3);
         for (size_t b = 0; b < B; b++) {
@@ -291,7 +293,8 @@ struct MHA_kernel<KT_MLAS, float> {
                     PlainTensor<float>& present_key,
                     PlainTensor<float>& present_value,
                     PlainTensor<float>& attention_mask,
-                    PlainTensor<float>& output_emb) {
+                    PlainTensor<float>& output_emb,
+                    float d_scale = 0.0f) {
         auto B = query.size(0);
         auto H = query.size(1);
         auto q_len = query.size(2);
@@ -299,7 +302,8 @@ struct MHA_kernel<KT_MLAS, float> {
         auto kv_len = present_key.size(2);
         auto attn_mask_qlen = attention_mask.size(2);
         auto update_len = kv_len - q_len;
-        float d_scale = 1.0f / sqrt(head_size);
+        if (d_scale == 0.0f)
+            d_scale = 1.0f / sqrt(head_size);
         // initialize temp buffer for qk matmul and  qkv matmul
         size_t num_threads = parallel_get_num_threads();
         if (p_qk_buffer == nullptr) {
@@ -371,7 +375,8 @@ struct MHA_kernel<KT_LLMDNN, ov::bfloat16> {
                     PlainTensor<ov::bfloat16>& present_key,
                     PlainTensor<ov::bfloat16>& present_value,
                     PlainTensor<float>& attention_mask,  // [batch, 1, query_seq_len, key_seq_len]
-                    PlainTensor<ov::bfloat16>& attn_output) {
+                    PlainTensor<ov::bfloat16>& attn_output,
+                    float d_scale = 0.0f) {
         int max_position_embeddings = 2048;
         auto B = query.size(0);
         auto H = query.size(1);
@@ -379,6 +384,10 @@ struct MHA_kernel<KT_LLMDNN, ov::bfloat16> {
         auto head_size = query.size(3);
         auto kv_len = present_key.size(2);
         auto is_causal_in_attention = attention_mask.size(2) > 1;
+
+        if (d_scale == 0.0f)
+            d_scale = 1.0f / sqrt(head_size);
+
         if (!m_kernel_initialized) {
             if (!m_kernel.create(llmdnn::mha_gpt::create_param{
                     .num_heads = H,
@@ -387,7 +396,7 @@ struct MHA_kernel<KT_LLMDNN, ov::bfloat16> {
                         head_size,  // better to aligned to 64 bytes for best performance, apply for qkv
                     .max_seq_len = static_cast<int>(
                         max_position_embeddings),  // max seq length for computing the size of matmul tmp result
-                    .normal_factor = 1.0f / sqrt(head_size),
+                    .normal_factor = d_scale,
                     .qkv_precision = llmdnn::data_type_t::dnnl_bf16,
                     .dst_precision = llmdnn::data_type_t::dnnl_bf16,
                     .is_bloom = p_alibi != nullptr,

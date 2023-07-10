@@ -12,8 +12,8 @@
 #include <memory>
 #include <string>
 #include <vector>
-#include "openvino/core/parallel.hpp"
 
+#include "openvino/core/parallel.hpp"
 #include "utils/plain_tensor.hpp"
 #include "vnode_kernels.hpp"
 
@@ -112,17 +112,17 @@ struct gpt2_attention_executor : public vnode_executor {
         // concat pask_key/value & k/v into present_key/value
         query.resize({B, H, L1, S});
         parallel_for2d(B, H, [&](size_t b, size_t h) {
-                memcpy(&present_key.at({b, h, 0, 0}), &past_key.at({b, h, 0, 0}), sizeof(RT) * L0 * S);
-                memcpy(&present_value.at({b, h, 0, 0}), &past_value.at({b, h, 0, 0}), sizeof(RT) * L0 * S);
+            memcpy(&present_key.at({b, h, 0, 0}), &past_key.at({b, h, 0, 0}), sizeof(RT) * L0 * S);
+            memcpy(&present_value.at({b, h, 0, 0}), &past_value.at({b, h, 0, 0}), sizeof(RT) * L0 * S);
 
-                for (size_t p = 0; p < L1; p++) {
-                    auto* q = &qkv_input.at({b, p, h * S});
-                    auto* k = &qkv_input.at({b, p, (H + h) * S});
-                    auto* v = &qkv_input.at({b, p, (2 * H + h) * S});
-                    memcpy(&query.at({b, h, p, 0}), q, sizeof(RT) * S);
-                    memcpy(&present_key.at({b, h, L0 + p, 0}), k, sizeof(RT) * S);
-                    memcpy(&present_value.at({b, h, L0 + p, 0}), v, sizeof(RT) * S);
-                }
+            for (size_t p = 0; p < L1; p++) {
+                auto* q = &qkv_input.at({b, p, h * S});
+                auto* k = &qkv_input.at({b, p, (H + h) * S});
+                auto* v = &qkv_input.at({b, p, (2 * H + h) * S});
+                memcpy(&query.at({b, h, p, 0}), q, sizeof(RT) * S);
+                memcpy(&present_key.at({b, h, L0 + p, 0}), k, sizeof(RT) * S);
+                memcpy(&present_value.at({b, h, L0 + p, 0}), v, sizeof(RT) * S);
+            }
         });
 
         kernel(query, present_key, present_value, attention_mask, output_emb);
@@ -411,6 +411,69 @@ struct bloom_attention_executor : public vnode_executor {
         kernel(query, present_key2, present_value2, attention_mask, output_emb);
     }
 };
+
+template <KernelTypes KType, typename RT>
+struct opt_attention_executor : public vnode_executor {
+    PlainTensor<RT> q_input;  // "f32[B, L1, H*S]"
+    PlainTensor<RT> k_input;  // "f32[B, L1, H*S]"
+    PlainTensor<RT> v_input;  // "f32[B, L1, H*S]"
+
+    PlainTensor<RT> past_key;                    // "f32[B, H, L0, S]"
+    PlainTensor<RT> past_value;                  // "f32[B, H, L0, S]"
+    PlainTensor<float> combined_attention_mask;  // (attention + causal) : f32[B,1,q_len,kv_len]
+
+    PlainTensor<int32_t> shape;  // "i32[3]"
+
+    PlainTensor<RT> output_emb;     // f32[B, L1, H*S]
+    PlainTensor<RT> present_key;    // "f32[B, H, L0+L1, S]"
+    PlainTensor<RT> present_value;  // "f32[B, H, L0+L1, S]"
+
+    MHA_kernel<KType, RT> kernel;
+
+    opt_attention_executor() {
+        register_inputs(q_input, k_input, v_input, past_key, past_value, combined_attention_mask, shape);
+        register_outputs(output_emb, present_key, present_value);
+    }
+
+    PlainTensor<RT> query;  // query with embed
+
+    void exec(Node* node, dnnl::stream strm) override {
+        update_inputs(node);
+
+        auto B = q_input.size(0);
+        auto L1 = q_input.size(1);
+        auto HS = q_input.size(2);
+        auto L0 = past_key.size(2);
+        auto S = past_key.size(3);
+        auto H = HS / S;
+
+        node->redefineOutputMemory({{B, L1, H * S}, {B, H, L0 + L1, S}, {B, H, L0 + L1, S}});
+        update_outputs(node);
+
+        query.resize({B, H, L1, S});
+
+        parallel_for2d(B, H, [&](size_t b, size_t h) {
+            // past_key/value
+            memcpy(&present_key.at({b, h, 0, 0}), &past_key.at({b, h, 0, 0}), sizeof(RT) * L0 * S);
+            memcpy(&present_value.at({b, h, 0, 0}), &past_value.at({b, h, 0, 0}), sizeof(RT) * L0 * S);
+            for (size_t p = 0; p < L1; p++) {
+                memcpy(&present_key.at({b, h, L0 + p, 0}), &k_input.at({b, p, h * S}), sizeof(RT) * S);
+                memcpy(&present_value.at({b, h, L0 + p, 0}), &v_input.at({b, p, h * S}), sizeof(RT) * S);
+                memcpy(&query.at({b, h, p, 0}), &q_input.at({b, p, h * S}), sizeof(RT) * S);
+            }
+        });
+        /*
+        // query         [B, H, L1, S]
+        // present_key   [B, H, L0+L1, S]  stride of last dim maybe > 1
+        // present_value [B, H, L0+L1, S]
+        // attention_mask [B, 1, L1, L0 + L1]
+        // alibi
+        // output_emb    [B, L1, H*S]
+        */
+        kernel(query, present_key, present_value, combined_attention_mask, output_emb, 1.0f);
+    }
+};
+
 }  // namespace node
 }  // namespace intel_cpu
 }  // namespace ov

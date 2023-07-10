@@ -72,15 +72,11 @@ class ProfilerManager {
     std::shared_ptr<void> pmu;
     PMUMonitor * pmum;
 
-    std::atomic<bool> finalized{false};
-
-    void _do_finalize();
-
 public:
     ProfilerManager();
     ~ProfilerManager();
 
-    void finalize();
+    void finalize(bool register = false);
 
     ProfileData* startProfile() {
         all_data.emplace_back();

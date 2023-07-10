@@ -10,6 +10,7 @@
 #include <fstream>
 #include <iostream>
 #include <map>
+#include <set>
 #include <numeric>
 #include <sstream>
 #include <stdexcept>
@@ -325,8 +326,6 @@ std::atomic<uint64_t> tsc_ticks_base(0);
 bool profile_enabled = false;
 std::shared_ptr<ProfileData> profile_data_null;
 
-static const char* dump_file_name = "ov_profile.json";
-static bool dump_file_created = false;
 
 ProfilerManager::ProfilerManager() {
     const char* str_enable = std::getenv("OV_CPU_PROFILE");
@@ -354,58 +353,60 @@ ProfilerManager::ProfilerManager() {
     serial = totalProfilerManagers.fetch_add(1);
     ss << "=== ProfilerManager #" << serial << "(" << this << ") : is " << (enabled? "enabled":"disabled") << " ====" << std::endl;
     std::cout << ss.str();
+    finalize(true);
 }
 
-void ProfilerManager::finalize() {
-    // finalization is serialized by this mutex
-    _do_finalize();
-}
-
-void ProfilerManager::_do_finalize() {
+void ProfilerManager::finalize(bool do_register) {
+    // use a lot of function-scope static global vars to ensure
+    // the life-time of these vars are longger than any thread-local
+    // global ProfilerManager instance
+    static const char* dump_file_name = "ov_profile.json";
+    static bool dump_file_over = false;
     static std::mutex g_mutex;
+    static std::set<ProfilerManager*> all_managers;
     std::lock_guard<std::mutex> guard(g_mutex);
-    // collect all entries
-    if (!enabled) return;
-    if (finalized) return;
-    finalized = true;
-    auto data_size = all_data.size();
-    auto counter_size = all_counters.size();
-    if (data_size) {
-        // open output file
-        std::ofstream fw;
-        if (dump_file_created) {
-            fw.open(dump_file_name, std::ios::out | std::ios::app);
-        } else {
-            fw.open(dump_file_name, std::ios::out);
-            fw << "{\n";
-            fw << "\"schemaVersion\": 1,\n";
-            fw << "\"traceEvents\": [\n";
-            fw.flush();
-            dump_file_created = true;
+    if (do_register) {
+        if (all_managers.count(this) == 0) {
+            all_managers.emplace(this);
         }
-        chromeTrace ct(fw, serial);
-        for (auto& d : all_data) {
-            ct.addCompleteEvent(d.name, d.cat, tsc_to_usec(d.start), tsc_to_usec(d.end) - tsc_to_usec(d.start), d.args);
-        }
-        dumpAllCounters(ct);
-        fw.close();
-
-        all_data.clear();
-        all_counters.clear();
+        return;
     }
 
-    int left_profilers = totalProfilerManagers.fetch_sub(1) - 1;
-
-    std::stringstream ss;
-    ss << "==== ProfilerManager #" << serial << " finalize: total number of profile entries " << data_size << "," << counter_size
-        << " left "  << left_profilers << std::endl;
-    std::cout << ss.str();
-
-    if (left_profilers != 0)
+    if (dump_file_over)
         return;
+    // start dump
+    std::ofstream fw;
+    fw.open(dump_file_name, std::ios::out);
+    fw << "{\n";
+    fw << "\"schemaVersion\": 1,\n";
+    fw << "\"traceEvents\": [\n";
+    fw.flush();
 
-    // the last ProfilerManagers is responsible for closing the dumps file
-    std::ofstream fw(dump_file_name, std::ios::out | std::ios::app);
+    for (auto& pthis : all_managers) {
+        if (!pthis->enabled)
+            continue;
+        auto data_size = pthis->all_data.size();
+        auto counter_size = pthis->all_counters.size();
+        if (!data_size)
+            continue;
+
+        // open output file
+        chromeTrace ct(fw, serial);
+        for (auto& d : pthis->all_data) {
+            ct.addCompleteEvent(d.name,
+                                d.cat,
+                                tsc_to_usec(d.start),
+                                tsc_to_usec(d.end) - tsc_to_usec(d.start),
+                                d.args);
+        }
+        pthis->dumpAllCounters(ct);
+        pthis->all_data.clear();
+        pthis->all_counters.clear();
+        std::cout << "==== ProfilerManager #" << pthis->serial << "(" << pthis << ") finalize: dumpped " << data_size
+                    << "+" << counter_size << " entries;" <<  std::endl;
+    }
+    all_managers.clear();
+
     fw << R"({
         "name": "Profiler End",
         "ph": "i",
@@ -416,8 +417,11 @@ void ProfilerManager::_do_finalize() {
         << tsc_to_usec(__rdtsc()) << "}",
         fw << "]\n";
     fw << "}\n";
+    auto total_size = fw.tellp();
     fw.close();
-    std::cout << "==== Profile data is dumpped into " << dump_file_name << "\n";
+    dump_file_over = true;
+
+    std::cout << "==== ProfilerManager Dumpped " << total_size/(1024*1024) << " (MB) to " << dump_file_name <<  "====\n";
 }
 
 ProfilerManager::~ProfilerManager() {
