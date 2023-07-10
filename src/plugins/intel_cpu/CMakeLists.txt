@@ -121,7 +121,7 @@ cross_compiled_file(${TARGET_NAME}
 )
 
 cross_compiled_file(${TARGET_NAME}
-        ARCH AVX512F ANY
+        ARCH AVX512F AVX2 ANY
                     src/nodes/vnode_utils.cpp
         API         src/nodes/vnode_utils.hpp
         NAME        scale_add_softmax
