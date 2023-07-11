@@ -105,15 +105,15 @@ struct PlainTensorBase {
     uint8_t* batched_ptr_buff[8];
     std::vector<uint8_t*> batched_ptr_backup;
 
-    operator bool() {
+    operator bool() const {
         return static_cast<bool>(m_ptr);
     }
 
-    size_t size(int i) {
+    size_t size(int i) const {
         assert(i < m_rank);
         return m_dims[i];
     }
-    size_t stride(int i) {
+    size_t stride(int i) const {
         assert(i < m_rank);
         return m_strides[i];
     }
@@ -309,7 +309,7 @@ struct PlainTensor : public PlainTensorBase {
         return reinterpret_cast<DT*>(m_ptr.get());
     }
 
-    DT& at(const std::initializer_list<size_t>& index) {
+    DT& at(const std::initializer_list<size_t>& index) const {
         size_t off = 0;
         auto it = index.begin();
         for (auto& stride : m_strides) {
@@ -319,11 +319,11 @@ struct PlainTensor : public PlainTensorBase {
         return reinterpret_cast<DT*>(m_ptr.get())[off];
     }
 
-    DT& operator()(const std::initializer_list<size_t>& index) {
+    DT& operator()(const std::initializer_list<size_t>& index) const {
         return at(index);
     }
 
-    void assert_dims(const std::initializer_list<size_t>& expect_dims) {
+    void assert_dims(const std::initializer_list<size_t>& expect_dims) const {
         if (m_rank != expect_dims.size()) {
             asm("int3");
             IE_ASSERT(false);

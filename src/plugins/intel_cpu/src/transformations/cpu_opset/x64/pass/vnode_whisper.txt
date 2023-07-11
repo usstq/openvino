@@ -1,0 +1,48 @@
+OutputVector vnode_whisper_enc_attention(const OutputVector& inputs) {
+    int ii = 0;
+
+    //auto Mul = GenPattern<opset1::Add>({Multiply_4252, Constant_4464}, "f32[?,1500,384]", {{"auto_broadcast", "numpy"}});   //  /layers.1/self_attn/Mul
+
+    //auto Transpose_4189 = GenPattern<opset1::Constant>({/*-0.0362854,-0.0521545,0.0360107,-0.0105743,-0.0340271,0.00497437,-0.00222206,0.00871277,...147456in total*/}, "f32[384,384]");
+    //auto k_proj_MatMul = GenPattern<opset1::MatMul>({layer_norm_Add_1, Transpose_4189}, "f32[?,1500,384]", {{"transpose_a", 0}, {"transpose_b", 1}});   //  /layers.1/self_attn/k_proj/MatMul
+
+    //auto Constant_4465 = GenPattern<opset1::Constant>({/*0.0298462,-0.0332336,-0.0577698,-0.0983276,-0.0198212,0.0215759,-0.0325623,0.00701141,...384in total*/}, "f32[1,1,384]");
+    //auto Transpose_4192 = GenPattern<opset1::Constant>({/*-0.00774384,-0.0119324,0.0096283,-0.00872803,0.0259247,0.00246429,0.0439453,0.00360489,...147456in total*/}, "f32[384,384]");
+    //auto v_proj_MatMul = GenPattern<opset1::MatMul>({layer_norm_Add_1, Transpose_4192}, "f32[?,1500,384]", {{"transpose_a", 0}, {"transpose_b", 1}});   //  /layers.1/self_attn/v_proj/MatMul
+    //auto v_proj_Add = GenPattern<opset1::Add>({Constant_4465, v_proj_MatMul}, "f32[?,1500,384]", {{"auto_broadcast", "numpy"}});   //  /layers.1/self_attn/v_proj/Add
+    //auto Shape_1 = GenPattern<opset1::ShapeOf>({layer_norm_Add_1}, "i32[3]", {{"type_relax", 1}, {"input_data_types", "[]"}, {"output_data_types", "[i32]"}});   //  /layers.1/self_attn/Shape_1
+
+    auto Mul = inputs[ii++];            // "f32[?,1500,384]"
+    auto k_proj_MatMul = inputs[ii++];  // "f32[?,1500,384]"
+    auto v_proj_Add = inputs[ii++];     // "f32[?,1500,384]"
+    auto Shape_1 = inputs[ii++];        // "i32[3]"
+
+    auto Gather = GenPattern<opset8::Gather>({Shape_1, {0}, 0}, "i32[1]", {{"batch_dims", 0}});   //  /layers.1/self_attn/Gather
+    auto Concat_2 = GenPattern<opset1::Concat>({Gather, {1500}, {6}, {64}}, "i32[4]", {{"axis", 0}});   //  /layers.1/self_attn/Concat_2
+    auto Reshape_2 = GenPattern<opset1::Reshape>({Mul, Concat_2}, "f32[?,1500,6,64]", {{"special_zero", 1}});   //  /layers.1/self_attn/Reshape_2
+    auto Transpose_2 = GenPattern<opset1::Transpose>({Reshape_2, {0, 2, 1, 3}}, "f32[?,6,1500,64]");   //  /layers.1/self_attn/Transpose_2
+    auto Multiply_7031 = GenPattern<opset1::Multiply>({Shape_1, 6}, "i32[3]", {{"auto_broadcast", "numpy"}});   //  Multiply_7031
+    auto Gather1 = GenPattern<opset8::Gather>({Multiply_7031, 0, 0}, "i32[]", {{"batch_dims", 0}});   //  /layers.1/self_attn/Gather
+    auto Unsqueeze_5 = GenPattern<opset1::Reshape>({Gather1, {1}}, "i32[1]", {{"special_zero", 0}});   //  /layers.1/self_attn/Unsqueeze_5
+    auto Concat_4 = GenPattern<opset1::Concat>({Unsqueeze_5, {-1}, {64}}, "i32[3]", {{"axis", 0}});   //  /layers.1/self_attn/Concat_4
+    auto Reshape_3 = GenPattern<opset1::Reshape>({Transpose_2, Concat_4}, "f32[?,?,64]", {{"special_zero", 1}});   //  /layers.1/self_attn/Reshape_3
+
+    auto Concat = GenPattern<opset1::Concat>({Gather, {-1}, {6}, {64}}, "i32[4]", {{"axis", 0}});   //  /layers.1/self_attn/Concat
+    auto Reshape = GenPattern<opset1::Reshape>({k_proj_MatMul, Concat}, "f32[?,?,6,64]", {{"special_zero", 1}});   //  /layers.1/self_attn/Reshape
+    auto Transpose = GenPattern<opset1::Transpose>({Reshape, {0, 2, 1, 3}}, "f32[?,6,?,64]");   //  /layers.1/self_attn/Transpose
+    auto Reshape_4 = GenPattern<opset1::Reshape>({Transpose, Concat_4}, "f32[?,?,64]", {{"special_zero", 1}});   //  /layers.1/self_attn/Reshape_4
+    auto MatMul = GenPattern<opset1::MatMul>({Reshape_3, Reshape_4}, "f32[?,?,?]", {{"transpose_a", 0}, {"transpose_b", 1}});   //  /layers.1/self_attn/MatMul
+    auto Softmax = GenPattern<opset1::Softmax>({MatMul}, "f32[?,?,?]", {{"axis", 2}});   //  /layers.1/self_attn/Softmax
+
+    auto Reshape_1 = GenPattern<opset1::Reshape>({v_proj_Add, Concat}, "f32[?,?,6,64]", {{"special_zero", 1}});   //  /layers.1/self_attn/Reshape_1
+    auto Transpose_1 = GenPattern<opset1::Transpose>({Reshape_1, {0, 2, 1, 3}}, "f32[?,6,?,64]");   //  /layers.1/self_attn/Transpose_1
+    auto Reshape_5 = GenPattern<opset1::Reshape>({Transpose_1, Concat_4}, "f32[?,?,64]", {{"special_zero", 1}});   //  /layers.1/self_attn/Reshape_5
+    auto MatMul_1 = GenPattern<opset1::MatMul>({Softmax, Reshape_5}, "f32[?,?,64]", {{"transpose_a", 0}, {"transpose_b", 0}});   //  /layers.1/self_attn/MatMul_1
+    auto Concat_6 = GenPattern<opset1::Concat>({Gather, {6}, {1500}, {64}}, "i32[4]", {{"axis", 0}});   //  /layers.1/self_attn/Concat_6
+    auto Reshape_6 = GenPattern<opset1::Reshape>({MatMul_1, Concat_6}, "f32[?,6,1500,64]", {{"special_zero", 1}});   //  /layers.1/self_attn/Reshape_6
+    auto Transpose_4 = GenPattern<opset1::Transpose>({Reshape_6, {0, 2, 1, 3}}, "f32[?,1500,6,64]");   //  /layers.1/self_attn/Transpose_4
+    auto Concat_7 = GenPattern<opset1::Concat>({Gather, {1500}, {384}}, "i32[3]", {{"axis", 0}});   //  /layers.1/self_attn/Concat_7
+    auto Reshape_7 = GenPattern<opset1::Reshape>({Transpose_4, Concat_7}, "f32[?,1500,384]", {{"special_zero", 1}});   //  /layers.1/self_attn/Reshape_7
+
+    return {Reshape_7};
+}

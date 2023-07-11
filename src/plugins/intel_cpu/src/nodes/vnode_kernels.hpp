@@ -210,12 +210,11 @@ struct MHA_kernel {
     // present_key   [B, H, L0+L1, S]  stride of last dim maybe > 1
     // present_value [B, H, L0+L1, S]
     // attention_mask [B, 1, L1, L0 + L1]
-    // alibi
     // output_emb    [B, L1, H*S]
     void operator()(PlainTensor<T>& query,
                     PlainTensor<T>& present_key,
                     PlainTensor<T>& present_value,
-                    PlainTensor<float>& attention_mask,
+                    const PlainTensor<float>& attention_mask,
                     PlainTensor<T>& output_emb,
                     float d_scale = 0.0f) {
         auto B = query.size(0);
@@ -239,10 +238,15 @@ struct MHA_kernel {
                     auto* q = &query.at({b, h, m, 0});
                     // how many key/values can be accessed causally
                     auto ncausal = kv_len - q_len + m + 1;
-                    auto attn_mask_qlen = attention_mask.size(2);
-                    auto* attn_mask = &attention_mask.at({b, 0, std::min(m, attn_mask_qlen - 1), 0});
-                    if (attn_mask_qlen > 1) {
-                        // this imply attn mask is combined with causal mask
+                    float *attn_mask = nullptr;
+                    if (attention_mask) {
+                        auto attn_mask_qlen = attention_mask.size(2);
+                        attn_mask = &attention_mask.at({b, 0, std::min(m, attn_mask_qlen - 1), 0});
+                        if (attn_mask_qlen > 1) {
+                            // this imply attn mask is combined with causal mask
+                            ncausal = kv_len;
+                        }
+                    } else {
                         ncausal = kv_len;
                     }
                     for (size_t n = 0; n < ncausal; n++) {
@@ -251,7 +255,8 @@ struct MHA_kernel {
                         if (p_alibi)
                             attn_score[n] += p_alibi->at({h, 0, n});
                         // apply attention mask (maybe combined with causal_mask)
-                        attn_score[n] += attn_mask[n];
+                        if (attn_mask)
+                            attn_score[n] += attn_mask[n];
                     }
 
                     // softmax
@@ -292,7 +297,7 @@ struct MHA_kernel<KT_MLAS, float> {
     void operator()(PlainTensor<float>& query,
                     PlainTensor<float>& present_key,
                     PlainTensor<float>& present_value,
-                    PlainTensor<float>& attention_mask,
+                    const PlainTensor<float>& attention_mask,
                     PlainTensor<float>& output_emb,
                     float d_scale = 0.0f) {
         auto B = query.size(0);
@@ -374,7 +379,7 @@ struct MHA_kernel<KT_LLMDNN, ov::bfloat16> {
     void operator()(PlainTensor<ov::bfloat16>& query,
                     PlainTensor<ov::bfloat16>& present_key,
                     PlainTensor<ov::bfloat16>& present_value,
-                    PlainTensor<float>& attention_mask,  // [batch, 1, query_seq_len, key_seq_len]
+                    const PlainTensor<float>& attention_mask,  // [batch, 1, query_seq_len, key_seq_len]
                     PlainTensor<ov::bfloat16>& attn_output,
                     float d_scale = 0.0f) {
         int max_position_embeddings = 2048;

@@ -474,6 +474,45 @@ struct opt_attention_executor : public vnode_executor {
     }
 };
 
+template <KernelTypes KType, typename RT>
+struct whisper_enc_attention_executor : public vnode_executor {
+    PlainTensor<RT> q_input;      // "f32[?,1500,384]"  B,L,H*S
+    PlainTensor<RT> k_input;      // "f32[?,1500,384]"  B,L,H*S
+    PlainTensor<RT> v_input;      // "f32[?,1500,384]"  B,L,H*S
+    PlainTensor<int32_t> shape1;  // "i32[3]"
+
+    PlainTensor<RT> output_emb;  // f32[?,1500,384]
+
+    MHA_kernel<KType, RT> kernel;
+
+    whisper_enc_attention_executor() {
+        register_inputs(q_input, k_input, v_input, shape1);
+        register_outputs(output_emb);
+    }
+
+    void exec(Node* node, dnnl::stream strm) override {
+        update_inputs(node);
+        auto B = q_input.size(0);
+        auto L = q_input.size(1);
+        auto HS = q_input.size(2);
+        auto H = 6;
+        auto S = HS / H;
+        node->redefineOutputMemory({{B, L, H * S}});
+        update_outputs(node);
+
+        // Q, K, V is ready, do attention
+        // query         [B, H, L1, S]
+        // present_key   [B, H, L0+L1, S]  stride of last dim maybe > 1
+        // present_value [B, H, L0+L1, S]
+        // attention_mask [B, 1, L1, L0 + L1]
+        // output_emb    [B, L1, H*S]
+        auto q = q_input.reshape({B, L, H, S}).permute({0, 2, 1, 3});
+        auto k = k_input.reshape({B, L, H, S}).permute({0, 2, 1, 3});
+        auto v = v_input.reshape({B, L, H, S}).permute({0, 2, 1, 3});
+        kernel(q, k, v, {}, output_emb, 1.0f);
+    }
+};
+
 }  // namespace node
 }  // namespace intel_cpu
 }  // namespace ov

@@ -674,6 +674,7 @@ public:
 #include "vnode_opt.txt"
 #include "vnode_llama.txt"
 #include "vnode_bloom.txt"
+#include "vnode_whisper.txt"
 
 MHADynamicVNodeIn::MHADynamicVNodeIn() {
     add_matcher<VNodeIn>("gptneox_attention", vnode_gptneox_attn);
@@ -681,6 +682,7 @@ MHADynamicVNodeIn::MHADynamicVNodeIn() {
     add_matcher<VNodeIn>("opt_attention", vnode_opt_attn);
     add_matcher<VNodeIn>("open_llama_attention", vnode_llama_attn);
     add_matcher<VNodeIn>("bloom_attention", vnode_bloom_attn);
+    add_matcher<VNodeIn>("whisper_enc_attention", vnode_whisper_enc_attention);
 }
 
 MHADynamicVNodeOut::MHADynamicVNodeOut() {

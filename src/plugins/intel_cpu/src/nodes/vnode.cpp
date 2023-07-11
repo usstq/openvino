@@ -62,6 +62,9 @@ static vnode_executor_map register_all() {
     register_executor<opt_attention_executor<KT_REF, float>>(vem, "opt_attention,REF,FP32");
     register_executor<opt_attention_executor<KT_REF, ov::bfloat16>>(vem, "opt_attention,REF,BF16");
 
+    register_executor<whisper_enc_attention_executor<KT_REF, float>>(vem, "whisper_enc_attention,REF,FP32");
+    register_executor<whisper_enc_attention_executor<KT_REF, ov::bfloat16>>(vem, "whisper_enc_attention,REF,BF16");
+
     #ifdef OV_CPU_WITH_MLAS
     register_executor<gpt2_attention_executor<KT_MLAS, float>>(vem, "gpt2_attention,MLAS,FP32");
     register_executor<gptneox_attention_executor<KT_MLAS, float>>(vem, "gptneox_attention,MLAS,FP32");
