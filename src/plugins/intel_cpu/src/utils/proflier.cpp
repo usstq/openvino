@@ -2,22 +2,20 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
-#include "profiler.hpp"
-
 #include <algorithm>
 #include <cassert>
 #include <cmath>
 #include <fstream>
 #include <iostream>
 #include <map>
-#include <set>
 #include <numeric>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
-
+#include "profiler.hpp"
 
 #ifdef __linux__
 // performance counter
@@ -104,6 +102,23 @@ struct linux_perf_event {
 
 namespace ov {
 namespace intel_cpu {
+
+uint64_t tsc_ticks_per_second;
+uint64_t tsc_ticks_base;
+inline uint64_t tsc_to_usec(uint64_t tsc_ticks) {
+    return (tsc_ticks - tsc_ticks_base) * 1000000 / tsc_ticks_per_second;
+}
+
+void init_tsc() {
+    static std::once_flag flag;
+    std::call_once(flag, []() {
+        uint64_t start_ticks = __rdtsc();
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+        tsc_ticks_per_second = (__rdtsc() - start_ticks);
+        std::cout << "=== ProfilerManager: tsc_ticks_per_second = " << tsc_ticks_per_second << std::endl;
+        tsc_ticks_base = __rdtsc();
+    });
+}
 
 // to minimize the overhead of profiler when it's not being enabled,
 // the inst is not put inside a singleton function to save extra
@@ -276,7 +291,8 @@ void ProfilerManager::dumpAllCounters(chromeTrace& ct) {
             dc[k] = pc.count[k] - pc0.count[k];
         }
         ct.setTs(tsc_to_usec(pc0.end));
-        if (pmum) pmum->update(ct, dt, &dc[0]);
+        if (pmum)
+            pmum->update(ct, dt, &dc[0]);
 
         i0 = i;
     }
@@ -286,8 +302,7 @@ struct PMUMonitor {
     bool init_mode = false;
     PMUMonitor(const char* config_file_path) {}
 };
-void ProfilerManager::addCounter(uint64_t tsc) {
-}
+void ProfilerManager::addCounter(uint64_t tsc) {}
 void ProfilerManager::dumpAllCounters(chromeTrace& ct) {}
 #endif
 
@@ -297,13 +312,6 @@ static std::atomic_int totalProfilerManagers{0};
 
 bool ProfilerInit() {
     return profilerManagerInstance.is_enabled();
-}
-
-static uint64_t rdtsc_calibrate(int seconds = 1) {
-    uint64_t start_ticks;
-    start_ticks = __rdtsc();
-    std::this_thread::sleep_for(std::chrono::seconds(seconds));
-    return (__rdtsc() - start_ticks) / seconds;
 }
 
 ProfileData::ProfileData() {
@@ -321,11 +329,90 @@ void ProfileData::record_end(ProfileData* p) {
     profilerManagerInstance.addCounter(p->end);
 }
 
-std::atomic<uint64_t> tsc_ticks_per_second(0);
-std::atomic<uint64_t> tsc_ticks_base(0);
 bool profile_enabled = false;
 std::shared_ptr<ProfileData> profile_data_null;
 
+bool not_finalized = true;
+
+struct ProfilerManagerFinalizer {
+    std::mutex g_mutex;
+    std::set<ProfilerManager*> all_managers;
+    const char* dump_file_name = "ov_profile.json";
+    bool dump_file_over = false;
+
+    ~ProfilerManagerFinalizer() {
+        if (not_finalized)
+            finalize();
+    }
+
+    void finalize() {
+        if (!not_finalized)
+            return;
+
+        std::lock_guard<std::mutex> guard(g_mutex);
+        if (dump_file_over || all_managers.empty())
+            return;
+
+        std::cout << "ProfilerManagerFinalizer is called" << std::endl;
+        // start dump
+        std::ofstream fw;
+        fw.open(dump_file_name, std::ios::out);
+        fw << "{\n";
+        fw << "\"schemaVersion\": 1,\n";
+        fw << "\"traceEvents\": [\n";
+        fw.flush();
+
+        for (auto& pthis : all_managers) {
+            if (!pthis->enabled)
+                continue;
+            auto data_size = pthis->all_data.size();
+            auto counter_size = pthis->all_counters.size();
+            if (!data_size)
+                continue;
+
+            // open output file
+            chromeTrace ct(fw, pthis->serial);
+            for (auto& d : pthis->all_data) {
+                ct.addCompleteEvent(d.name,
+                                    d.cat,
+                                    tsc_to_usec(d.start),
+                                    tsc_to_usec(d.end) - tsc_to_usec(d.start),
+                                    d.args);
+            }
+            pthis->dumpAllCounters(ct);
+            pthis->all_data.clear();
+            pthis->all_counters.clear();
+            std::cout << "==== ProfilerManager #" << pthis->serial << "(" << pthis << ") finalize: dumpped "
+                      << data_size << "+" << counter_size << " entries;" << std::endl;
+        }
+        all_managers.clear();
+
+        fw << R"({
+            "name": "Profiler End",
+            "ph": "i",
+            "s": "g",
+            "pid": "Traces",
+            "tid": "Trace OV Profiler",
+            "ts":)"
+           << tsc_to_usec(__rdtsc()) << "}",
+            fw << "]\n";
+        fw << "}\n";
+        auto total_size = fw.tellp();
+        fw.close();
+        dump_file_over = true;
+        not_finalized = false;
+        std::cout << "==== ProfilerManager Dumpped " << total_size / (1024 * 1024) << " (MB) to " << dump_file_name
+                  << "====\n";
+    }
+
+    void register_manager(ProfilerManager* pthis) {
+        std::lock_guard<std::mutex> guard(g_mutex);
+        std::stringstream ss;
+        ss << "=== ProfilerManager #" << pthis->serial << "(" << this << ") : is registed ====" << std::endl;
+        std::cout << ss.str();
+        all_managers.emplace(pthis);
+    }
+} finalizer;
 
 ProfilerManager::ProfilerManager() {
     const char* str_enable = std::getenv("OV_CPU_PROFILE");
@@ -334,98 +421,21 @@ ProfilerManager::ProfilerManager() {
     int num_hint = atoi(str_enable);
     set_enable(num_hint > 0);
     if (enabled) {
+        init_tsc();
         pmu = std::make_shared<PMUMonitor>("ov_pmu.txt");
         pmum = reinterpret_cast<PMUMonitor*>(pmu.get());
-        if (!pmum->init_mode) {
+        if (!pmum->init_mode)
             pmum = nullptr;
-        }
 
-        if (tsc_ticks_per_second == 0) {
-            uint64_t expected = 0;
-            auto tps = rdtsc_calibrate();
-            tsc_ticks_per_second.compare_exchange_strong(expected, tps);
-            std::cout << "=== ProfilerManager: tsc_ticks_per_second = " << tsc_ticks_per_second << std::endl;
-            tsc_ticks_base.compare_exchange_strong(expected, __rdtsc());
-        }
+        tid = std::this_thread::get_id();
+        serial = totalProfilerManagers.fetch_add(1);
+        finalizer.register_manager(this);
     }
-    tid = std::this_thread::get_id();
-    std::stringstream ss;
-    serial = totalProfilerManagers.fetch_add(1);
-    ss << "=== ProfilerManager #" << serial << "(" << this << ") : is " << (enabled? "enabled":"disabled") << " ====" << std::endl;
-    std::cout << ss.str();
-    finalize(true);
-}
-
-void ProfilerManager::finalize(bool do_register) {
-    // use a lot of function-scope static global vars to ensure
-    // the life-time of these vars are longger than any thread-local
-    // global ProfilerManager instance
-    static const char* dump_file_name = "ov_profile.json";
-    static bool dump_file_over = false;
-    static std::mutex g_mutex;
-    static std::set<ProfilerManager*> all_managers;
-    std::lock_guard<std::mutex> guard(g_mutex);
-    if (do_register) {
-        if (all_managers.count(this) == 0) {
-            all_managers.emplace(this);
-        }
-        return;
-    }
-
-    if (dump_file_over)
-        return;
-    // start dump
-    std::ofstream fw;
-    fw.open(dump_file_name, std::ios::out);
-    fw << "{\n";
-    fw << "\"schemaVersion\": 1,\n";
-    fw << "\"traceEvents\": [\n";
-    fw.flush();
-
-    for (auto& pthis : all_managers) {
-        if (!pthis->enabled)
-            continue;
-        auto data_size = pthis->all_data.size();
-        auto counter_size = pthis->all_counters.size();
-        if (!data_size)
-            continue;
-
-        // open output file
-        chromeTrace ct(fw, serial);
-        for (auto& d : pthis->all_data) {
-            ct.addCompleteEvent(d.name,
-                                d.cat,
-                                tsc_to_usec(d.start),
-                                tsc_to_usec(d.end) - tsc_to_usec(d.start),
-                                d.args);
-        }
-        pthis->dumpAllCounters(ct);
-        pthis->all_data.clear();
-        pthis->all_counters.clear();
-        std::cout << "==== ProfilerManager #" << pthis->serial << "(" << pthis << ") finalize: dumpped " << data_size
-                    << "+" << counter_size << " entries;" <<  std::endl;
-    }
-    all_managers.clear();
-
-    fw << R"({
-        "name": "Profiler End",
-        "ph": "i",
-        "s": "g",
-        "pid": "Traces",
-        "tid": "Trace OV Profiler",
-        "ts":)"
-        << tsc_to_usec(__rdtsc()) << "}",
-        fw << "]\n";
-    fw << "}\n";
-    auto total_size = fw.tellp();
-    fw.close();
-    dump_file_over = true;
-
-    std::cout << "==== ProfilerManager Dumpped " << total_size/(1024*1024) << " (MB) to " << dump_file_name <<  "====\n";
 }
 
 ProfilerManager::~ProfilerManager() {
-    finalize();
+    if (not_finalized)
+        finalizer.finalize();
 }
 
 void ProfilerManager::set_enable(bool on) {

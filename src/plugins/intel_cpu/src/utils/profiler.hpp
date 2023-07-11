@@ -53,8 +53,7 @@ class Profiler;
 class chromeTrace;
 struct PMUMonitor;
 
-extern std::atomic<uint64_t>  tsc_ticks_per_second;
-extern std::atomic<uint64_t>  tsc_ticks_base;
+struct ProfilerManagerFinalizer;
 
 class ProfilerManager {
     bool enabled;
@@ -76,14 +75,9 @@ public:
     ProfilerManager();
     ~ProfilerManager();
 
-    void finalize(bool register = false);
-
     ProfileData* startProfile() {
         all_data.emplace_back();
         return &all_data.back();
-    }
-    uint64_t tsc_to_usec(uint64_t tsc_ticks) {
-        return (tsc_ticks - tsc_ticks_base) * 1000000 / tsc_ticks_per_second;
     }
 
     void addCounter(uint64_t tsc);
@@ -96,6 +90,7 @@ public:
     void dumpAllCounters(chromeTrace& ct);
 
     friend class Profiler;
+    friend class ProfilerManagerFinalizer;
 };
 
 extern thread_local ProfilerManager profilerManagerInstance;
