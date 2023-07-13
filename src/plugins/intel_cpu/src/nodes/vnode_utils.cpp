@@ -184,6 +184,7 @@ inline void scale_add_reduce_max(float* a, const float scale, const float* b, co
 #endif
 }
 
+template<int N>
 inline void scale_add2_reduce_max(float* a, const float scale, const float* b, const float* c, const size_t size, float& max) {
 #if defined(HAVE_AVX512F)
     auto v_max = _mm512_set1_ps(std::numeric_limits<float>::lowest());
@@ -195,10 +196,18 @@ inline void scale_add2_reduce_max(float* a, const float scale, const float* b, c
     // process vector body
     while (i + 16 <= size) {
         v_a = _mm512_loadu_ps(a + i);
-        v_b = _mm512_loadu_ps(b + i);
-        v_c = _mm512_loadu_ps(c + i);
-        v_a = _mm512_fmadd_ps(v_a, v_scale, v_b);
-        v_a = _mm512_add_ps(v_a, v_c);
+
+        if (N == 0) {
+            v_a = _mm512_mul_ps(v_a, v_scale);
+        } else {
+            v_b = _mm512_loadu_ps(b + i);
+            v_a = _mm512_fmadd_ps(v_a, v_scale, v_b);
+        }
+
+        if (N > 1) {
+            v_c = _mm512_loadu_ps(c + i);
+            v_a = _mm512_add_ps(v_a, v_c);
+        }
         v_max = _mm512_max_ps(v_max, v_a);
         _mm512_storeu_ps(a + i, v_a);
         i += 16;
@@ -208,10 +217,16 @@ inline void scale_add2_reduce_max(float* a, const float scale, const float* b, c
     if (i < size) {
         __mmask16 mask = (1 << (size - i)) - 1;
         v_a = _mm512_maskz_loadu_ps(mask, a + i);
-        v_b = _mm512_maskz_loadu_ps(mask, b + i);
-        v_c = _mm512_maskz_loadu_ps(mask, c + i);
-        v_a = _mm512_fmadd_ps(v_a, v_scale, v_b);
-        v_a = _mm512_add_ps(v_a, v_c);
+        if (N == 0) {
+            v_a = _mm512_mul_ps(v_a, v_scale);
+        } else {
+            v_b = _mm512_maskz_loadu_ps(mask, b + i);
+            v_a = _mm512_fmadd_ps(v_a, v_scale, v_b);
+        }
+        if (N > 1) {
+            v_c = _mm512_maskz_loadu_ps(mask, c + i);
+            v_a = _mm512_add_ps(v_a, v_c);
+        }
         v_max = _mm512_mask_max_ps(v_max, mask, v_a, v_max);
         _mm512_mask_storeu_ps(a + i, mask, v_a);
     }
@@ -227,10 +242,17 @@ inline void scale_add2_reduce_max(float* a, const float scale, const float* b, c
     // process vector body
     while (i + 8 <= size) {
         v_a = _mm256_loadu_ps(a + i);
-        v_b = _mm256_loadu_ps(b + i);
-        v_c = _mm256_loadu_ps(c + i);
-        v_a = _mm256_fmadd_ps(v_a, v_scale, v_b);
-        v_a = _mm256_add_ps(v_a, v_c);
+        if (N == 0) {
+            v_a = _mm256_mul_ps(v_a, v_scale);
+        } else {
+            v_b = _mm256_loadu_ps(b + i);
+            v_a = _mm256_fmadd_ps(v_a, v_scale, v_b);
+        }
+        if (N > 1) {
+            v_c = _mm256_loadu_ps(c + i);
+            v_a = _mm256_add_ps(v_a, v_c);
+        }
+
         v_max = _mm256_max_ps(v_max, v_a);
         _mm256_storeu_ps(a + i, v_a);
         i += 8;
@@ -240,10 +262,16 @@ inline void scale_add2_reduce_max(float* a, const float scale, const float* b, c
     if (i < size) {
         auto mask = get_mask(size - i);
         v_a = _mm256_maskload_ps(a + i, mask);
-        v_b = _mm256_maskload_ps(b + i, mask);
-        v_c = _mm256_maskload_ps(c + i, mask);
-        v_a = _mm256_fmadd_ps(v_a, v_scale, v_b);
-        v_a = _mm256_add_ps(v_a, v_c);
+        if (N == 0) {
+            v_a = _mm256_mul_ps(v_a, v_scale);
+        } else {
+            v_b = _mm256_maskload_ps(b + i, mask);
+            v_a = _mm256_fmadd_ps(v_a, v_scale, v_b);
+        }
+        if (N > 1) {
+            v_c = _mm256_maskload_ps(c + i, mask);
+            v_a = _mm256_add_ps(v_a, v_c);
+        }
         v_a = _mm256_blendv_ps(v_max, v_a, _mm256_castsi256_ps(mask));
         v_max = _mm256_max_ps(v_max, v_a);
         _mm256_maskstore_ps(a + i, mask, v_a);
@@ -253,8 +281,10 @@ inline void scale_add2_reduce_max(float* a, const float scale, const float* b, c
 #else
     for (size_t i = 0; i < size; i++) {
         a[i] *= scale;
-        a[i] += b[i];
-        a[i] += c[i];
+        if (N > 0)
+            a[i] += b[i];
+        if (N > 1)
+            a[i] += c[i];
         max = a[i] > max ? a[i] : max;
     }
 #endif
@@ -426,12 +456,19 @@ inline void multiply_scalar(float* a, const float val, const size_t size) {
 #endif
 }
 
-void scale_add_softmax(float* a, float scale, float* mask, float* aliba, size_t len, size_t total_size) {
+void scale_add_softmax(float* a, float scale, float* mask, float* alibi, size_t len, size_t total_size) {
     float max = std::numeric_limits<float>::lowest();
-    if (aliba == nullptr)
-        scale_add_reduce_max(a, scale, mask, len, max);
-    else
-        scale_add2_reduce_max(a, scale, mask, aliba, len, max);
+
+    if (mask == nullptr) {
+        scale_add2_reduce_max<0>(a, scale, mask, alibi, len, max);
+    } else {
+        if (alibi) {
+            scale_add2_reduce_max<2>(a, scale, mask, alibi, len, max);
+        } else {
+            scale_add2_reduce_max<1>(a, scale, mask, alibi, len, max);
+        }
+    }
+
     float sum = 0.0f;
     // exp sum
     exp_reduce_sum(a, max, len, sum);

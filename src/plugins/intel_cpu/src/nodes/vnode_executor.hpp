@@ -59,7 +59,7 @@ struct vnode_executor {
         }
     }
 
-    virtual void exec(Node* node, dnnl::stream strm) = 0;
+    virtual void exec(Node* node, dnnl::stream strm, std::map<std::string, double>& symbol2value) = 0;
 };
 
 // RT : runtime precision(type)
@@ -83,7 +83,7 @@ struct gpt2_attention_executor : public vnode_executor {
 
     PlainTensor<RT> query;
 
-    void exec(Node* node, dnnl::stream strm) override {
+    void exec(Node* node, dnnl::stream strm, std::map<std::string, double>& symbol2value) override {
         update_inputs(node);
 
         auto B = past_key.size(0);
@@ -170,7 +170,7 @@ struct gptneox_attention_executor : public vnode_executor {
     size_t rotary_dims;
     size_t max_position_embeddings;
 
-    void exec(Node* node, dnnl::stream strm) override {
+    void exec(Node* node, dnnl::stream strm, std::map<std::string, double>& symbol2value) override {
         update_inputs(node);
 
         B = past_key.size(0);
@@ -262,7 +262,7 @@ struct open_llama_attention_executor : public vnode_executor {
 
     PlainTensor<RT> m_query_emb;  // query with embed
 
-    void exec(Node* node, dnnl::stream strm) override {
+    void exec(Node* node, dnnl::stream strm, std::map<std::string, double>& symbol2value) override {
         update_inputs(node);
 
         auto B = q_proj.size(0);
@@ -343,7 +343,7 @@ struct bloom_attention_executor : public vnode_executor {
     PlainTensor<RT> query;  // query with embed
     PlainTensor<float> attention_mask;
 
-    void exec(Node* node, dnnl::stream strm) override {
+    void exec(Node* node, dnnl::stream strm, std::map<std::string, double>& symbol2value) override {
         update_inputs(node);
 
         auto B = qkv_input.size(0);
@@ -437,7 +437,7 @@ struct opt_attention_executor : public vnode_executor {
 
     PlainTensor<RT> query;  // query with embed
 
-    void exec(Node* node, dnnl::stream strm) override {
+    void exec(Node* node, dnnl::stream strm, std::map<std::string, double>& symbol2value) override {
         update_inputs(node);
 
         auto B = q_input.size(0);
@@ -490,12 +490,12 @@ struct whisper_enc_attention_executor : public vnode_executor {
         register_outputs(output_emb);
     }
 
-    void exec(Node* node, dnnl::stream strm) override {
+    void exec(Node* node, dnnl::stream strm, std::map<std::string, double>& symbol2value) override {
         update_inputs(node);
         auto B = q_input.size(0);
         auto L = q_input.size(1);
         auto HS = q_input.size(2);
-        auto H = 6;
+        auto H = static_cast<size_t>(symbol2value["H"]);
         auto S = HS / H;
         node->redefineOutputMemory({{B, L, H * S}});
         update_outputs(node);
@@ -510,6 +510,200 @@ struct whisper_enc_attention_executor : public vnode_executor {
         auto k = k_input.reshape({B, L, H, S}).permute({0, 2, 1, 3});
         auto v = v_input.reshape({B, L, H, S}).permute({0, 2, 1, 3});
         kernel(q, k, v, {}, output_emb, 1.0f);
+    }
+};
+
+template <KernelTypes KType, typename RT>
+struct whisper_dec_self_attn_executor : public vnode_executor {
+    PlainTensor<RT> q_input;       // "f32[?,1500,384]"  B, L, H*S
+    PlainTensor<RT> k_input;       // "f32[?,1500,384]"  B, L, H*S
+    PlainTensor<RT> v_input;       // "f32[?,1500,384]"  B, L, H*S
+    PlainTensor<float> attn_mask;  // "f32[?,1,?,?]"     B, 1, q_len, kv_len
+    PlainTensor<int32_t> shape1;   // "i32[3]"
+
+    PlainTensor<RT> output_emb;     // "f32[?,?,384]"
+    PlainTensor<RT> present_key;    // "f32[?,6,?,64]" [B, H, L, S]  transposed from k_input
+    PlainTensor<RT> present_value;  // "f32[?,6,?,64]" [B, H, L, S]  transposed from v_input
+
+    MHA_kernel<KType, RT> kernel;
+
+    whisper_dec_self_attn_executor() {
+        register_inputs(q_input, k_input, v_input, attn_mask, shape1);
+        register_outputs(output_emb, present_key, present_value);
+    }
+
+    void exec(Node* node, dnnl::stream strm, std::map<std::string, double>& symbol2value) override {
+        update_inputs(node);
+        auto B = q_input.size(0);
+        auto L = q_input.size(1);
+        auto H = static_cast<size_t>(symbol2value["H"]);
+        auto S = static_cast<size_t>(symbol2value["S"]);
+        q_input.assert_dims({B, L, H * S});
+        k_input.assert_dims({B, L, H * S});
+        v_input.assert_dims({B, L, H * S});
+        attn_mask.assert_dims({B, 1, L, L});
+        node->redefineOutputMemory({{B, L, H * S}, {B, H, L, S}, {B, H, L, S}});
+        update_outputs(node);
+
+        parallel_for3d(B, H, L, [&](size_t b, size_t h, size_t l) {
+            memcpy(&present_key.at({b, h, l, 0}), &k_input.at({b, l, h*S}), sizeof(RT) * S);
+            memcpy(&present_value.at({b, h, l, 0}), &v_input.at({b, l, h*S}), sizeof(RT) * S);
+        });
+
+        // Q, K, V is ready, do attention
+        // query         [B, H, L1, S]
+        // present_key   [B, H, L0+L1, S]  stride of last dim maybe > 1
+        // present_value [B, H, L0+L1, S]
+        // attention_mask [B, 1, L1, L0 + L1]
+        // output_emb    [B, L1, H*S]
+        auto q = q_input.reshape({B, L, H, S}).permute({0, 2, 1, 3});
+        kernel(q, present_key, present_value, attn_mask, output_emb, 1.0f);
+    }
+};
+
+template <KernelTypes KType, typename RT>
+struct whisper_dec_enc_attn_executor : public vnode_executor {
+    PlainTensor<RT> q_input;       // "f32[?,1,384]"     [B, L1, H*S]
+    PlainTensor<RT> k_input;       // "f32[?,1500,384]"  [B, L0, H*S]
+    PlainTensor<RT> v_input;       // "f32[?,1500,384]"  [B, L0, H*S]
+    PlainTensor<int32_t> shape1;   // "i32[3]"
+
+    PlainTensor<RT> output_emb;     // "f32[?,?,384]"  [B, L, H*S]
+    PlainTensor<RT> present_key;    // "f32[?,6,?,64]" [B, H, L, S]  transposed from k_input
+    PlainTensor<RT> present_value;  // "f32[?,6,?,64]" [B, H, L, S]  transposed from v_input
+
+    MHA_kernel<KType, RT> kernel;
+
+    whisper_dec_enc_attn_executor() {
+        register_inputs(q_input, k_input, v_input, shape1);
+        register_outputs(output_emb, present_key, present_value);
+    }
+
+    void exec(Node* node, dnnl::stream strm, std::map<std::string, double>& symbol2value) override {
+        update_inputs(node);
+        auto B = q_input.size(0);
+        auto L1 = q_input.size(1);
+        auto L0 = k_input.size(1);
+        auto H = static_cast<size_t>(symbol2value["H"]);
+        auto S = static_cast<size_t>(symbol2value["S"]);
+
+        q_input.assert_dims({B, L1, H * S});
+        k_input.assert_dims({B, L0, H * S});
+        v_input.assert_dims({B, L0, H * S});
+        node->redefineOutputMemory({{B, L1, H * S}, {B, H, L0, S}, {B, H, L0, S}});
+        update_outputs(node);
+
+        parallel_for3d(B, H, L0, [&](size_t b, size_t h, size_t l) {
+            memcpy(&present_key.at({b, h, l, 0}), &k_input.at({b, l, h*S}), sizeof(RT) * S);
+            memcpy(&present_value.at({b, h, l, 0}), &v_input.at({b, l, h*S}), sizeof(RT) * S);
+        });
+
+        // Q, K, V is ready, do attention
+        // query         [B, H, L1, S]
+        // present_key   [B, H, L0+L1, S]  stride of last dim maybe > 1
+        // present_value [B, H, L0+L1, S]
+        // attention_mask [B, 1, L1, L0 + L1]
+        // output_emb    [B, L1, H*S]
+        auto q = q_input.reshape({B, L1, H, S}).permute({0, 2, 1, 3});
+        kernel(q, present_key, present_value, {}, output_emb, 1.0f);
+    }
+};
+
+template <KernelTypes KType, typename RT>
+struct whisper_dec2_self_attn_executor : public vnode_executor {
+    PlainTensor<RT> q_input;       // "f32[?,..448,384]"  [B,L,H*S]
+    PlainTensor<RT> k_input;       // "f32[?,..448,384]"  [B,L,H*S]
+    PlainTensor<RT> v_input;       // "f32[?,..448,384]"  [B,L,H*S]
+    PlainTensor<RT> past_decoder_key;   // "f32[?,6,?,64]" [B,H,L,S]
+    PlainTensor<RT> past_decoder_value; // "f32[?,6,?,64]" [B,H,L,S]
+    PlainTensor<int32_t> shape1;   // "i32[3]"
+
+    PlainTensor<RT> output_emb;     // "f32[?,..448,?]" [B,L,H*S]
+    PlainTensor<RT> present_key;    // "f32[?,6,?,64]"  [B,H,L,S]
+    PlainTensor<RT> present_value;  // "f32[?,6,?,64]"  [B,H,L,S]
+
+    MHA_kernel<KType, RT> kernel;
+
+    whisper_dec2_self_attn_executor() {
+        register_inputs(q_input, k_input, v_input, past_decoder_key, past_decoder_value, shape1);
+        register_outputs(output_emb, present_key, present_value);
+    }
+
+    void exec(Node* node, dnnl::stream strm, std::map<std::string, double>& symbol2value) override {
+        update_inputs(node);
+        auto B = q_input.size(0);
+        auto L1 = q_input.size(1);
+        auto H = static_cast<size_t>(symbol2value["H"]);
+        auto S = static_cast<size_t>(symbol2value["S"]);
+        auto L0 = past_decoder_key.size(2);
+        q_input.assert_dims({B, L1, H * S});
+        k_input.assert_dims({B, L1, H * S});
+        v_input.assert_dims({B, L1, H * S});
+        past_decoder_key.assert_dims({B, H, L0, S});
+        past_decoder_value.assert_dims({B, H, L0, S});
+        node->redefineOutputMemory({{B, L1, H * S}, {B, H, L0 + L1, S}, {B, H, L0 + L1, S}});
+        update_outputs(node);
+
+        parallel_for2d(B, H, [&](size_t b, size_t h) {
+            memcpy(&present_key.at({b, h, 0, 0}), &past_decoder_key.at({b, h, 0, 0}), sizeof(RT) * L0 * S);
+            memcpy(&present_value.at({b, h, 0, 0}), &past_decoder_value.at({b, h, 0, 0}), sizeof(RT) * L0 * S);
+        });
+
+        parallel_for3d(B, H, L1, [&](size_t b, size_t h, size_t l) {
+            memcpy(&present_key.at({b, h, L0 + l, 0}), &k_input.at({b, l, h*S}), sizeof(RT) * S);
+            memcpy(&present_value.at({b, h, L0 + l, 0}), &v_input.at({b, l, h*S}), sizeof(RT) * S);
+        });
+
+        // Q, K, V is ready, do attention
+        // query         [B, H, L1, S]
+        // present_key   [B, H, L0+L1, S]  stride of last dim maybe > 1
+        // present_value [B, H, L0+L1, S]
+        // attention_mask [B, 1, L1, L0 + L1]
+        // output_emb    [B, L1, H*S]
+        auto q = q_input.reshape({B, L1, H, S}).permute({0, 2, 1, 3});
+        kernel(q, present_key, present_value, {}, output_emb, 1.0f);
+    }
+};
+
+
+template <KernelTypes KType, typename RT>
+struct whisper_dec2_enc_attn_executor : public vnode_executor {
+    PlainTensor<RT> q_input;            // "f32[?,..448,384]"     [B, L1, H*S]
+    PlainTensor<RT> past_encoder_key;   // "f32[?,6,?,64]" [B,H,L0,S]
+    PlainTensor<RT> past_encoder_value; // "f32[?,6,?,64]" [B,H,L0,S]
+    PlainTensor<int32_t> shape1;        // "i32[3]"
+
+    PlainTensor<RT> output_emb;         // "f32[?,?,384]"  [B, L1, H*S]
+
+    MHA_kernel<KType, RT> kernel;
+
+    whisper_dec2_enc_attn_executor() {
+        register_inputs(q_input, past_encoder_key, past_encoder_value, shape1);
+        register_outputs(output_emb);
+    }
+
+    void exec(Node* node, dnnl::stream strm, std::map<std::string, double>& symbol2value) override {
+        update_inputs(node);
+        auto B = q_input.size(0);
+        auto L1 = q_input.size(1);
+        auto L0 = past_encoder_key.size(2);
+        auto H = static_cast<size_t>(symbol2value["H"]);
+        auto S = static_cast<size_t>(symbol2value["S"]);
+
+        q_input.assert_dims({B, L1, H * S});
+        past_encoder_key.assert_dims({B, H, L0, S});
+        past_encoder_value.assert_dims({B, H, L0, S});
+        node->redefineOutputMemory({{B, L1, H * S}});
+        update_outputs(node);
+
+        // Q, K, V is ready, do attention
+        // query         [B, H, L1, S]
+        // present_key   [B, H, L0+L1, S]  stride of last dim maybe > 1
+        // present_value [B, H, L0+L1, S]
+        // attention_mask [B, 1, L1, L0 + L1]
+        // output_emb    [B, L1, H*S]
+        auto q = q_input.reshape({B, L1, H, S}).permute({0, 2, 1, 3});
+        kernel(q, past_encoder_key, past_encoder_value, {}, output_emb, 1.0f);
     }
 };
 

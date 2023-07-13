@@ -446,7 +446,7 @@ std::shared_ptr<Node> GenConst_tril(values_info vt) {
     });
 }
 
-bool validate_matched_symbols(ov::pass::pattern::Matcher& m);
+bool validate_matched_symbols(ov::pass::pattern::Matcher& m, std::map<std::string, double>& symbol_name2value);
 
 }  // namespace intel_cpu
 }  // namespace ov

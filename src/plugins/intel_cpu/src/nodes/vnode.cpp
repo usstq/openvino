@@ -65,12 +65,29 @@ static vnode_executor_map register_all() {
     register_executor<whisper_enc_attention_executor<KT_REF, float>>(vem, "whisper_enc_attention,REF,FP32");
     register_executor<whisper_enc_attention_executor<KT_REF, ov::bfloat16>>(vem, "whisper_enc_attention,REF,BF16");
 
+    register_executor<whisper_dec_self_attn_executor<KT_REF, float>>(vem, "whisper_dec_self_attn,REF,FP32");
+    register_executor<whisper_dec_self_attn_executor<KT_REF, ov::bfloat16>>(vem, "whisper_dec_self_attn,REF,BF16");
+
+    register_executor<whisper_dec_enc_attn_executor<KT_REF, float>>(vem, "whisper_dec_enc_attn,REF,FP32");
+    register_executor<whisper_dec_enc_attn_executor<KT_REF, ov::bfloat16>>(vem, "whisper_dec_enc_attn,REF,BF16");
+
+    register_executor<whisper_dec2_self_attn_executor<KT_REF, float>>(vem, "whisper_dec2_self_attn,REF,FP32");
+    register_executor<whisper_dec2_self_attn_executor<KT_REF, ov::bfloat16>>(vem, "whisper_dec2_self_attn,REF,BF16");
+
+    register_executor<whisper_dec2_enc_attn_executor<KT_REF, float>>(vem, "whisper_dec2_enc_attn,REF,FP32");
+    register_executor<whisper_dec2_enc_attn_executor<KT_REF, ov::bfloat16>>(vem, "whisper_dec2_enc_attn,REF,BF16");
+
     #ifdef OV_CPU_WITH_MLAS
     register_executor<gpt2_attention_executor<KT_MLAS, float>>(vem, "gpt2_attention,MLAS,FP32");
     register_executor<gptneox_attention_executor<KT_MLAS, float>>(vem, "gptneox_attention,MLAS,FP32");
     register_executor<open_llama_attention_executor<KT_MLAS, float>>(vem, "open_llama_attention,MLAS,FP32");
     register_executor<bloom_attention_executor<KT_MLAS, float>>(vem, "bloom_attention,MLAS,FP32");
     register_executor<opt_attention_executor<KT_MLAS, float>>(vem, "opt_attention,MLAS,FP32");
+    register_executor<whisper_enc_attention_executor<KT_MLAS, float>>(vem, "whisper_enc_attention,MLAS,FP32");
+    register_executor<whisper_dec_self_attn_executor<KT_MLAS, float>>(vem, "whisper_dec_self_attn,MLAS,FP32");
+    register_executor<whisper_dec_enc_attn_executor<KT_MLAS, float>>(vem, "whisper_dec_enc_attn,MLAS,FP32");
+    register_executor<whisper_dec2_self_attn_executor<KT_MLAS, float>>(vem, "whisper_dec2_self_attn,MLAS,FP32");
+    register_executor<whisper_dec2_enc_attn_executor<KT_MLAS, float>>(vem, "whisper_dec2_enc_attn,MLAS,FP32");
     #endif
     #ifdef OV_CPU_WITH_LLM
     register_executor<gpt2_attention_executor<KT_LLMDNN, ov::bfloat16>>(vem, "gpt2_attention,LLMDNN,BF16");
@@ -101,6 +118,16 @@ static std::shared_ptr<vnode_executor> vnode_executor_create(std::string vtype, 
         exec->signature = signature;
         return exec;
     }
+
+    // fallback to reference and retry
+    signature = vtype + ",REF," + prec.name();
+    it = registered_executors.find(signature);
+    if (it != registered_executors.end()) {
+        auto exec = it->second();
+        exec->signature = signature;
+        return exec;
+    }
+
     std::cout << " vnode_executor_create failed for " << signature << std::endl;
     return nullptr;
 }
@@ -126,6 +153,7 @@ VNode::VNode(const std::shared_ptr<ngraph::Node>& op, const GraphContext::CPtr c
 
     m_vnode = std::dynamic_pointer_cast<ov::intel_cpu::VNode>(op);
     m_vtype = m_vnode->get_vtype();
+    m_symbol_name2value = op->get_rt_info()["symbol_name2value"].as<decltype(m_symbol_name2value)>();
 }
 
 void VNode::getSupportedDescriptors() {
@@ -165,7 +193,7 @@ void VNode::initSupportedPrimitiveDescriptors() {
 
 void VNode::execute(dnnl::stream strm) {
     if (m_executor) {
-        m_executor->exec(this, strm);
+        m_executor->exec(this, strm, m_symbol_name2value);
     } else {
         IE_THROW() << errorPrefix << " Not implemented for " << m_vtype;
     }
@@ -173,7 +201,7 @@ void VNode::execute(dnnl::stream strm) {
 
 void VNode::executeDynamicImpl(dnnl::stream strm) {
     if (m_executor) {
-        m_executor->exec(this, strm);
+        m_executor->exec(this, strm, m_symbol_name2value);
     } else {
         IE_THROW() << errorPrefix << " Not implemented for " << m_vtype;
     }

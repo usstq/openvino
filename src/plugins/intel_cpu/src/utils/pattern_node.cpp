@@ -214,7 +214,7 @@ static bool collect_symbol_references(std::vector<SymbolReference>& svs,
     return true;
 }
 
-bool validate_matched_symbols(ov::pass::pattern::Matcher& m) {
+bool validate_matched_symbols(ov::pass::pattern::Matcher& m, std::map<std::string, double>& symbol_name2value) {
     auto& pvmap = m.get_pattern_value_map();
     auto root_pattern = m.get_pattern();
 
@@ -263,6 +263,7 @@ bool validate_matched_symbols(ov::pass::pattern::Matcher& m) {
             } else {
                 symbol_value_map[id] = ref.value;
                 independent_vars.emplace_back(sym);
+                symbol_name2value[sym.get_name()] = ref.value;
             }
         }
     }

@@ -305,7 +305,10 @@ struct MHA_kernel<KT_MLAS, float> {
         auto q_len = query.size(2);
         auto head_size = query.size(3);
         auto kv_len = present_key.size(2);
-        auto attn_mask_qlen = attention_mask.size(2);
+        size_t attn_mask_qlen = 0;
+        if (attention_mask) {
+            attn_mask_qlen = attention_mask.size(2);
+        }
         auto update_len = kv_len - q_len;
         if (d_scale == 0.0f)
             d_scale = 1.0f / sqrt(head_size);
@@ -328,20 +331,26 @@ struct MHA_kernel<KT_MLAS, float> {
             float* qk = &(p_qk_buffer->at({thread_id, 0, 0}));
             float* dst = &(p_dst_buffer->at({thread_id, 0, 0}));
             if (k_stride_s == 1)
-                ov_sgemm("N", "T", q_len, kv_len, head_size, 1.0f, q_ptr, head_size, k_ptr, head_size, 0.f, qk, kv_len, 1);
+                ov_sgemm("N", "T", q_len, kv_len, head_size, 1.0f, q_ptr, query.stride(2), k_ptr, present_key.stride(2), 0.f, qk, kv_len, 1);
             else
-                ov_sgemm("N", "N", q_len, kv_len, head_size, 1.0f, q_ptr, head_size, k_ptr, kv_len, 0.f, qk, kv_len, 1);
+                ov_sgemm("N", "N", q_len, kv_len, head_size, 1.0f, q_ptr, query.stride(2), k_ptr, present_key.stride(2), 0.f, qk, kv_len, 1);
 
+            float * mask = nullptr;
             for (size_t m = 0; m < q_len; m++) {
                 size_t offset = m * kv_len;
                 // apply attention mask
                 // sofmax
                 auto ncausal = update_len + m + 1;
-                if (attn_mask_qlen > 1) {
-                    // this imply attn mask is combined with causal mask
+                if (attn_mask_qlen > 0) {
+                    mask = &attention_mask.at({b, 0, std::min(m, attn_mask_qlen - 1), 0});
+                    if (attn_mask_qlen > 1) {
+                        // this imply attn mask is combined with causal mask
+                        ncausal = kv_len;
+                    }
+                } else {
+                    // no attention mask, means no causal mask too
                     ncausal = kv_len;
                 }
-                auto* mask = &attention_mask.at({b, 0, std::min(m, attn_mask_qlen - 1), 0});
                 InferenceEngine::Extensions::Cpu::XARCH::scale_add_softmax(&qk[offset],
                                                                            d_scale,
                                                                            mask,
@@ -349,12 +358,25 @@ struct MHA_kernel<KT_MLAS, float> {
                                                                            ncausal,
                                                                            kv_len);
             }
-            ov_sgemm("N", "N", q_len, head_size, kv_len, 1.0f, qk, kv_len, v_ptr, head_size, 0.f, dst, head_size, 1);
+            ov_sgemm("N",
+                     "N",
+                     q_len,
+                     head_size,
+                     kv_len,
+                     1.0f,
+                     qk,
+                     kv_len,
+                     v_ptr,
+                     present_value.stride(2),
+                     0.f,
+                     &output_emb.at({b, 0, h * head_size}),
+                     output_emb.stride(1),
+                     1);
             // output [B, L1, H*S]
-            for (size_t m = 0; m < q_len; m++) {
-                const float* src = dst + m * head_size;
-                std::copy(src, src + head_size, &output_emb.at({b, m, h * head_size}));
-            }
+            //for (size_t m = 0; m < q_len; m++) {
+            //    const float* src = dst + m * head_size;
+            //    std::copy(src, src + head_size, &output_emb.at({b, m, h * head_size}));
+            //}
         });
     }
     // buffer to hold qk temp

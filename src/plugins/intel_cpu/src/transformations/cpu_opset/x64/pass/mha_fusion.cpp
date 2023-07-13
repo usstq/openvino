@@ -633,8 +633,9 @@ public:
             auto& pvmap = m.get_pattern_value_map();
             // auto node_src = pvmap.at(select.node).get_node_shared_ptr();
             auto root_value = m.get_match_value();
+            std::map<std::string, double> symbol_name2value;
             std::cout << "VNodeIn::callback " << root_value << std::endl;
-            if (!validate_matched_symbols(m)) {
+            if (!validate_matched_symbols(m, symbol_name2value)) {
                 std::cout << "VNodeIn: symbol validation failed!" << std::endl;
                 return false;
             }
@@ -655,6 +656,8 @@ public:
                 return false;
 
             auto vnode = std::make_shared<VNode>(real_inputs, real_outputs, vtype);
+
+            vnode->get_rt_info()["symbol_name2value"] = symbol_name2value;
 
             for (size_t i = 0; i < pattern_values.size(); i++) {
                 auto out = pvmap[pattern_values[i].get_node_shared_ptr()];
@@ -683,6 +686,10 @@ MHADynamicVNodeIn::MHADynamicVNodeIn() {
     add_matcher<VNodeIn>("open_llama_attention", vnode_llama_attn);
     add_matcher<VNodeIn>("bloom_attention", vnode_bloom_attn);
     add_matcher<VNodeIn>("whisper_enc_attention", vnode_whisper_enc_attention);
+    add_matcher<VNodeIn>("whisper_dec_self_attn", vnode_whisper_dec_self_attn);
+    add_matcher<VNodeIn>("whisper_dec_enc_attn", vnode_whisper_dec_enc_attn);
+    add_matcher<VNodeIn>("whisper_dec2_self_attn", vnode_whisper_dec2_self_attn);
+    add_matcher<VNodeIn>("whisper_dec2_enc_attn", vnode_whisper_dec2_enc_attn);
 }
 
 MHADynamicVNodeOut::MHADynamicVNodeOut() {
