@@ -325,7 +325,7 @@ struct bloom_attention_executor : public vnode_executor {
     PlainTensor<RT> qkv_input;   //"f32[B, L, H*3*S]"
     PlainTensor<RT> past_key;    // f32[B*H, S, L]
     PlainTensor<RT> past_value;  // f32[B*H, L, S]
-    PlainTensor<float> alibi;    // f32[H, 1, kv_len] will be broadcasted add to attention weights [B, H, q_len, kv_len]
+    PlainTensor<float> alibi;    // f32[B*H, 1, kv_len] will be broadcasted add to attention weights [B, H, q_len, kv_len]
     PlainTensor<uint8_t> combined_attention_mask;  // (attention + causal) : u8[B,1,q_len,kv_len]  False means add 0,
                                                    // True means set to -FLT_MAX
 
@@ -365,7 +365,7 @@ struct bloom_attention_executor : public vnode_executor {
         qkv_input.assert_dims({B, L1, H * 3 * S});
         past_key.assert_dims({B * H, S, L0});
         past_value.assert_dims({B * H, L0, S});
-        alibi.assert_dims({H, 1, L0 + L1});
+        alibi.assert_dims({B * H, 1, L0 + L1});
         combined_attention_mask.assert_dims({B, 1, L1, L0 + L1});
 
         // transform u8 mask to f32 additive mask

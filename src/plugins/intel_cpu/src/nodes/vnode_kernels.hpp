@@ -94,13 +94,25 @@ struct RoPE_kernel {
 };
 
 #ifdef OV_CPU_WITH_LLM
+template<typename DT>
+llmdnn::tensor Convert2LLMTensor(const PlainTensor<DT>& src) {
+    llmdnn::tensor dst;
+    dst.m_capacity = 0;
+    dst.m_rank = src.m_rank;
+    dst.m_ptr = src.m_ptr.get();
+    memcpy(dst.m_dims, src.m_dims, sizeof(size_t) * src.m_rank);
+    dst.m_element_size = sizeof(DT);
+    dst.m_dtype = llmdnn::precision_of<DT>::value;
+    for (size_t i = 0; i < src.m_rank; i++) {
+        dst.m_strides[i] = src.m_strides[i] * sizeof(DT);
+    }
+    return std::move(dst);
+}
+
 // specialization on llmdnn
 template <>
 struct RoPE_kernel<KT_LLMDNN, ov::bfloat16> {
     RoPE_kernel() = default;
-
-    llmdnn::emb_gpt m_kernel_emb;
-    bool m_kernel_initialized = false;
 
     void operator()(PlainTensor<ov::bfloat16>& cur_query,   // B,L,H,S
                     PlainTensor<ov::bfloat16>& cur_key,     // B,L,H,S
@@ -112,51 +124,17 @@ struct RoPE_kernel<KT_LLMDNN, ov::bfloat16> {
                     PlainTensor<ov::bfloat16>& present_value,
                     PlainTensor<float>& rotary_emb_cos,
                     PlainTensor<float>& rotary_emb_sin) {
-        auto B = cur_query.size(0);
-        auto L1 = cur_query.size(1);
-        auto H = past_key.size(1);
-        auto L0 = past_key.size(2);
-        auto S = past_key.size(3);
-        auto rotary_dims = rotary_emb_cos.size(3);
-        if (!m_kernel_initialized) {
-            if (!m_kernel_emb.create(llmdnn::emb_gpt::create_param{
-                    .num_heads = H,
-                    .head_size = S,
-                    .head_size_aligned = S,  // better to aligned to 64 bytes for best performance, apply for qkv
-                    .qkv_precision = llmdnn::data_type_t::dnnl_bf16,
-                    .dst_precision = llmdnn::data_type_t::dnnl_bf16,
-                    .rotary_dims = rotary_dims,
-                    .use_position2d = false,
-                })) {
-                IE_THROW() << __func__ << " llmdnn::emb_gpt::create failed " << std::endl;
-            }
-            m_kernel_initialized = true;
-        }
-
-        m_kernel_emb.exec(llmdnn::emb_gpt::exec_param{
-            .batch = B,
-            .query_seq_len = L1,
-            .past_seq_len = L0,
-            .q = reinterpret_cast<uint8_t*>(cur_query.data()),  // [B, L1, H, S]
-            .k = reinterpret_cast<uint8_t*>(cur_key.data()),    // [B, L1, H, S]
-            .v = reinterpret_cast<uint8_t*>(cur_value.data()),  // [B, L1, H, S]
-            .ldq = cur_query.stride(2),
-            .ldk = cur_key.stride(2),
-            .ldv = cur_value.stride(2),
-            .query_dst = reinterpret_cast<uint8_t*>(query_emb.data()),  // rotary embbeding dst
-            .layer_past_key_src = past_key.get_batched_ptrs(),          // past key src
-            .layer_past_value_src = past_value.get_batched_ptrs(),      // past value src
-            .layer_past_key_dst =
-                present_key.get_batched_ptrs(),  // past key dst, if layer_past_key_src!=layer_past_key_dst,
-                                                 // will copy layer_past_key_src to layer_past_key_dst
-            .layer_past_value_dst =
-                present_value.get_batched_ptrs(),  // past value dst, if layer_past_value!=layer_past_value_dst,
-                                                   // will copy layer_past_value to layer_past_value_dst
-            .cos = rotary_emb_cos.data(),
-            .sin = rotary_emb_sin.data(),
-            .position2d_ids = nullptr,          // shape: [batch, 2, query_seq_len]
-            .head_stride_in_kv = (L0 + L1) * S  // kv stride for next head; kv may be preallocated a big buffer
-        });
+        llmdnn::emb_gpt(Convert2LLMTensor(cur_query),               // B,L,H,S
+                        Convert2LLMTensor(cur_key),                 // B,L,H,S
+                        Convert2LLMTensor(cur_value),               // B,L,H,S
+                        Convert2LLMTensor(past_key),                // f32[B, H, L0, S]
+                        Convert2LLMTensor(past_value),              // f32[B, H, L0, S]
+                        Convert2LLMTensor(query_emb),
+                        Convert2LLMTensor(present_key),
+                        Convert2LLMTensor(present_value),
+                        Convert2LLMTensor(rotary_emb_cos),
+                        Convert2LLMTensor(rotary_emb_sin),
+                        llmdnn::tensor());
     }
 };
 #endif
@@ -404,66 +382,24 @@ struct MHA_kernel<KT_LLMDNN, ov::bfloat16> {
                     const PlainTensor<float>& attention_mask,  // [batch, 1, query_seq_len, key_seq_len]
                     PlainTensor<ov::bfloat16>& attn_output,
                     float d_scale = 0.0f) {
-        int max_position_embeddings = 2048;
-        auto B = query.size(0);
-        auto H = query.size(1);
-        auto q_len = query.size(2);
         auto head_size = query.size(3);
-        auto kv_len = present_key.size(2);
-        auto is_causal_in_attention = attention_mask.size(2) > 1;
-
         if (d_scale == 0.0f)
             d_scale = 1.0f / sqrt(head_size);
 
-        if (!m_kernel_initialized) {
-            if (!m_kernel.create(llmdnn::mha_gpt::create_param{
-                    .num_heads = H,
-                    .head_size = head_size,
-                    .head_size_aligned =
-                        head_size,  // better to aligned to 64 bytes for best performance, apply for qkv
-                    .max_seq_len = static_cast<int>(
-                        max_position_embeddings),  // max seq length for computing the size of matmul tmp result
-                    .normal_factor = d_scale,
-                    .qkv_precision = llmdnn::data_type_t::dnnl_bf16,
-                    .dst_precision = llmdnn::data_type_t::dnnl_bf16,
-                    .is_bloom = p_alibi != nullptr,
-                })) {
-                IE_THROW() << __func__ << " llmdnn::mha_gpt::create failed " << std::endl;
-            }
-            m_kernel_initialized = true;
+        llmdnn::tensor alibi;
+        if (p_alibi) {
+            auto B = query.size(0);
+            auto H = present_key.size(1);
+            alibi = Convert2LLMTensor(*p_alibi).reshape({B, H, 1, p_alibi->size(2)});
         }
-        auto batched_ptrs_key = present_key.get_batched_ptrs();
-        auto batched_ptrs_value = present_value.get_batched_ptrs();
-        m_kernel.exec(llmdnn::mha_gpt::exec_param{
-            .batch = B,
-            .query_seq_len = q_len,
-            .key_seq_len = kv_len,
-            .is_causal_in_attention =
-                is_causal_in_attention,  // causal mask is fused in attention mask: chatglm uses it.
-            .q = reinterpret_cast<uint8_t*>(
-                query.data()),        // q buffer, compact, shape: [batch, num_heads, query_seq_len, head_size]
-            .k = batched_ptrs_key,    // k buffer, k[N] stands different batch which may be discreted
-                                      //      k[0] shape: [batch, num_heads, key_seq_len, head_size]
-            .v = batched_ptrs_value,  // v buffer, v[N] stands different batch which may be discreted
-                                      //      v[0] shape: [batch, num_heads, value_seq_len, head_size]
-            .attention_mask = attention_mask.data(),  // attention mask, attention_mask[0] shape:
-                                                      //      [batch, 1, 1, key_seq_len], when
-                                                      //      is_causal_in_attention is false
-            //      [batch, 1, query_seq_len, key_seq_len], when is_causal_in_attention is true
-            .attn_output = reinterpret_cast<uint8_t*>(
-                attn_output.data()),  // output, compact, shape: [batch, query_seq_len, num_heads
-                                      // * head_size]
-            .head_stride_in_kv =
-                (kv_len)*head_size,  // kv stride for next head; kv may be preallocated a big buffer
-                                     // expected quant schema:
-                                     //   q,k,v use per tensor quant, attn_output may use per tensor/channel quant
-            .alibi = p_alibi ? p_alibi->data() : nullptr,
-            .q_dequant = 1.0f,
-            .k_dequant = 1.0f,
-            .v_dequant = 1.0f,
-            .qk_quant = 1.0f,
-            .qkv_quant = {}  // size==1 per tensor, size==head_size per channel
-        });
+        m_kernel.exec(Convert2LLMTensor(query),
+                      Convert2LLMTensor(present_key),
+                      Convert2LLMTensor(present_value),
+                      Convert2LLMTensor(attn_output),
+                      Convert2LLMTensor(attention_mask),
+                      alibi,
+                      d_scale,
+                      p_alibi == nullptr);
     }
 };
 #endif

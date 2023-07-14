@@ -107,7 +107,7 @@ target_include_directories(${TARGET_NAME} SYSTEM PRIVATE $<TARGET_PROPERTY:dnnl,
 
 # Please specify cpu_extensions install path by env var: cpu_extensions_DIR 
 find_package(cpu_extensions CONFIG REQUIRED)
-target_link_libraries(${TARGET_NAME} PRIVATE cpu_extensions::cpu_extensions)
+target_link_libraries(${TARGET_NAME} PRIVATE cpu_extensions)
 add_definitions(-DOV_CPU_WITH_LLM)
 
 # Cross compiled function
