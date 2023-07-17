@@ -106,9 +106,11 @@ endif()
 target_include_directories(${TARGET_NAME} SYSTEM PRIVATE $<TARGET_PROPERTY:dnnl,INCLUDE_DIRECTORIES>)
 
 # Please specify cpu_extensions install path by env var: cpu_extensions_DIR 
-find_package(cpu_extensions CONFIG REQUIRED)
+find_package(cpu_extensions CONFIG)
+if (cpu_extensions_FOUND)
 target_link_libraries(${TARGET_NAME} PRIVATE cpu_extensions)
 add_definitions(-DOV_CPU_WITH_LLM)
+endif()
 
 # Cross compiled function
 # TODO: The same for proposal, proposalONNX, topk
