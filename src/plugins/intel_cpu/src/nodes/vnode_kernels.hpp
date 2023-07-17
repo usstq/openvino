@@ -311,7 +311,7 @@ struct MHA_kernel<KT_MLAS, float> {
             if (k_stride_s == 1)
                 ov_sgemm("N", "T", q_len, kv_len, head_size, 1.0f, q_ptr, query.stride(2), k_ptr, present_key.stride(2), 0.f, qk, kv_len, 1);
             else
-                ov_sgemm("N", "N", q_len, kv_len, head_size, 1.0f, q_ptr, query.stride(2), k_ptr, present_key.stride(2), 0.f, qk, kv_len, 1);
+                ov_sgemm("N", "N", q_len, kv_len, head_size, 1.0f, q_ptr, query.stride(2), k_ptr, present_key.stride(3), 0.f, qk, kv_len, 1);
 
             float * mask = nullptr;
             for (size_t m = 0; m < q_len; m++) {
