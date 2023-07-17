@@ -100,27 +100,29 @@ extern std::shared_ptr<ProfileData> profile_data_null;
 
 bool ProfilerInit();
 
+using ProfileHandle = std::unique_ptr<ProfileData, void(*)(ProfileData*)>;
+
 #define ENABLE_CPU_PROFILER 1
 #if ENABLE_CPU_PROFILER == 1
-inline std::shared_ptr<ProfileData> Profile(const char * name) {
+inline ProfileHandle Profile(const char * name) {
     if (!profile_enabled)
-        return profile_data_null;
+        return ProfileHandle(nullptr, [](ProfileData*){});
     ProfileData* p = profilerManagerInstance.startProfile();
     p->name = name;
-    return std::shared_ptr<ProfileData>(p, ProfileData::record_end);
+    return ProfileHandle(p, ProfileData::record_end);
 }
 
 // getArgs return ProfileArgs
 template<typename F>
-inline std::shared_ptr<ProfileData> Profile(F fill_data) {
+inline ProfileHandle Profile(F fill_data) {
     static_assert(std::is_convertible<F, std::function<void(ProfileData *)>>::value, "Wrong Signature!");
 
     if (!profile_enabled)
-        return profile_data_null;
+        return ProfileHandle(nullptr, [](ProfileData*){});
 
     ProfileData* p = profilerManagerInstance.startProfile();
     fill_data(p);
-    return std::shared_ptr<ProfileData>(p, ProfileData::record_end);
+    return ProfileHandle(p, ProfileData::record_end);
 }
 #else
 #define Profile(...) 1
