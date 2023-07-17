@@ -102,7 +102,7 @@ void DimOf::execute(dnnl::stream strm) {
     if (outPtr->getStaticDims().size() != 1 || 1 != outPtr->getStaticDims()[0])
         IE_THROW() << errorPrefix << "has inconsistent input shape and output size";
 
-    auto* dst = reinterpret_cast<int*>(getChildEdgeAt(0)->getMemoryPtr()->GetPtr());
+    auto* dst = reinterpret_cast<int*>(getChildEdgeAt(0)->getMemoryPtr()->getData());
 
     auto axis = m_axis;
     if (axis < 0)

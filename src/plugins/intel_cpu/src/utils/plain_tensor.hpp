@@ -130,9 +130,9 @@ struct PlainTensor : public PlainTensorBase {
     PlainTensor() = default;
 
     void reset(MemoryPtr mem) override {
-        assert_dt<DT>(mem->GetDataType());
+        assert_dt<DT>(mem->getDataType());
         // this reshape_to() can do reshape w/o additional cost
-        resize(mem->getStaticDims(), reinterpret_cast<DT*>(mem->GetPtr()));
+        resize(mem->getStaticDims(), reinterpret_cast<DT*>(mem->getData()));
     }
 
     InferenceEngine::Precision::ePrecision get_precision(void) override {

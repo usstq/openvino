@@ -188,10 +188,10 @@ void dump_tensor(std::ostream& os, void * ptr, const VectorDims& dims) {
 }
 
 std::ostream& operator<<(std::ostream& os, const Memory& mem) {
-    auto nbytes = mem.GetSize();
-    void* ptr = mem.GetPtr();
+    auto nbytes = mem.getSize();
+    void* ptr = mem.getData();
     auto& dims = mem.getStaticDims();
-    switch (mem.GetDataType()) {
+    switch (mem.getDataType()) {
     case dnnl::memory::data_type::bf16:
         dump_tensor<ov::bfloat16>(os, ptr, dims);
         break;
@@ -256,7 +256,7 @@ std::ostream & operator<<(std::ostream & os, const Node &c_node) {
                     leftside << comma << desc->getPrecision().name()
                                 << "_" << desc->serializeFormat()
                                 << "_" << shape_str
-                                << "_" << ptr->GetData();
+                                << "_" << ptr->getData();
                     b_ouputed = true;
                 } else {
                     leftside << "(empty)";
@@ -349,7 +349,7 @@ std::ostream & operator<<(std::ostream & os, const Node &c_node) {
     if (node.getType() == intel_cpu::Type::Input && node.isConstant()) {
         if (auto input_node = reinterpret_cast<intel_cpu::node::Input *>(&node)) {
             auto pmem = input_node->getMemoryPtr();
-            void * data = pmem->GetData();
+            void * data = pmem->getData();
             auto shape = pmem->getDesc().getShape().getDims();
 
             if (shape_size(shape) <= 8) {
