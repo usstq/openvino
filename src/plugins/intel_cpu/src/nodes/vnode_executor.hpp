@@ -62,6 +62,105 @@ struct vnode_executor {
     virtual void exec(Node* node, dnnl::stream strm, std::map<std::string, double>& symbol2value) = 0;
 };
 
+
+template <typename RT>
+struct KVConcatKernel {
+    void operator()(const PlainTensor<RT>& k_input,       // "f32[B, L1, H, S]"
+                    const PlainTensor<RT>& v_input,       // "f32[B, L1, H, S]"
+                    const PlainTensor<RT>& past_key,      // "f32[B, H, L0, S]"
+                    const PlainTensor<RT>& past_value,    // "f32[B, H, L0, S]"
+                    const PlainTensor<RT>& present_key,   // "f32[B, H, L0+L1, S]"
+                    const PlainTensor<RT>& present_value  // "f32[B, H, L0+L1, S]"
+    ) {
+        auto B = past_key.size(0);
+        auto H = past_key.size(1);
+        auto L0 = past_key.size(2);
+        auto S = past_key.size(3);
+        auto L1 = k_input.size(1);
+        auto past_ks_stride = past_key.stride(3);
+        parallel_for3d(2, B, H, [&](size_t kv_id, size_t b, size_t h) {
+            if (kv_id == 0) {
+                if (past_ks_stride == 1) {
+                    if (L0 > 0) {
+                        memcpy(&present_key.at({b, h, 0, 0}), &past_key.at({b, h, 0, 0}), sizeof(RT) * L0 * S);
+                    }
+                    for (size_t p = 0; p < L1; p++) {
+                        memcpy(&present_key.at({b, h, L0 + p, 0}), &k_input.at({b, p, h, 0}), sizeof(RT) * S);
+                    }
+                } else {
+                    // special layout for bloom past/present_key, [B, H, S, L0]
+                    if (L0 > 0) {
+                        for (size_t s = 0; s < S; s++) {
+                            memcpy(&present_key.at({b, h, 0, s}), &past_key.at({b, h, 0, s}), sizeof(RT) * L0);
+                        }
+                    }
+                    for (size_t s = 0; s < S; s++) {
+                        for (size_t p = 0; p < L1; p++) {
+                            present_key.at({b, h, L0 + p, s}) = k_input.at({b, p, h, s});
+                        }
+                    }
+                }
+            } else {
+                // past_key/value
+                if (L0 > 0) {
+                    memcpy(&present_value.at({b, h, 0, 0}), &past_value.at({b, h, 0, 0}), sizeof(RT) * L0 * S);
+                }
+                for (size_t p = 0; p < L1; p++) {
+                    memcpy(&present_value.at({b, h, L0 + p, 0}), &v_input.at({b, p, h, 0}), sizeof(RT) * S);
+                }
+            }
+        });
+    }
+};
+
+template <KernelTypes KType, typename RT>
+struct opt_attention_executor : public vnode_executor {
+    PlainTensor<RT> q_input;  // "f32[B, L1, H*S]"
+    PlainTensor<RT> k_input;  // "f32[B, L1, H*S]"
+    PlainTensor<RT> v_input;  // "f32[B, L1, H*S]"
+
+    PlainTensor<RT> past_key;                    // "f32[B, H, L0, S]"
+    PlainTensor<RT> past_value;                  // "f32[B, H, L0, S]"
+    PlainTensor<float> combined_attention_mask;  // (attention + causal) : f32[B,1,q_len,kv_len]
+
+    PlainTensor<int32_t> shape;  // "i32[3]"
+
+    PlainTensor<RT> output_emb;     // f32[B, L1, H*S]
+    PlainTensor<RT> present_key;    // "f32[B, H, L0+L1, S]"
+    PlainTensor<RT> present_value;  // "f32[B, H, L0+L1, S]"
+
+    MHA_kernel<KType, RT> kernel;
+    KVConcatKernel<RT> kvconcat;
+
+    opt_attention_executor() {
+        register_inputs(q_input, k_input, v_input, past_key, past_value, combined_attention_mask, shape);
+        register_outputs(output_emb, present_key, present_value);
+    }
+
+    void exec(Node* node, dnnl::stream strm, std::map<std::string, double>& symbol2value) override {
+        update_inputs(node);
+
+        auto B = q_input.size(0);
+        auto L1 = q_input.size(1);
+        auto HS = q_input.size(2);
+        auto L0 = past_key.size(2);
+        auto S = past_key.size(3);
+        auto H = HS / S;
+
+        node->redefineOutputMemory({{B, L1, H * S}, {B, H, L0 + L1, S}, {B, H, L0 + L1, S}});
+        update_outputs(node);
+
+        kvconcat(k_input.reshape({B, L1, H, S}),
+                 v_input.reshape({B, L1, H, S}),
+                 past_key,
+                 past_value,
+                 present_key,
+                 present_value);
+        auto query = q_input.reshape({B, L1, H, S}).permute({0, 2, 1, 3});
+        kernel(query, present_key, present_value, combined_attention_mask, output_emb, 1.0f);
+    }
+};
+
 // RT : runtime precision(type)
 template <KernelTypes KType, typename RT>
 struct gpt2_attention_executor : public vnode_executor {
@@ -75,13 +174,12 @@ struct gpt2_attention_executor : public vnode_executor {
     PlainTensor<RT> present_value;  // f32[B, H, L0+L1, 64]
 
     MHA_kernel<KType, RT> kernel;
+    KVConcatKernel<RT> kvconcat;
 
     gpt2_attention_executor() {
         register_inputs(qkv_input, past_key, past_value, attention_mask);
         register_outputs(output_emb, present_key, present_value);
     }
-
-    PlainTensor<RT> query;
 
     void exec(Node* node, dnnl::stream strm, std::map<std::string, double>& symbol2value) override {
         update_inputs(node);
@@ -104,28 +202,15 @@ struct gpt2_attention_executor : public vnode_executor {
 
         update_outputs(node);
 
-        DEBUG_LOG(" B=", B, " H=", H, " S=", S, " L0=", L0, " L1=", L1);
-
-        // auto query = qkv_input.slice(2, 0, H * S).reshape({B, L1, H, S}).permute({0, 2, 1, 3});
-        // auto query = qkv_input.reshape({B, L1, 3, H, S}).index({{}, {}, {0}, {}, {}}).permute({0, 2, 1, 3});
-        // std::cout << "query=" << query << std::endl; asm("int3");
-        // concat pask_key/value & k/v into present_key/value
-        query.resize({B, H, L1, S});
-        parallel_for2d(B, H, [&](size_t b, size_t h) {
-            memcpy(&present_key.at({b, h, 0, 0}), &past_key.at({b, h, 0, 0}), sizeof(RT) * L0 * S);
-            memcpy(&present_value.at({b, h, 0, 0}), &past_value.at({b, h, 0, 0}), sizeof(RT) * L0 * S);
-
-            for (size_t p = 0; p < L1; p++) {
-                auto* q = &qkv_input.at({b, p, h * S});
-                auto* k = &qkv_input.at({b, p, (H + h) * S});
-                auto* v = &qkv_input.at({b, p, (2 * H + h) * S});
-                memcpy(&query.at({b, h, p, 0}), q, sizeof(RT) * S);
-                memcpy(&present_key.at({b, h, L0 + p, 0}), k, sizeof(RT) * S);
-                memcpy(&present_value.at({b, h, L0 + p, 0}), v, sizeof(RT) * S);
-            }
-        });
-
-        kernel(query, present_key, present_value, attention_mask, output_emb);
+        auto qkv4d = qkv_input.reshape({B, L1, 3*H, S});
+        auto q_input = qkv4d.slice(2, 0, H).permute({0, 2, 1, 3});
+        kvconcat(qkv4d.slice(2, H, 2 * H),
+                 qkv4d.slice(2, 2 * H, 3 * H),
+                 past_key,
+                 past_value,
+                 present_key,
+                 present_value);
+        kernel(q_input, present_key, present_value, attention_mask, output_emb);
     }
 };
 
@@ -334,13 +419,13 @@ struct bloom_attention_executor : public vnode_executor {
     PlainTensor<RT> present_value;  // f32[B*H, L0+L1, S]
 
     MHA_kernel<KType, RT> kernel;
+    KVConcatKernel<RT> kvconcat;
 
     bloom_attention_executor() {
         register_inputs(qkv_input, past_key, past_value, alibi, combined_attention_mask);
         register_outputs(output_emb, present_key, present_value);
     }
 
-    PlainTensor<RT> query;  // query with embed
     PlainTensor<float> attention_mask;
 
     void exec(Node* node, dnnl::stream strm, std::map<std::string, double>& symbol2value) override {
@@ -352,14 +437,8 @@ struct bloom_attention_executor : public vnode_executor {
         auto L0 = past_value.size(1);
         auto S = past_value.size(2);
         auto H = H3S / (3 * S);
-        DEBUG_LOG(" B=", B, " H=", H, " S=", S, " L0=", L0, " L1=", L1);
 
-        std::vector<VectorDims> outputShapes;
-        outputShapes.push_back(VectorDims{B, L1, H * S});
-        outputShapes.push_back(VectorDims{B * H, S, L0 + L1});
-        outputShapes.push_back(VectorDims{B * H, L0 + L1, S});
-        node->redefineOutputMemory(outputShapes);
-
+        node->redefineOutputMemory({{B, L1, H * S}, {B * H, S, L0 + L1}, {B * H, L0 + L1, S}});
         update_outputs(node);
 
         qkv_input.assert_dims({B, L1, H * 3 * S});
@@ -376,101 +455,23 @@ struct bloom_attention_executor : public vnode_executor {
             pdst[i] = psrc[i] ? -FLT_MAX : 0;
         }
 
-        auto qkv_5d = qkv_input.reshape({B, L1, H, 3, S});
-        auto present_key2 = present_key.reshape({B, H, S, L0 + L1});
-        auto past_key2 = past_key.reshape({B, H, S, L0});
-        auto present_value2 = present_value.reshape({B, H, L0 + L1, S});
+        auto past_key2 = past_key.reshape({B, H, S, L0}).permute({0, 1, 3, 2});
+        auto present_key2 = present_key.reshape({B, H, S, L0 + L1}).permute({0, 1, 3, 2});
         auto past_value2 = past_value.reshape({B, H, L0, S});
+        auto present_value2 = present_value.reshape({B, H, L0 + L1, S});
 
-        query.resize({B, H, L1, S});
+        auto qkv_4d = qkv_input.reshape({B, L1, H, 3*S});
 
-        parallel_for2d(B, H, [&](size_t b, size_t h) {
-            // past_key
-            for (size_t s = 0; s < S; s++) {
-                memcpy(&present_key2.at({b, h, s, 0}), &past_key2.at({b, h, s, 0}), sizeof(RT) * L0);
-                for (size_t p = 0; p < L1; p++) {
-                    present_key2.at({b, h, s, L0 + p}) = qkv_5d.at({b, p, h, 1, s});
-                }
-            }
+        kvconcat(qkv_4d.slice(3, S, 2 * S),
+                 qkv_4d.slice(3, 2 * S, 3 * S),
+                 past_key2,
+                 past_value2,
+                 present_key2,
+                 present_value2);
 
-            // past_value
-            for (size_t p = 0; p < L0; p++) {
-                memcpy(&present_value2.at({b, h, p, 0}), &past_value2.at({b, h, p, 0}), sizeof(RT) * S);
-            }
-            for (size_t p = 0; p < L1; p++) {
-                // current q,k,v
-                auto* q = &qkv_5d.at({b, p, h, 0, 0});
-                auto* v = &qkv_5d.at({b, p, h, 2, 0});
-                memcpy(&query.at({b, h, p, 0}), q, sizeof(RT) * S);
-                memcpy(&present_value2.at({b, h, L0 + p, 0}), v, sizeof(RT) * S);
-            }
-        });
-
-        present_key2 = present_key2.permute({0, 1, 3, 2});
         kernel.set_alibi(alibi);
+        auto query = qkv_4d.slice(3, 0, S).permute({0, 2, 1, 3});
         kernel(query, present_key2, present_value2, attention_mask, output_emb);
-    }
-};
-
-template <KernelTypes KType, typename RT>
-struct opt_attention_executor : public vnode_executor {
-    PlainTensor<RT> q_input;  // "f32[B, L1, H*S]"
-    PlainTensor<RT> k_input;  // "f32[B, L1, H*S]"
-    PlainTensor<RT> v_input;  // "f32[B, L1, H*S]"
-
-    PlainTensor<RT> past_key;                    // "f32[B, H, L0, S]"
-    PlainTensor<RT> past_value;                  // "f32[B, H, L0, S]"
-    PlainTensor<float> combined_attention_mask;  // (attention + causal) : f32[B,1,q_len,kv_len]
-
-    PlainTensor<int32_t> shape;  // "i32[3]"
-
-    PlainTensor<RT> output_emb;     // f32[B, L1, H*S]
-    PlainTensor<RT> present_key;    // "f32[B, H, L0+L1, S]"
-    PlainTensor<RT> present_value;  // "f32[B, H, L0+L1, S]"
-
-    MHA_kernel<KType, RT> kernel;
-
-    opt_attention_executor() {
-        register_inputs(q_input, k_input, v_input, past_key, past_value, combined_attention_mask, shape);
-        register_outputs(output_emb, present_key, present_value);
-    }
-
-    PlainTensor<RT> query;  // query with embed
-
-    void exec(Node* node, dnnl::stream strm, std::map<std::string, double>& symbol2value) override {
-        update_inputs(node);
-
-        auto B = q_input.size(0);
-        auto L1 = q_input.size(1);
-        auto HS = q_input.size(2);
-        auto L0 = past_key.size(2);
-        auto S = past_key.size(3);
-        auto H = HS / S;
-
-        node->redefineOutputMemory({{B, L1, H * S}, {B, H, L0 + L1, S}, {B, H, L0 + L1, S}});
-        update_outputs(node);
-
-        query.resize({B, H, L1, S});
-
-        parallel_for2d(B, H, [&](size_t b, size_t h) {
-            // past_key/value
-            memcpy(&present_key.at({b, h, 0, 0}), &past_key.at({b, h, 0, 0}), sizeof(RT) * L0 * S);
-            memcpy(&present_value.at({b, h, 0, 0}), &past_value.at({b, h, 0, 0}), sizeof(RT) * L0 * S);
-            for (size_t p = 0; p < L1; p++) {
-                memcpy(&present_key.at({b, h, L0 + p, 0}), &k_input.at({b, p, h * S}), sizeof(RT) * S);
-                memcpy(&present_value.at({b, h, L0 + p, 0}), &v_input.at({b, p, h * S}), sizeof(RT) * S);
-                memcpy(&query.at({b, h, p, 0}), &q_input.at({b, p, h * S}), sizeof(RT) * S);
-            }
-        });
-        /*
-        // query         [B, H, L1, S]
-        // present_key   [B, H, L0+L1, S]  stride of last dim maybe > 1
-        // present_value [B, H, L0+L1, S]
-        // attention_mask [B, 1, L1, L0 + L1]
-        // alibi
-        // output_emb    [B, L1, H*S]
-        */
-        kernel(query, present_key, present_value, combined_attention_mask, output_emb, 1.0f);
     }
 };
 
