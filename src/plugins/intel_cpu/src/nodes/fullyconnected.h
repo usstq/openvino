@@ -11,6 +11,9 @@
 #include <string>
 #include <vector>
 #include "common/dnnl_executor.h"
+#ifdef OV_CPU_WITH_LLMDNN
+#include "llm_fc.hpp"
+#endif
 
 namespace ov {
 namespace intel_cpu {
@@ -75,6 +78,7 @@ private:
     static const size_t DATA_ID = 0;
     static const size_t WEIGHTS_ID = 1;
     static const size_t BIAS_ID = 2;
+    dnnl::memory::data_type inputDataType = dnnl::memory::data_type::undef;
     dnnl::memory::data_type outputDataType = dnnl::memory::data_type::undef;
 
     using executorPtr = std::shared_ptr<DnnlExecutor>;
@@ -106,6 +110,25 @@ private:
     MemoryPtr mlasPackedPtr = nullptr;
     void executeMLAS();
     void prepackMLASWeight();
+#endif
+#ifdef OV_CPU_WITH_LLMDNN
+    bool tryExtractParamForLLMFc(llmdnn::fc_create_param& param, MemoryPtr weightPtr);
+    bool tryUseLLMFc();
+    bool tryExecLLMFc();
+    MemoryPtr castMemoryPtr(MemoryPtr weightPtr, const InferenceEngine::Precision prec);
+    void primExecLLMFc(void* weight);
+
+    std::vector<std::shared_ptr<llmdnn::fc_kernel>> fcLLMs;
+    enum StateLLMFc {
+        Not_Init,
+        State_Use,
+        State_NotUse
+    };
+    StateLLMFc stateLLMFc = Not_Init;
+    std::shared_ptr<float> dequant;
+    std::shared_ptr<float> requant;
+    std::shared_ptr<float> biasRnd;
+    VectorDims weightDims;
 #endif
 };
 
