@@ -177,12 +177,6 @@ struct MHA_kernel {
         }
     }
 
-    PlainTensor<float>* p_alibi = nullptr;
-
-    void set_alibi(PlainTensor<float>& alibi) {
-        p_alibi = &alibi;
-    }
-
     // Q, K, V is ready, do attention
     // query         [B, H, L1, S]
     // present_key   [B, H, L0+L1, S]  stride of last dim maybe > 1
@@ -192,6 +186,7 @@ struct MHA_kernel {
     void operator()(PlainTensor<T>& query,
                     PlainTensor<T>& present_key,
                     PlainTensor<T>& present_value,
+                    const PlainTensor<float>& alibi_mask,
                     const PlainTensor<float>& attention_mask,
                     PlainTensor<T>& output_emb,
                     float d_scale = 0.0f) {
@@ -204,6 +199,8 @@ struct MHA_kernel {
         std::vector<float> word_vec(head_size, 0.0f);
         if (d_scale == 0.0f)
             d_scale = 1.0f / sqrt(head_size);
+
+        const PlainTensor<float> * p_alibi = alibi_mask ? &alibi_mask : nullptr;
 
         auto k_stride_s = present_key.stride(3);
         for (size_t b = 0; b < B; b++) {
@@ -231,7 +228,7 @@ struct MHA_kernel {
                         auto* k = &present_key.at({b, h, n, 0});
                         attn_score[n] = dot_product(q, k, head_size, k_stride_s) * d_scale;
                         if (p_alibi)
-                            attn_score[n] += p_alibi->at({h, 0, n});
+                            attn_score[n] += p_alibi->at({b, h, 0, n});
                         // apply attention mask (maybe combined with causal_mask)
                         if (attn_mask)
                             attn_score[n] += attn_mask[n];
@@ -259,11 +256,6 @@ struct MHA_kernel {
 template <>
 struct MHA_kernel<KT_MLAS, float> {
     MHA_kernel() = default;
-    PlainTensor<float>* p_alibi = nullptr;
-
-    void set_alibi(PlainTensor<float>& alibi) {
-        p_alibi = &alibi;
-    }
 
     // Q, K, V is ready, do attention
     // query         [B, H, L1, S]
@@ -275,6 +267,7 @@ struct MHA_kernel<KT_MLAS, float> {
     void operator()(PlainTensor<float>& query,
                     PlainTensor<float>& present_key,
                     PlainTensor<float>& present_value,
+                    const PlainTensor<float>& alibi_mask,
                     const PlainTensor<float>& attention_mask,
                     PlainTensor<float>& output_emb,
                     float d_scale = 0.0f) {
@@ -301,6 +294,9 @@ struct MHA_kernel<KT_MLAS, float> {
         }
         p_dst_buffer->resize({num_threads, q_len, head_size});
         auto k_stride_s = present_key.stride(3);
+
+        const PlainTensor<float> * p_alibi = alibi_mask ? &alibi_mask : nullptr;
+
         parallel_for2d(B, H, [&](size_t b, size_t h) {
             size_t thread_id = static_cast<size_t>(parallel_get_thread_num());
             const float* q_ptr = &query.at({b, h, 0, 0});
@@ -308,6 +304,7 @@ struct MHA_kernel<KT_MLAS, float> {
             const float* v_ptr = &present_value.at({b, h, 0, 0});
             float* qk = &(p_qk_buffer->at({thread_id, 0, 0}));
             float* dst = &(p_dst_buffer->at({thread_id, 0, 0}));
+
             if (k_stride_s == 1)
                 mlas_sgemm("N", "T", q_len, kv_len, head_size, 1.0f, q_ptr, query.stride(2), k_ptr, present_key.stride(2), 0.f, qk, kv_len, 1);
             else
@@ -332,7 +329,7 @@ struct MHA_kernel<KT_MLAS, float> {
                 InferenceEngine::Extensions::Cpu::XARCH::scale_add_softmax(&qk[offset],
                                                                            d_scale,
                                                                            mask,
-                                                                           p_alibi ? &p_alibi->at({h, 0, 0}) : nullptr,
+                                                                           p_alibi ? &p_alibi->at({b, h, 0, 0}) : nullptr,
                                                                            ncausal,
                                                                            kv_len);
             }
@@ -370,15 +367,10 @@ struct MHA_kernel<KT_LLMDNN, ov::bfloat16> {
     bool m_kernel_initialized = false;
     MHA_kernel() {}
 
-    PlainTensor<float>* p_alibi = nullptr;
-
-    void set_alibi(PlainTensor<float>& alibi) {
-        p_alibi = &alibi;
-    }
-
     void operator()(PlainTensor<ov::bfloat16>& query,
                     PlainTensor<ov::bfloat16>& present_key,
                     PlainTensor<ov::bfloat16>& present_value,
+                    const PlainTensor<float>& alibi_mask,
                     const PlainTensor<float>& attention_mask,  // [batch, 1, query_seq_len, key_seq_len]
                     PlainTensor<ov::bfloat16>& attn_output,
                     float d_scale = 0.0f) {
@@ -387,10 +379,8 @@ struct MHA_kernel<KT_LLMDNN, ov::bfloat16> {
             d_scale = 1.0f / sqrt(head_size);
 
         llmdnn::tensor alibi;
-        if (p_alibi) {
-            auto B = query.size(0);
-            auto H = present_key.size(1);
-            alibi = Convert2LLMTensor(*p_alibi).reshape({B, H, 1, p_alibi->size(2)});
+        if (alibi_mask) {
+            alibi = Convert2LLMTensor(alibi_mask);
         }
         m_kernel.exec(Convert2LLMTensor(query),
                       Convert2LLMTensor(present_key),

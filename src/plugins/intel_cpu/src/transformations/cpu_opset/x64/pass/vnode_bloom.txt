@@ -69,3 +69,54 @@ OutputVector vnode_bloom_attn(const OutputVector& inputs) {
 
     return {_transformer_h_1_self_attention_Reshape_7, present_1_key, present_1_value};
 }
+
+
+OutputVector vnode_bloom2_attn(const OutputVector& inputs) {
+    int ii = 0;
+
+    // auto query_key_value_Add = GenPattern<opset1::Add>({Constant_111678, query_key_value_MatMul}, "f32[?,?,3072]", {{"auto_broadcast", "numpy"}});   //  /transformer/h.1/self_attention/query_key_value/Add
+    // auto past_key_values_1_key = GenPattern<opset1::Parameter>({}, "f32[?,64,?]", {{"shape", "[?,64,?]"}, {"element_type", "f32"}});   //  past_key_values.1.key
+    // auto past_key_values_1_value = GenPattern<opset1::Parameter>({}, "f32[?,?,64]", {{"shape", "[?,?,64]"}, {"element_type", "f32"}});   //  past_key_values.1.value
+    // auto Reshape_124203 = GenPattern<opset1::Reshape>({_transformer_Reshape, Concat_124202}, "f32[?,16,1,?]", {{"special_zero", 0}});   //  Reshape_124203
+    // auto _transformer_Or = GenPattern<opset1::LogicalOr>({_transformer_Expand_4, _transformer_Expand_3}, "u8[?,<135>1,?,?]", {{"type_relax", 1}, {"input_data_types", "[boolean,boolean]"}, {"output_data_types", "[u8]"}, {"auto_broadcast", "numpy"}});   //  /transformer/Or
+    //auto ShapeOf_124301 = GenPattern<opset1::ShapeOf>({Transpose_1}, "i32[4]", {{"type_relax", 1}, {"input_data_types", "[]"}, {"output_data_types", "[i32]"}});   //  ShapeOf_124301
+    //auto Gather_124304 = GenPattern<opset7::Gather>({ShapeOf_124301, {0, 1}, 0}, "i32[2]", {{"batch_dims", 0}});   //  Gather_124304
+    //auto ShapeOf_124305 = GenPattern<opset1::ShapeOf>({past_key_values_1_key}, "i32[3]", {{"type_relax", 1}, {"input_data_types", "[]"}, {"output_data_types", "[i32]"}});   //  ShapeOf_124305
+    //auto Gather_124308 = GenPattern<opset7::Gather>({ShapeOf_124305, {1, 2}, 0}, "i32[2]", {{"batch_dims", 0}});   //  Gather_124308
+    //auto Concat_124309 = GenPattern<opset1::Concat>({Gather_124304, Gather_124308}, "i32[4]", {{"axis", 0}});   //  Concat_124309
+    //auto Reshape_124310 = GenPattern<opset1::Reshape>({past_key_values_1_key, Concat_124309}, "f32[?,?,?,?]", {{"special_zero", 0}});   //  Reshape_124310
+    //auto Concat_Key = GenPattern<opset1::Concat>({Reshape_124310, Transpose_1}, "f32[?,?,?,?]", {{"axis", -1}});   //  Concat_Key
+
+    //auto ShapeOf_124342 = GenPattern<opset1::ShapeOf>({Transpose_2}, "i32[4]", {{"type_relax", 1}, {"input_data_types", "[]"}, {"output_data_types", "[i32]"}});   //  ShapeOf_124342
+    //auto Gather_124345 = GenPattern<opset7::Gather>({ShapeOf_124342, {0, 1}, 0}, "i32[2]", {{"batch_dims", 0}});   //  Gather_124345
+    //auto ShapeOf_124346 = GenPattern<opset1::ShapeOf>({past_key_values_1_value}, "i32[3]", {{"type_relax", 1}, {"input_data_types", "[]"}, {"output_data_types", "[i32]"}});   //  ShapeOf_124346
+    //auto Gather_124349 = GenPattern<opset7::Gather>({ShapeOf_124346, {1, 2}, 0}, "i32[2]", {{"batch_dims", 0}});   //  Gather_124349
+    //auto Concat_124350 = GenPattern<opset1::Concat>({Gather_124345, Gather_124349}, "i32[4]", {{"axis", 0}});   //  Concat_124350
+    //auto Reshape_124351 = GenPattern<opset1::Reshape>({past_key_values_1_value, Concat_124350}, "f32[?,?,?,64]", {{"special_zero", 0}});   //  Reshape_124351
+    //auto Concat_Value = GenPattern<opset1::Concat>({Reshape_124351, Transpose_2}, "f32[?,?,?,64]", {{"axis", -2}});   //  Concat_Value
+
+    auto query_key_value_Add = inputs[ii++];    //"f32[?,?,3072]" [B, L, H*3*S]
+    auto Concat_Key =  inputs[ii++];            //"f32[?,?,?,?]"  [B, H, S, L]
+    auto Concat_Value =  inputs[ii++];          //"f32[?,?,?,64]" [B, H, L, S]
+    auto Reshape_124203 = inputs[ii++];         //"f32[?,16,1,?]"
+    auto _transformer_Or = inputs[ii++];        //"u8[?,1,?,?]"
+
+    auto H = Symbol("H"); // num_attention_heads             8
+    auto S = Symbol("S"); // hidden_size/num_attention_heads 
+
+    auto Reshape = GenPattern<opset1::Reshape>({query_key_value_Add, {0, 0, H, 3, S}}, "f32[?,?,?,3,?]", {{"special_zero", 1}});   //  /transformer/h.1/self_attention/Reshape
+    auto Gather_2 = GenPattern<opset8::Gather>({Reshape, 0, 3}, "f32[?,?,?,?]", {{"batch_dims", 0}});   //  /transformer/h.1/self_attention/Gather_2
+    auto Transpose = GenPattern<opset1::Transpose>({Gather_2, {0, 2, 1, 3}}, "f32[?,?,?,?]");   //  /transformer/h.1/self_attention/Transpose
+
+    auto Multiply_109833 = GenPattern<opset1::Multiply>({Concat_Key, 1.0f / sqrt(S)}, "f32[?,?,?,?]", {{"auto_broadcast", "numpy"}});   //  Multiply_109833
+
+    auto Mul_1 = GenPattern<opset1::MatMul>({Transpose, Multiply_109833}, "f32[?,?,?,?]", {{"transpose_a", 0}, {"transpose_b", 0}});   //  /transformer/h.1/self_attention/Mul_1
+    auto Add = GenPattern<opset1::Add>({Mul_1, Reshape_124203}, "f32[?,?,?,?]", {{"auto_broadcast", "numpy"}});   //  /transformer/h.1/self_attention/Add
+    auto Where = GenPattern<opset1::Select>({_transformer_Or, -FLT_MAX, Add}, "f32[?,?,?,?]", {{"auto_broadcast", "numpy"}});   //  /transformer/h.1/self_attention/Where
+    auto Softmax = GenPattern<opset1::Softmax>({Where}, "f32[?,?,?,?]", {{"axis", 3}});   //  /transformer/h.1/self_attention/Softmax
+
+    auto MatMul_1 = GenPattern<opset1::MatMul>({Softmax, Concat_Value}, "f32[?,?,?,?]", {{"transpose_a", 0}, {"transpose_b", 0}});   //  /transformer/h.1/self_attention/MatMul_1
+    auto Transpose_3 = GenPattern<opset1::Transpose>({MatMul_1, {0, 2, 1, 3}}, "f32[?,?,?,?]");   //  /transformer/h.1/self_attention/Transpose_3
+
+    return {Transpose_3};
+}

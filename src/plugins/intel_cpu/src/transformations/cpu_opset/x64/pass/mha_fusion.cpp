@@ -682,6 +682,8 @@ MHADynamicVNodeIn::MHADynamicVNodeIn() {
     add_matcher<VNodeIn>("opt_attention", vnode_opt_attn);
     add_matcher<VNodeIn>("open_llama_attention", vnode_llama_attn);
     add_matcher<VNodeIn>("bloom_attention", vnode_bloom_attn);
+    add_matcher<VNodeIn>("bloom2_attention", vnode_bloom2_attn);
+
     add_matcher<VNodeIn>("whisper_enc_attention", vnode_whisper_enc_attention);
     add_matcher<VNodeIn>("whisper_dec_self_attn", vnode_whisper_dec_self_attn);
     add_matcher<VNodeIn>("whisper_dec_enc_attn", vnode_whisper_dec_enc_attn);

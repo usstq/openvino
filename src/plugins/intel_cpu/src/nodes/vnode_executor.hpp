@@ -157,7 +157,7 @@ struct opt_attention_executor : public vnode_executor {
                  present_key,
                  present_value);
         auto query = q_input.reshape({B, L1, H, S}).permute({0, 2, 1, 3});
-        kernel(query, present_key, present_value, combined_attention_mask, output_emb, 1.0f);
+        kernel(query, present_key, present_value, {}, combined_attention_mask, output_emb, 1.0f);
     }
 };
 
@@ -210,7 +210,7 @@ struct gpt2_attention_executor : public vnode_executor {
                  past_value,
                  present_key,
                  present_value);
-        kernel(q_input, present_key, present_value, attention_mask, output_emb);
+        kernel(q_input, present_key, present_value, {}, attention_mask, output_emb);
     }
 };
 
@@ -305,7 +305,7 @@ struct gptneox_attention_executor : public vnode_executor {
 
         DEBUG_LOG(" m_query_emb=", m_query_emb);
 
-        kernel(m_query_emb, present_key, present_value, attention_mask, output_emb);
+        kernel(m_query_emb, present_key, present_value, {}, attention_mask, output_emb);
     }
 };
 
@@ -401,7 +401,7 @@ struct open_llama_attention_executor : public vnode_executor {
 
         DEBUG_LOG(" m_query_emb=", m_query_emb);
 
-        kernel(m_query_emb, present_key, present_value, attention_causal_mask, output_emb);
+        kernel(m_query_emb, present_key, present_value, {}, attention_causal_mask, output_emb);
     }
 };
 
@@ -469,9 +469,64 @@ struct bloom_attention_executor : public vnode_executor {
                  present_key2,
                  present_value2);
 
-        kernel.set_alibi(alibi);
         auto query = qkv_4d.slice(3, 0, S).permute({0, 2, 1, 3});
-        kernel(query, present_key2, present_value2, attention_mask, output_emb);
+        kernel(query, present_key2, present_value2, alibi.reshape({B, H, 1, L0 + L1}), attention_mask, output_emb);
+    }
+};
+
+
+template <KernelTypes KType, typename RT>
+struct bloom2_attention_executor : public vnode_executor {
+    PlainTensor<RT> qkv_input;   //"f32[B, qL, H*3*S]"
+    PlainTensor<RT> key;         // f32[B, H, S, kL]
+    PlainTensor<RT> value;       // f32[B, H, kL, S]
+    PlainTensor<float> alibi;    // f32[B, H, 1, kL] will be broadcasted add to attention weights [B, H, q_len, kv_len]
+    PlainTensor<uint8_t> combined_attention_mask;  // (attention + causal) : u8[B,1,q_len,kv_len]  False means add 0,
+                                                   // True means set to -FLT_MAX
+
+    PlainTensor<RT> output_emb;     // f32[B, qL, H, S]
+
+    MHA_kernel<KType, RT> kernel;
+    KVConcatKernel<RT> kvconcat;
+
+    bloom2_attention_executor() {
+        register_inputs(qkv_input, key, value, alibi, combined_attention_mask);
+        register_outputs(output_emb);
+    }
+
+    PlainTensor<float> attention_mask;
+
+    void exec(Node* node, dnnl::stream strm, std::map<std::string, double>& symbol2value) override {
+        update_inputs(node);
+
+        auto B = qkv_input.size(0);
+        auto qL = qkv_input.size(1);
+        auto kL = key.size(3);
+        auto H = static_cast<size_t>(symbol2value["H"]);
+        auto S = static_cast<size_t>(symbol2value["S"]);
+
+        node->redefineOutputMemory({{B, qL, H, S}});
+        update_outputs(node);
+
+        qkv_input.assert_dims({B, qL, H * 3 * S});
+        key.assert_dims({B, H, S, kL});
+        value.assert_dims({B, H, kL, S});
+        alibi.assert_dims({B, H, 1, kL});
+        combined_attention_mask.assert_dims({B, 1, qL, kL});
+
+        // transform u8 mask to f32 additive mask
+        attention_mask.resize({B, 1, qL, kL});
+        auto* psrc = combined_attention_mask.data();
+        auto* pdst = attention_mask.data();
+        for (int i = 0; i < B * qL * kL; i++) {
+            pdst[i] = psrc[i] ? -FLT_MAX : 0;
+        }
+
+        auto key2 = key.permute({0, 1, 3, 2});
+
+        auto query = qkv_input.reshape({B, qL, H, 3*S}).slice(3, 0, S).permute({0, 2, 1, 3});
+        auto output = output_emb.reshape({B, qL, H*S});
+        kernel(query, key2, value, alibi, attention_mask, output);
     }
 };
 
@@ -510,7 +565,7 @@ struct whisper_enc_attention_executor : public vnode_executor {
         auto q = q_input.reshape({B, L, H, S}).permute({0, 2, 1, 3});
         auto k = k_input.reshape({B, L, H, S}).permute({0, 2, 1, 3});
         auto v = v_input.reshape({B, L, H, S}).permute({0, 2, 1, 3});
-        kernel(q, k, v, {}, output_emb, 1.0f);
+        kernel(q, k, v, {}, {}, output_emb, 1.0f);
     }
 };
 
@@ -558,7 +613,7 @@ struct whisper_dec_self_attn_executor : public vnode_executor {
         // attention_mask [B, 1, L1, L0 + L1]
         // output_emb    [B, L1, H*S]
         auto q = q_input.reshape({B, L, H, S}).permute({0, 2, 1, 3});
-        kernel(q, present_key, present_value, attn_mask, output_emb, 1.0f);
+        kernel(q, present_key, present_value, {}, attn_mask, output_emb, 1.0f);
     }
 };
 
@@ -606,7 +661,7 @@ struct whisper_dec_enc_attn_executor : public vnode_executor {
         // attention_mask [B, 1, L1, L0 + L1]
         // output_emb    [B, L1, H*S]
         auto q = q_input.reshape({B, L1, H, S}).permute({0, 2, 1, 3});
-        kernel(q, present_key, present_value, {}, output_emb, 1.0f);
+        kernel(q, present_key, present_value, {}, {}, output_emb, 1.0f);
     }
 };
 
@@ -662,7 +717,7 @@ struct whisper_dec2_self_attn_executor : public vnode_executor {
         // attention_mask [B, 1, L1, L0 + L1]
         // output_emb    [B, L1, H*S]
         auto q = q_input.reshape({B, L1, H, S}).permute({0, 2, 1, 3});
-        kernel(q, present_key, present_value, {}, output_emb, 1.0f);
+        kernel(q, present_key, present_value, {}, {}, output_emb, 1.0f);
     }
 };
 
@@ -704,7 +759,7 @@ struct whisper_dec2_enc_attn_executor : public vnode_executor {
         // attention_mask [B, 1, L1, L0 + L1]
         // output_emb    [B, L1, H*S]
         auto q = q_input.reshape({B, L1, H, S}).permute({0, 2, 1, 3});
-        kernel(q, past_encoder_key, past_encoder_value, {}, output_emb, 1.0f);
+        kernel(q, past_encoder_key, past_encoder_value, {}, {}, output_emb, 1.0f);
     }
 };
 
