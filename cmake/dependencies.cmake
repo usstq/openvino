@@ -376,17 +376,20 @@ if (ENABLE_CPU_EXTENSIONS)
                 ARCHIVE "cpu_extensions_20230725_lin.tgz"
                 TARGET_PATH "${TEMP}/cpu_extensions"
                 ENVIRONMENT "cpu_extensions_DIR"
-                SHA256 "9989a7d2145ef862e5ce0fba30a76256dafe114bbc01d73543c700d39e4564c1"
+                SHA256 "b7f1b71ec47e29ff15f35c54bd0236dcebfb21817863ff016e6f8ec6e8bed541"
                 USE_NEW_LOCATION TRUE)
         unset(IE_PATH_TO_DEPS)
     else()
         message(FATAL_ERROR "cpu_extensions is not available on current platform (OS = ${CMAKE_SYSTEM_NAME}, glibc ${OV_GLIBC_VERSION})")
     endif()
 
-    set(ext_cmake_path "${CPU_EXTENSIONS}/lib/cmake/cpu_extensions")
+    set(CPU_EXTENSIONS_PATH "${CPU_EXTENSIONS}/lib/cmake/cpu_extensions")
 
-    update_deps_cache(cpu_extensions_DIR "${ext_cmake_path}" "Path to cpu_extensions package folder")
+    update_deps_cache(cpu_extensions_DIR "${CPU_EXTENSIONS_PATH}" "Path to cpu_extensions package folder")
     debug_message(STATUS "cpu_extensions=" ${CPU_EXTENSIONS})
+    if(NOT BUILD_SHARED_LIBS)
+        list(APPEND PATH_VARS "CPU_EXTENSIONS_PATH")
+    endif()
 else()
     reset_deps_cache(cpu_extensions_DIR)
 endif()
