@@ -13,16 +13,18 @@
 #include <memory>
 #include <string>
 #include <vector>
-#include "vnode_utils.hpp"
-#include "openvino/core/parallel.hpp"
 
-#ifdef OV_CPU_WITH_LLM
-#include "llm_emb_gpt.hpp"
-#include "llm_mha_gpt.hpp"
-#include "llm_mm.hpp"
+#include "openvino/core/parallel.hpp"
+#include "vnode_utils.hpp"
+#include "x86intrin.h"
+
+#ifdef OV_CPU_WITH_LLMDNN
+#    include "llm_emb_gpt.hpp"
+#    include "llm_mha_gpt.hpp"
+#    include "llm_mm.hpp"
 #endif
-#include "utils/plain_tensor.hpp"
 #include "mlas/sgemm.hpp"
+#include "utils/plain_tensor.hpp"
 namespace ov {
 namespace intel_cpu {
 namespace node {
@@ -93,13 +95,13 @@ struct RoPE_kernel {
     }
 };
 
-#ifdef OV_CPU_WITH_LLM
-template<typename DT>
+#ifdef OV_CPU_WITH_LLMDNN
+template <typename DT>
 llmdnn::tensor Convert2LLMTensor(const PlainTensor<DT>& src) {
     llmdnn::tensor dst;
     dst.m_capacity = 0;
     dst.m_rank = src.m_rank;
-    dst.m_ptr = src.m_ptr.get();
+    dst.m_ptr = src.m_ptr;
     memcpy(dst.m_dims, src.m_dims, sizeof(size_t) * src.m_rank);
     dst.m_element_size = sizeof(DT);
     dst.m_dtype = llmdnn::precision_of<DT>::value;
@@ -124,11 +126,11 @@ struct RoPE_kernel<KT_LLMDNN, ov::bfloat16> {
                     PlainTensor<ov::bfloat16>& present_value,
                     PlainTensor<float>& rotary_emb_cos,
                     PlainTensor<float>& rotary_emb_sin) {
-        llmdnn::emb_gpt(Convert2LLMTensor(cur_query),               // B,L,H,S
-                        Convert2LLMTensor(cur_key),                 // B,L,H,S
-                        Convert2LLMTensor(cur_value),               // B,L,H,S
-                        Convert2LLMTensor(past_key),                // f32[B, H, L0, S]
-                        Convert2LLMTensor(past_value),              // f32[B, H, L0, S]
+        llmdnn::emb_gpt(Convert2LLMTensor(cur_query),   // B,L,H,S
+                        Convert2LLMTensor(cur_key),     // B,L,H,S
+                        Convert2LLMTensor(cur_value),   // B,L,H,S
+                        Convert2LLMTensor(past_key),    // f32[B, H, L0, S]
+                        Convert2LLMTensor(past_value),  // f32[B, H, L0, S]
                         Convert2LLMTensor(query_emb),
                         Convert2LLMTensor(present_key),
                         Convert2LLMTensor(present_value),
@@ -177,12 +179,19 @@ struct MHA_kernel {
         }
     }
 
+    PlainTensor<uint8_t> causal_mask;
+    bool select_nfltmax_at_0;  // set attn_score to -FLT_MAX when causal_mask[...] equal to this
+    void set_causal_mask(PlainTensor<uint8_t> mask, bool _select_nfltmax_at_0) {
+        causal_mask = mask;
+        select_nfltmax_at_0 = _select_nfltmax_at_0;
+    }
+
     // Q, K, V is ready, do attention
-    // query         [B, H, L1, S]
-    // present_key   [B, H, L0+L1, S]  stride of last dim maybe > 1
-    // present_value [B, H, L0+L1, S]
-    // attention_mask [B, 1, L1, L0 + L1]
-    // output_emb    [B, L1, H*S]
+    // query         [B, H, q_len, S]
+    // present_key   [B, H, kv_len, S]  stride of last dim maybe > 1
+    // present_value [B, H, kv_len, S]
+    // attention_mask [B, 1, q_len, kv_len]
+    // output_emb    [B, q_len, H*S]
     void operator()(PlainTensor<T>& query,
                     PlainTensor<T>& present_key,
                     PlainTensor<T>& present_value,
@@ -195,73 +204,91 @@ struct MHA_kernel {
         auto q_len = query.size(2);
         auto head_size = query.size(3);
         auto kv_len = present_key.size(2);
-        std::vector<float> attn_score(kv_len, 0.0f);
-        std::vector<float> word_vec(head_size, 0.0f);
+
         if (d_scale == 0.0f)
             d_scale = 1.0f / sqrt(head_size);
 
-        const PlainTensor<float> * p_alibi = alibi_mask ? &alibi_mask : nullptr;
-
         auto k_stride_s = present_key.stride(3);
-        for (size_t b = 0; b < B; b++) {
-            for (size_t h = 0; h < H; h++) {
-                // auto key = &present_key.at({b, h, 0, 0});
-                // auto value = &present_value.at({b, h, 0, 0});
-                // auto output = &output_emb.at({b, 0, h * head_size});
-                for (size_t m = 0; m < q_len; m++) {
-                    // dot-product to get attention scores
-                    auto* q = &query.at({b, h, m, 0});
-                    // how many key/values can be accessed causally
-                    auto ncausal = kv_len - q_len + m + 1;
-                    float *attn_mask = nullptr;
-                    if (attention_mask) {
-                        auto attn_mask_qlen = attention_mask.size(2);
-                        attn_mask = &attention_mask.at({b, 0, std::min(m, attn_mask_qlen - 1), 0});
-                        if (attn_mask_qlen > 1) {
-                            // this imply attn mask is combined with causal mask
-                            ncausal = kv_len;
+        parallel_for2d(B, H, [&](size_t b, size_t h) {
+            std::vector<float> attn_score(kv_len);
+            std::vector<float> word_vec(head_size, 0.0f);
+
+            // auto key = &present_key.at({b, h, 0, 0});
+            // auto value = &present_value.at({b, h, 0, 0});
+            // auto output = &output_emb.at({b, 0, h * head_size});
+            for (size_t m = 0; m < q_len; m++) {
+                // dot-product to get attention scores
+                auto* q = &query.at({b, h, m, 0});
+                // how many key/values can be accessed causally
+                auto ncausal = kv_len;  // kv_len - q_len + m + 1;
+
+                for (size_t n = 0; n < ncausal; n++) {
+                    auto* k = &present_key.at({b, h, n, 0});
+                    attn_score[n] = dot_product(q, k, head_size, k_stride_s) * d_scale;
+
+                    // apply alibi tensor
+                    if (alibi_mask)
+                        attn_score[n] += alibi_mask.at({b, h, m, n}, true);
+
+                    // apply attention mask (maybe combined with causal_mask)
+                    if (attention_mask)
+                        attn_score[n] += attention_mask.at({b, h, m, n}, true);
+
+                    // apply causal_mask
+                    if (causal_mask) {
+                        bool is_zero = causal_mask.at({b, h, m, n}, true) == 0;
+                        if (select_nfltmax_at_0) {
+                            if (is_zero)
+                                attn_score[n] = -FLT_MAX;
+                        } else {
+                            if (!is_zero) {
+                                attn_score[n] = -FLT_MAX;
+                            }
                         }
-                    } else {
-                        ncausal = kv_len;
                     }
-                    for (size_t n = 0; n < ncausal; n++) {
-                        auto* k = &present_key.at({b, h, n, 0});
-                        attn_score[n] = dot_product(q, k, head_size, k_stride_s) * d_scale;
-                        if (p_alibi)
-                            attn_score[n] += p_alibi->at({b, h, 0, n});
-                        // apply attention mask (maybe combined with causal_mask)
-                        if (attn_mask)
-                            attn_score[n] += attn_mask[n];
-                    }
-
-                    // softmax
-                    softmax(&attn_score[0], ncausal);
-
-                    // linearly combine value
-                    word_vec.assign(head_size, 0.0f);
-                    for (size_t n = 0; n < ncausal; n++) {
-                        auto* v = &present_value.at({b, h, n, 0});
-                        accumulate(word_vec.data(), v, head_size, attn_score[n]);
-                    }
-
-                    // output [B, L1, H*head_size]
-                    auto* out = &output_emb.at({b, m, h * head_size});
-                    std::copy(word_vec.begin(), word_vec.end(), out);
                 }
+
+                // softmax
+                softmax(&attn_score[0], ncausal);
+
+                // linearly combine value
+                word_vec.assign(head_size, 0.0f);
+                for (size_t n = 0; n < ncausal; n++) {
+                    auto* v = &present_value.at({b, h, n, 0});
+                    accumulate(word_vec.data(), v, head_size, attn_score[n]);
+                }
+
+                // output [B, L1, H*head_size]
+                auto* out = &output_emb.at({b, m, h * head_size});
+                std::copy(word_vec.begin(), word_vec.end(), out);
             }
-        }
+        });
     }
 };
 
 template <>
 struct MHA_kernel<KT_MLAS, float> {
-    MHA_kernel() = default;
+    size_t m_block_size;
+    // buffer to hold qk temp
+    std::vector<PlainTensor<float>> qk_buffers;
+
+    MHA_kernel() {
+        m_block_size = std::getenv("MBLK") ? atoi(std::getenv("MBLK")) : 4;
+        qk_buffers.resize(parallel_get_max_threads(), PlainTensor<float>(true));
+    }
+
+    PlainTensor<uint8_t> causal_mask;
+    bool select_nfltmax_at_0;  // set attn_score to -FLT_MAX when causal_mask[...] equal to this
+    void set_causal_mask(PlainTensor<uint8_t> mask, bool _select_nfltmax_at_0) {
+        causal_mask = mask;
+        select_nfltmax_at_0 = _select_nfltmax_at_0;
+    }
 
     // Q, K, V is ready, do attention
-    // query         [B, H, L1, S]
-    // present_key   [B, H, L0+L1, S]  stride of last dim maybe > 1
-    // present_value [B, H, L0+L1, S]
-    // attention_mask [B, 1, L1, L0 + L1]
+    // query         [B, H, q_len, S]
+    // present_key   [B, H, kv_len, S]  stride of last dim maybe > 1
+    // present_value [B, H, kv_len, S]
+    // attention_mask [B, 1, q_len, kv_len]
     // alibi
     // output_emb    [B, L1, H*S]
     void operator()(PlainTensor<float>& query,
@@ -276,96 +303,143 @@ struct MHA_kernel<KT_MLAS, float> {
         auto q_len = query.size(2);
         auto head_size = query.size(3);
         auto kv_len = present_key.size(2);
-        size_t attn_mask_qlen = 0;
-        if (attention_mask) {
-            attn_mask_qlen = attention_mask.size(2);
-        }
+
         auto update_len = kv_len - q_len;
         if (d_scale == 0.0f)
             d_scale = 1.0f / sqrt(head_size);
-        // initialize temp buffer for qk matmul and  qkv matmul
-        size_t num_threads = parallel_get_num_threads();
-        if (p_qk_buffer == nullptr) {
-            p_qk_buffer.reset(new PlainTensor<float>());
-        }
-        p_qk_buffer->resize({num_threads, q_len, kv_len});
-        if (p_dst_buffer == nullptr) {
-            p_dst_buffer.reset(new PlainTensor<float>());
-        }
-        p_dst_buffer->resize({num_threads, q_len, head_size});
         auto k_stride_s = present_key.stride(3);
 
-        const PlainTensor<float> * p_alibi = alibi_mask ? &alibi_mask : nullptr;
+        auto m_blocks = (q_len + m_block_size - 1) / m_block_size;
 
-        parallel_for2d(B, H, [&](size_t b, size_t h) {
+        if (false) {
+            std::cout << "===============" << std::endl;
+            std::cout << "alibi_mask = " << alibi_mask << std::endl;
+            std::cout << "attention_mask = " << attention_mask << std::endl;
+            std::cout << "causal_mask = " << causal_mask << std::endl;
+            std::cout << "select_nfltmax_at_0 = " << select_nfltmax_at_0 << std::endl;
+            std::cout << "k_stride_s = " << k_stride_s << std::endl;
+            std::cout << "present_key = " << present_key << std::endl;
+        }
+
+        parallel_for3d(B, H, m_blocks, [&](size_t b, size_t h, size_t m_blk) {
             size_t thread_id = static_cast<size_t>(parallel_get_thread_num());
-            const float* q_ptr = &query.at({b, h, 0, 0});
+            auto& qk_buf = qk_buffers[thread_id];
+
+            auto m_start = m_blk * m_block_size;
+            auto m_end = std::min(m_start + m_block_size, q_len);
+            auto m_cnt = m_end - m_start;
+
+            auto kv_len_cache_align = (((kv_len * sizeof(float)) + 63) / 64 * 64) / sizeof(float);
+            qk_buf.resize({m_block_size, kv_len_cache_align});
+            const float* q_ptr = &query.at({b, h, m_start, 0});
             const float* k_ptr = &present_key.at({b, h, 0, 0});
             const float* v_ptr = &present_value.at({b, h, 0, 0});
-            float* qk = &(p_qk_buffer->at({thread_id, 0, 0}));
-            float* dst = &(p_dst_buffer->at({thread_id, 0, 0}));
+
+            float* alibi_ptr = nullptr;
+            auto alibi_stride = 0;
+            if (alibi_mask) {
+                alibi_ptr = &alibi_mask.at({b, h, m_start, 0}, true);
+                if (alibi_mask.size(2) > 1)
+                    alibi_stride = alibi_mask.stride(2);
+            }
+            float* attn_mask_ptr = nullptr;
+            auto attn_mask_stride = 0;
+            if (attention_mask) {
+                attn_mask_ptr = &attention_mask.at({b, h, m_start, 0}, true);
+                if (attention_mask.size(2) > 1)
+                    attn_mask_stride = attention_mask.stride(2);
+            }
+            uint8_t* cmask_ptr = nullptr;
+            auto cmask_stride = 0;
+            if (causal_mask) {
+                cmask_ptr = &causal_mask.at({b, h, m_start, 0}, true);
+                if (causal_mask.size(2) > 1)
+                    cmask_stride = causal_mask.stride(2);
+            }
+
+            float* qk = &(qk_buf.at({0, 0}));
+            auto qk_m_stride = qk_buf.stride(0);
 
             if (k_stride_s == 1)
-                mlas_sgemm("N", "T", q_len, kv_len, head_size, 1.0f, q_ptr, query.stride(2), k_ptr, present_key.stride(2), 0.f, qk, kv_len, 1);
+                mlas_sgemm("N",
+                           "T",
+                           m_cnt,
+                           kv_len,
+                           head_size,
+                           1.0f,
+                           q_ptr,
+                           query.stride(2),
+                           k_ptr,
+                           present_key.stride(2),
+                           0.f,
+                           qk,
+                           qk_m_stride,
+                           1);
             else
-                mlas_sgemm("N", "N", q_len, kv_len, head_size, 1.0f, q_ptr, query.stride(2), k_ptr, present_key.stride(3), 0.f, qk, kv_len, 1);
+                mlas_sgemm("N",
+                           "N",
+                           m_cnt,
+                           kv_len,
+                           head_size,
+                           1.0f,
+                           q_ptr,
+                           query.stride(2),
+                           k_ptr,
+                           present_key.stride(3),
+                           0.f,
+                           qk,
+                           qk_m_stride,
+                           1);
 
-            float * mask = nullptr;
-            for (size_t m = 0; m < q_len; m++) {
-                size_t offset = m * kv_len;
+            for (size_t m = m_start; m < m_end; m++) {
                 // apply attention mask
                 // sofmax
-                auto ncausal = update_len + m + 1;
-                if (attn_mask_qlen > 0) {
-                    mask = &attention_mask.at({b, 0, std::min(m, attn_mask_qlen - 1), 0});
-                    if (attn_mask_qlen > 1) {
-                        // this imply attn mask is combined with causal mask
-                        ncausal = kv_len;
-                    }
-                } else {
-                    // no attention mask, means no causal mask too
-                    ncausal = kv_len;
-                }
-                InferenceEngine::Extensions::Cpu::XARCH::scale_add_softmax(&qk[offset],
+                auto ncausal = kv_len;  // update_len + m + 1;
+                InferenceEngine::Extensions::Cpu::XARCH::scale_add_softmax(qk + (m - m_start) * qk_m_stride,
                                                                            d_scale,
-                                                                           mask,
-                                                                           p_alibi ? &p_alibi->at({b, h, 0, 0}) : nullptr,
+                                                                           alibi_ptr + m * alibi_stride,
+                                                                           attn_mask_ptr + m * attn_mask_stride,
+                                                                           cmask_ptr + m * cmask_stride,
+                                                                           select_nfltmax_at_0,
                                                                            ncausal,
                                                                            kv_len);
             }
             mlas_sgemm("N",
                        "N",
-                       q_len,
+                       m_cnt,
                        head_size,
                        kv_len,
                        1.0f,
                        qk,
-                       kv_len,
+                       qk_m_stride,
                        v_ptr,
                        present_value.stride(2),
                        0.f,
-                       &output_emb.at({b, 0, h * head_size}),
+                       &output_emb.at({b, m_start, h * head_size}),
                        output_emb.stride(1),
                        1);
             // output [B, L1, H*S]
-            //for (size_t m = 0; m < q_len; m++) {
+            // for (size_t m = 0; m < q_len; m++) {
             //    const float* src = dst + m * head_size;
             //    std::copy(src, src + head_size, &output_emb.at({b, m, h * head_size}));
             //}
         });
     }
-    // buffer to hold qk temp
-    std::unique_ptr<PlainTensor<float>> p_qk_buffer = nullptr;
-    // buffer to hold qkv output
-    std::unique_ptr<PlainTensor<float>> p_dst_buffer = nullptr;
 };
 
-#ifdef OV_CPU_WITH_LLM
+#ifdef OV_CPU_WITH_LLMDNN
 template <>
 struct MHA_kernel<KT_LLMDNN, ov::bfloat16> {
     llmdnn::mha_gpt m_kernel;
     bool m_kernel_initialized = false;
     MHA_kernel() {}
+
+    PlainTensor<uint8_t> causal_mask;
+    bool select_nfltmax_at_0;  // set attn_score to -FLT_MAX when causal_mask[...] equal to this
+    void set_causal_mask(PlainTensor<uint8_t> mask, bool _select_nfltmax_at_0) {
+        causal_mask = mask;
+        select_nfltmax_at_0 = _select_nfltmax_at_0;
+    }
 
     void operator()(PlainTensor<ov::bfloat16>& query,
                     PlainTensor<ov::bfloat16>& present_key,
@@ -378,18 +452,18 @@ struct MHA_kernel<KT_LLMDNN, ov::bfloat16> {
         if (d_scale == 0.0f)
             d_scale = 1.0f / sqrt(head_size);
 
-        llmdnn::tensor alibi;
-        if (alibi_mask) {
-            alibi = Convert2LLMTensor(alibi_mask);
-        }
+        //llmdnn::tensor alibi;
+
         m_kernel.exec(Convert2LLMTensor(query),
                       Convert2LLMTensor(present_key),
                       Convert2LLMTensor(present_value),
                       Convert2LLMTensor(attn_output),
                       Convert2LLMTensor(attention_mask),
-                      alibi,
+                      Convert2LLMTensor(alibi_mask),
+                      Convert2LLMTensor(causal_mask),
+                      select_nfltmax_at_0,
                       d_scale,
-                      p_alibi == nullptr);
+                      false);
     }
 };
 #endif

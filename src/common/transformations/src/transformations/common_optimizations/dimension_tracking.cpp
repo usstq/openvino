@@ -1547,7 +1547,10 @@ bool ov::pass::SymbolicOptimizations::run_on_model(const std::shared_ptr<ov::Mod
     auto optimizations_1 = manager_1.register_pass<ov::pass::GraphRewrite>();
     ADD_MATCHER(optimizations_1, DeReshapeMatMul)
     optimizations_1->set_name("ov::pass::GraphRewrite::SymbolicOptimizations::1");
-    //    REGISTER_PASS(manager_1, RPE_Optimization)
+
+    if (std::getenv("JANE_RPE")) {
+        REGISTER_PASS(manager_1, RPE_Optimization)
+    }
     REGISTER_PASS(manager_1, LabelResolvingThroughSelect)
     REGISTER_PASS(manager_1, DeReshapeMatMulWithComplications)
     REGISTER_PASS(manager_1, ApplyTableOfEquivalence)

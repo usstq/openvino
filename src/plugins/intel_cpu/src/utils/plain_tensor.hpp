@@ -97,13 +97,10 @@ struct precision_of<uint8_t> {
 struct PlainTensorBase {
     size_t m_strides[PLAINTENSOR_RANK_MAX];
     size_t m_dims[PLAINTENSOR_RANK_MAX];
-    size_t m_rank;
-
-    std::shared_ptr<void> m_ptr;
+    size_t m_rank = 0;
+    void* m_ptr = nullptr;
     size_t m_capacity = 0;
-
-    uint8_t* batched_ptr_buff[8];
-    std::vector<uint8_t*> batched_ptr_backup;
+    bool with_storage = false;
 
     operator bool() const {
         return static_cast<bool>(m_ptr);
@@ -128,6 +125,16 @@ struct PlainTensor : public PlainTensorBase {
     }
 
     PlainTensor() = default;
+
+    PlainTensor(bool _with_storage) {
+        with_storage = _with_storage;
+    }
+
+    ~PlainTensor() {
+        if (with_storage && m_capacity > 0) {
+            ::free(m_ptr);
+        }
+    }
 
     void reset(MemoryPtr mem) override {
         assert_dt<DT>(mem->getDataType());
@@ -202,26 +209,39 @@ struct PlainTensor : public PlainTensorBase {
             i_src++;
         }
         sub_tensor.m_rank = i_dst;  // index may imply squeeze
-        sub_tensor.m_ptr = std::shared_ptr<void>(reinterpret_cast<DT*>(m_ptr.get()) + off, [](void*) {});
+        sub_tensor.m_ptr = reinterpret_cast<void*>(reinterpret_cast<DT*>(m_ptr) + off);
         return sub_tensor;
     }
 
     // slice: return a sub-view (w/o ownership/refcount to original data)
-    PlainTensor<DT> slice(int axis, int start, int end) const {
+    PlainTensor<DT> slice(int axis, int start, int end, int step = 1) const {
         PlainTensor<DT> sub_tensor;
         assert(axis < m_rank);
 
         sub_tensor.m_capacity = 0;
-        sub_tensor.m_rank = m_rank;  // slice dosen't change rank & strides
-        for (size_t i = 0; i < m_rank; i++) {
-            sub_tensor.m_strides[i] = m_strides[i];
-            sub_tensor.m_dims[i] = m_dims[i];
+        if (end > start) {
+            sub_tensor.m_rank = m_rank;
+            for (size_t i = 0; i < m_rank; i++) {
+                sub_tensor.m_strides[i] = m_strides[i];
+                sub_tensor.m_dims[i] = m_dims[i];
+            }
+            sub_tensor.m_dims[axis] = (end - start - 1)/step + 1;
+        } else {
+            // squeeze if end == start
+            sub_tensor.m_rank = m_rank - 1;
+            size_t k = 0;
+            for (size_t i = 0; i < m_rank; i++) {
+                if (i != axis) {
+                    sub_tensor.m_strides[k] = m_strides[i];
+                    sub_tensor.m_dims[k] = m_dims[i];
+                    k++;
+                }
+            }
         }
-        sub_tensor.m_dims[axis] = end - start;
 
         auto off = start * m_strides[axis];
-        auto* data = reinterpret_cast<DT*>(m_ptr.get()) + off;
-        sub_tensor.m_ptr = std::shared_ptr<void>(reinterpret_cast<void*>(data), [](void*) {});
+        auto* data = reinterpret_cast<DT*>(m_ptr) + off;
+        sub_tensor.m_ptr = reinterpret_cast<void*>(data);
 
         return sub_tensor;
     }
@@ -253,16 +273,16 @@ struct PlainTensor : public PlainTensorBase {
 
        simplified form is when whole tensor is dense
     */
-    PlainTensor<DT> reshape(const std::initializer_list<size_t>& target_shape) const {
+    PlainTensor<DT> reshape(const std::vector<size_t>& target_shape) const {
         // only valid for dense memory
         PlainTensor<DT> new_tensor_view;
         assert(is_dense());
         assert(shape_size(target_shape) == shape_size(m_dims));
-        new_tensor_view.resize(VectorDims(target_shape), reinterpret_cast<DT*>(m_ptr.get()));
+        new_tensor_view.resize(VectorDims(target_shape), reinterpret_cast<DT*>(m_ptr));
         return new_tensor_view;
     }
 
-    PlainTensor<DT> permute(const std::initializer_list<size_t>& order) const {
+    PlainTensor<DT> permute(const std::vector<size_t>& order) const {
         PlainTensor<DT> new_tensor_view;
         assert(order.size() == m_rank);
         new_tensor_view.m_capacity = 0;
@@ -280,6 +300,10 @@ struct PlainTensor : public PlainTensorBase {
     }
 
     void resize(const VectorDims& new_dims, DT* data = nullptr) {
+        if (!with_storage && !data) {
+            throw std::bad_alloc();
+        }
+
         // initialize strides for compact/dense tensor
         m_rank = new_dims.size();
         assert(m_rank <= PLAINTENSOR_RANK_MAX);
@@ -293,30 +317,35 @@ struct PlainTensor : public PlainTensorBase {
         if (!data) {
             auto capacity_new = m_strides[0] * m_dims[0] * sizeof(DT);
             if (capacity_new > m_capacity) {
-                m_ptr = std::shared_ptr<void>(aligned_alloc(64, capacity_new), [](void* p) {
-                    ::free(p);
-                });
+                m_ptr = aligned_alloc(64, capacity_new);
                 m_capacity = capacity_new;
             }
         } else {
             // m_capacity is zero to indicate that we don't own the memory
             m_capacity = 0;
-            m_ptr = std::shared_ptr<void>(reinterpret_cast<void*>(data), [](void*) {});
+            m_ptr = data;
         }
     }
 
     DT* data() const {
-        return reinterpret_cast<DT*>(m_ptr.get());
+        return reinterpret_cast<DT*>(m_ptr);
     }
 
-    DT& at(const std::initializer_list<size_t>& index) const {
+    // when allow_broadcast is true, index to size-1 dim will always access 0.
+    DT& at(const std::initializer_list<size_t>& index, bool allow_broadcast = false) const {
         size_t off = 0;
         auto it = index.begin();
-        for (auto& stride : m_strides) {
-            auto coordinate = (it != index.end()) ? (*it++) : 0;
-            off += stride * coordinate;
+        for (size_t i = 0; i < m_rank; i++) {
+            size_t coordinate = (it != index.end()) ? (*it++) : 0;
+            if (allow_broadcast && m_dims[i] == 1) {
+                // allow_broadcast only works when the dimension is really 1
+                coordinate = 0;
+            } else {
+                assert(coordinate < m_dims[i]);
+            }
+            off += m_strides[i] * coordinate;
         }
-        return reinterpret_cast<DT*>(m_ptr.get())[off];
+        return reinterpret_cast<DT*>(m_ptr)[off];
     }
 
     DT& operator()(const std::initializer_list<size_t>& index) const {
@@ -342,22 +371,12 @@ struct PlainTensor : public PlainTensorBase {
         }
     }
 
-    uint8_t** get_batched_ptrs() {
-        uint8_t** ret_ptrs = batched_ptr_buff;
-        auto batch_size = m_dims[0];
-        if (batch_size > sizeof(batched_ptr_buff) / sizeof(batched_ptr_buff[0])) {
-            batched_ptr_backup.resize(batch_size);
-            ret_ptrs = &batched_ptr_backup[0];
-        }
-        for (size_t b = 0; b < batch_size; b++) {
-            ret_ptrs[b] = reinterpret_cast<uint8_t*>(&at({b}));
-        }
-        return ret_ptrs;
-    }
-
     int max_repr_len = 256;
 
     std::string repr(int max_total_lines = 16, int lines_per_row = 1) const {
+        if (!m_ptr) {
+            return "{empty}";
+        }
         std::stringstream ss;
         ss << data_type_name<DT>::value << " shape=[";
         const char* sep = "";
@@ -382,7 +401,7 @@ struct PlainTensor : public PlainTensorBase {
         int cur_line_elecnt = 0;
         int cur_row_elecnt = 0;
         size_t i;
-        auto* p = reinterpret_cast<DT*>(m_ptr.get());
+        auto* p = reinterpret_cast<DT*>(m_ptr);
         for (i = 0; i < sz && max_total_lines > 0; i++) {
             if ((i % last_dim_size) == 0) {
                 ss << row_id << ":\t\t";
@@ -392,7 +411,10 @@ struct PlainTensor : public PlainTensorBase {
 
             // display current element if we still have buget
             if (cur_row_lines_left > 0) {
-                ss << p[i] << ",";
+                if (std::is_integral<DT>::value)
+                    ss << static_cast<int64_t>(p[i]) << ",";
+                else
+                    ss << p[i] << ",";
                 cur_line_elecnt++;
                 cur_row_elecnt++;
                 if ((cur_line_elecnt % 16) == 15 || (cur_row_elecnt == last_dim_size)) {

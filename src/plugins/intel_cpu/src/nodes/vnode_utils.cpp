@@ -4,9 +4,13 @@
 
 #include "vnode_utils.hpp"
 
+#include <float.h>
+
 #include <cmath>
-#include <limits>
 #include <cstring>
+#include <iostream>
+#include <limits>
+
 #if defined(HAVE_AVX2) || defined(HAVE_AVX512F)
 #    include <immintrin.h>
 #endif
@@ -184,8 +188,15 @@ inline void scale_add_reduce_max(float* a, const float scale, const float* b, co
 #endif
 }
 
-template<int N>
-inline void scale_add2_reduce_max(float* a, const float scale, const float* b, const float* c, const size_t size, float& max) {
+template <int dispatch_id>
+inline void scale_add2_reduce_max(float* a,
+                                  const float scale,
+                                  const float* alibi,
+                                  const float* attn_mask,
+                                  const uint8_t* causal_mask,
+                                  bool select_nfltmax_at_0,  // true:  0 in mask set -FLT_MAX
+                                  const size_t size,
+                                  float& max) {
 #if defined(HAVE_AVX512F)
     auto v_max = _mm512_set1_ps(std::numeric_limits<float>::lowest());
     auto v_scale = _mm512_set1_ps(scale);
@@ -193,20 +204,30 @@ inline void scale_add2_reduce_max(float* a, const float scale, const float* b, c
     auto v_b = v_max;
     auto v_c = v_max;
     size_t i = 0;
+    auto v_zeroi32 = _mm512_setzero_epi32();
+    auto v_nfltmax = _mm512_set1_ps(-FLT_MAX);
+    auto kmask_xor = _cvtu32_mask16(select_nfltmax_at_0 ? 0xFFFF : 0);
     // process vector body
     while (i + 16 <= size) {
         v_a = _mm512_loadu_ps(a + i);
+        v_a = _mm512_mul_ps(v_a, v_scale);
 
-        if (N == 0) {
-            v_a = _mm512_mul_ps(v_a, v_scale);
-        } else {
-            v_b = _mm512_loadu_ps(b + i);
-            v_a = _mm512_fmadd_ps(v_a, v_scale, v_b);
+        if (dispatch_id & 0x100) {
+            auto v_mask = _mm512_loadu_ps(alibi + i);
+            v_a = _mm512_add_ps(v_a, v_mask);
         }
 
-        if (N > 1) {
-            v_c = _mm512_loadu_ps(c + i);
-            v_a = _mm512_add_ps(v_a, v_c);
+        if (dispatch_id & 0x010) {
+            auto v_mask = _mm512_loadu_ps(attn_mask + i);
+            v_a = _mm512_add_ps(v_a, v_mask);
+        }
+
+        if (dispatch_id & 0x001) {
+            auto v_maski8 = _mm_loadu_si128(reinterpret_cast<__m128i const*>(causal_mask + i));
+            auto v_maski32 = _mm512_cvtepi8_epi32(v_maski8);
+            auto kmask = _mm512_cmp_epi32_mask(v_maski32, v_zeroi32, _MM_CMPINT_NE);  // !=0
+            kmask = _kxor_mask16(kmask, kmask_xor);                                   // reverse, mask at ==0
+            v_a = _mm512_mask_blend_ps(kmask, v_a, v_nfltmax);                        // mask => -FLT_MAX
         }
         v_max = _mm512_max_ps(v_max, v_a);
         _mm512_storeu_ps(a + i, v_a);
@@ -217,15 +238,24 @@ inline void scale_add2_reduce_max(float* a, const float scale, const float* b, c
     if (i < size) {
         __mmask16 mask = (1 << (size - i)) - 1;
         v_a = _mm512_maskz_loadu_ps(mask, a + i);
-        if (N == 0) {
-            v_a = _mm512_mul_ps(v_a, v_scale);
-        } else {
-            v_b = _mm512_maskz_loadu_ps(mask, b + i);
-            v_a = _mm512_fmadd_ps(v_a, v_scale, v_b);
+        v_a = _mm512_mul_ps(v_a, v_scale);
+
+        if (dispatch_id & 0x100) {
+            auto v_mask = _mm512_maskz_loadu_ps(mask, alibi + i);
+            v_a = _mm512_add_ps(v_a, v_mask);
         }
-        if (N > 1) {
-            v_c = _mm512_maskz_loadu_ps(mask, c + i);
-            v_a = _mm512_add_ps(v_a, v_c);
+
+        if (dispatch_id & 0x010) {
+            auto v_mask = _mm512_maskz_loadu_ps(mask, attn_mask + i);
+            v_a = _mm512_add_ps(v_a, v_mask);
+        }
+
+        if (dispatch_id & 0x001) {
+            auto v_maski8 = _mm_loadu_si128(reinterpret_cast<__m128i const*>(causal_mask + i));
+            auto v_maski32 = _mm512_cvtepi8_epi32(v_maski8);
+            auto kmask = _mm512_cmp_epi32_mask(v_maski32, v_zeroi32, _MM_CMPINT_NE);  // !=0
+            kmask = _kxor_mask16(kmask, kmask_xor);                                   // reverse, mask at ==0
+            v_a = _mm512_mask_blend_ps(kmask, v_a, v_nfltmax);                        // mask => -FLT_MAX
         }
         v_max = _mm512_mask_max_ps(v_max, mask, v_a, v_max);
         _mm512_mask_storeu_ps(a + i, mask, v_a);
@@ -238,19 +268,31 @@ inline void scale_add2_reduce_max(float* a, const float scale, const float* b, c
     auto v_a = v_max;
     auto v_b = v_max;
     auto v_c = v_max;
+    auto v_zeroi32 = _mm256_setzero_si256();
+    auto v_mask_xor = _mm256_set1_epi32(select_nfltmax_at_0 ? -1 : 0);
+    auto v_nfltmax = _mm256_set1_ps(-FLT_MAX);
     size_t i = 0;
     // process vector body
     while (i + 8 <= size) {
         v_a = _mm256_loadu_ps(a + i);
-        if (N == 0) {
-            v_a = _mm256_mul_ps(v_a, v_scale);
-        } else {
-            v_b = _mm256_loadu_ps(b + i);
-            v_a = _mm256_fmadd_ps(v_a, v_scale, v_b);
+        v_a = _mm256_mul_ps(v_a, v_scale);
+
+        if (dispatch_id & 0x100) {
+            auto v_mask = _mm256_loadu_ps(alibi + i);
+            v_a = _mm256_add_ps(v_a, v_mask);
         }
-        if (N > 1) {
-            v_c = _mm256_loadu_ps(c + i);
-            v_a = _mm256_add_ps(v_a, v_c);
+
+        if (dispatch_id & 0x010) {
+            auto v_mask = _mm256_loadu_ps(attn_mask + i);
+            v_a = _mm256_add_ps(v_a, v_mask);
+        }
+
+        if (dispatch_id & 0x001) {
+            auto v_maski8 = _mm_loadu_si128(reinterpret_cast<__m128i const*>(causal_mask + i));
+            auto v_maski32 = _mm256_cvtepi8_epi32(v_maski8);
+            v_maski32 = _mm256_cmpeq_epi32(v_maski32, v_zeroi32);     // ==0
+            v_maski32 = _mm256_xor_si256(v_maski32, v_mask_xor);      // reverse, mask at ==0
+            v_a = _mm256_blendv_ps(v_nfltmax, v_a, _mm256_castsi256_ps(v_maski32));   // mask => -FLT_MAX
         }
 
         v_max = _mm256_max_ps(v_max, v_a);
@@ -262,16 +304,26 @@ inline void scale_add2_reduce_max(float* a, const float scale, const float* b, c
     if (i < size) {
         auto mask = get_mask(size - i);
         v_a = _mm256_maskload_ps(a + i, mask);
-        if (N == 0) {
-            v_a = _mm256_mul_ps(v_a, v_scale);
-        } else {
-            v_b = _mm256_maskload_ps(b + i, mask);
-            v_a = _mm256_fmadd_ps(v_a, v_scale, v_b);
+        v_a = _mm256_mul_ps(v_a, v_scale);
+
+        if (dispatch_id & 0x100) {
+            auto v_mask = _mm256_maskload_ps(alibi + i, mask);
+            v_a = _mm256_add_ps(v_a, v_mask);
         }
-        if (N > 1) {
-            v_c = _mm256_maskload_ps(c + i, mask);
-            v_a = _mm256_add_ps(v_a, v_c);
+
+        if (dispatch_id & 0x010) {
+            auto v_mask = _mm256_maskload_ps(attn_mask + i, mask);
+            v_a = _mm256_add_ps(v_a, v_mask);
         }
+
+        if (dispatch_id & 0x001) {
+            auto v_maski8 = _mm_loadu_si128(reinterpret_cast<__m128i const*>(causal_mask + i));
+            auto v_maski32 = _mm256_cvtepi8_epi32(v_maski8);
+            v_maski32 = _mm256_cmpeq_epi32(v_maski32, v_zeroi32);     // ==0
+            v_maski32 = _mm256_xor_si256(v_maski32, v_mask_xor);      // reverse, mask at ==0
+            v_a = _mm256_blendv_ps(v_nfltmax, v_a, _mm256_castsi256_ps(v_maski32));   // mask => -FLT_MAX
+        }
+
         v_a = _mm256_blendv_ps(v_max, v_a, _mm256_castsi256_ps(mask));
         v_max = _mm256_max_ps(v_max, v_a);
         _mm256_maskstore_ps(a + i, mask, v_a);
@@ -281,31 +333,43 @@ inline void scale_add2_reduce_max(float* a, const float scale, const float* b, c
 #else
     for (size_t i = 0; i < size; i++) {
         a[i] *= scale;
-        if (N > 0)
-            a[i] += b[i];
-        if (N > 1)
-            a[i] += c[i];
+        if (dispatch_id & 0x100)
+            a[i] += alibi[i];
+
+        if (dispatch_id & 0x010)
+            a[i] += attn_mask[i];
+
+        if (dispatch_id & 0x001) {
+            if (select_nfltmax_at_0) {
+                if (causal_mask[i] == 0)
+                    a[i] = -FLT_MAX;
+            } else {
+                if (causal_mask[i] != 0)
+                    a[i] = -FLT_MAX;
+            }
+        }
+
         max = a[i] > max ? a[i] : max;
     }
 #endif
 }
 
 #if defined(HAVE_AVX512F)
-inline void exp_ps_avx512(__m512 & src) {
-    static __m512 exp_ln_flt_min_f = _mm512_castsi512_ps(_mm512_set1_epi32(0xc2aeac50));    // log(FLT_MIN)
-    static __m512 exp_ln_flt_max_f = _mm512_castsi512_ps(_mm512_set1_epi32(0x42b17218));    // log(FLT_MAX)
-    static __m512 exp_log2ef = _mm512_castsi512_ps(_mm512_set1_epi32(0x3fb8aa3b));          // log2(e)
-    static __m512 half = _mm512_castsi512_ps(_mm512_set1_epi32(0x3f000000));                // 0.5f
-    static __m512 ln2f = _mm512_castsi512_ps(_mm512_set1_epi32(0x3f317218));                // ln(2)
-    static __m512 one = _mm512_castsi512_ps(_mm512_set1_epi32(0x3f800000));                 // 1.0f
-    static __m512i exponent_bias = _mm512_set1_epi32(0x0000007f);                           // 127
+inline void exp_ps_avx512(__m512& src) {
+    static __m512 exp_ln_flt_min_f = _mm512_castsi512_ps(_mm512_set1_epi32(0xc2aeac50));  // log(FLT_MIN)
+    static __m512 exp_ln_flt_max_f = _mm512_castsi512_ps(_mm512_set1_epi32(0x42b17218));  // log(FLT_MAX)
+    static __m512 exp_log2ef = _mm512_castsi512_ps(_mm512_set1_epi32(0x3fb8aa3b));        // log2(e)
+    static __m512 half = _mm512_castsi512_ps(_mm512_set1_epi32(0x3f000000));              // 0.5f
+    static __m512 ln2f = _mm512_castsi512_ps(_mm512_set1_epi32(0x3f317218));              // ln(2)
+    static __m512 one = _mm512_castsi512_ps(_mm512_set1_epi32(0x3f800000));               // 1.0f
+    static __m512i exponent_bias = _mm512_set1_epi32(0x0000007f);                         // 127
     static constexpr int n_mantissa_bits = 23;
-    static __m512 exp_pol1 = _mm512_castsi512_ps(_mm512_set1_epi32(0x3f7ffffb));            // p1 = 0.999999701f
-    static __m512 exp_pol2 = _mm512_castsi512_ps(_mm512_set1_epi32(0x3efffee3));            // p2 = 0.499991506f
-    static __m512 exp_pol3 = _mm512_castsi512_ps(_mm512_set1_epi32(0x3e2aad40));            // p3 = 0.166676521f
-    static __m512 exp_pol4 = _mm512_castsi512_ps(_mm512_set1_epi32(0x3d2b9d0d));            // p4 = 0.0418978221f
-    static __m512 exp_pol5 = _mm512_castsi512_ps(_mm512_set1_epi32(0x3c07cfce));            // p5 = 0.00828929059f
-    static __m512 two = _mm512_castsi512_ps(_mm512_set1_epi32(0x40000000));                 // 2
+    static __m512 exp_pol1 = _mm512_castsi512_ps(_mm512_set1_epi32(0x3f7ffffb));  // p1 = 0.999999701f
+    static __m512 exp_pol2 = _mm512_castsi512_ps(_mm512_set1_epi32(0x3efffee3));  // p2 = 0.499991506f
+    static __m512 exp_pol3 = _mm512_castsi512_ps(_mm512_set1_epi32(0x3e2aad40));  // p3 = 0.166676521f
+    static __m512 exp_pol4 = _mm512_castsi512_ps(_mm512_set1_epi32(0x3d2b9d0d));  // p4 = 0.0418978221f
+    static __m512 exp_pol5 = _mm512_castsi512_ps(_mm512_set1_epi32(0x3c07cfce));  // p5 = 0.00828929059f
+    static __m512 two = _mm512_castsi512_ps(_mm512_set1_epi32(0x40000000));       // 2
     // exp(x) =
     // = exp(n * ln(2) + r) // divide x by ln(2) and get quot and rem
     // = 2^n * exp(r)       // simplify the exp(n*ln(2)) expression
@@ -456,17 +520,45 @@ inline void multiply_scalar(float* a, const float val, const size_t size) {
 #endif
 }
 
-void scale_add_softmax(float* a, float scale, float* mask, float* alibi, size_t len, size_t total_size) {
+void scale_add_softmax(float* a,
+                       float scale,
+                       float* alibi,
+                       float* attn_mask,
+                       uint8_t* causal_mask,
+                       bool select_nfltmax_at_0,
+                       size_t len,
+                       size_t total_size) {
     float max = std::numeric_limits<float>::lowest();
 
-    if (mask == nullptr) {
-        scale_add2_reduce_max<0>(a, scale, mask, alibi, len, max);
-    } else {
-        if (alibi) {
-            scale_add2_reduce_max<2>(a, scale, mask, alibi, len, max);
-        } else {
-            scale_add2_reduce_max<1>(a, scale, mask, alibi, len, max);
-        }
+    int dispatch = (alibi ? 0x100 : 0) | (attn_mask ? 0x010 : 0) | (causal_mask ? 0x001 : 0);
+
+    switch (dispatch) {
+    case 0x111:
+        scale_add2_reduce_max<0x111>(a, scale, alibi, attn_mask, causal_mask, select_nfltmax_at_0, len, max);
+        break;
+    case 0x000:
+        scale_add2_reduce_max<0x000>(a, scale, alibi, attn_mask, causal_mask, select_nfltmax_at_0, len, max);
+        break;
+    case 0x001:
+        scale_add2_reduce_max<0x001>(a, scale, alibi, attn_mask, causal_mask, select_nfltmax_at_0, len, max);
+        break;
+    case 0x010:
+        scale_add2_reduce_max<0x010>(a, scale, alibi, attn_mask, causal_mask, select_nfltmax_at_0, len, max);
+        break;
+    case 0x100:
+        scale_add2_reduce_max<0x100>(a, scale, alibi, attn_mask, causal_mask, select_nfltmax_at_0, len, max);
+        break;
+    case 0x110:
+        scale_add2_reduce_max<0x110>(a, scale, alibi, attn_mask, causal_mask, select_nfltmax_at_0, len, max);
+        break;
+    case 0x011:
+        scale_add2_reduce_max<0x011>(a, scale, alibi, attn_mask, causal_mask, select_nfltmax_at_0, len, max);
+        break;
+    case 0x101:
+        scale_add2_reduce_max<0x101>(a, scale, alibi, attn_mask, causal_mask, select_nfltmax_at_0, len, max);
+        break;
+    default:
+        break;
     }
 
     float sum = 0.0f;
@@ -475,8 +567,10 @@ void scale_add_softmax(float* a, float scale, float* mask, float* alibi, size_t 
     // divide sum
     float scalar = 1.0f / sum;
     multiply_scalar(a, scalar, len);
-    // apply causual mask with zeros
-    memset(a + len, 0, sizeof(float) * (total_size - len));
+
+    // apply causual mask to final result instead of attn_score
+    if (total_size > len)
+        memset(a + len, 0, sizeof(float) * (total_size - len));
 }
 }  // namespace XARCH
 }  // namespace Cpu

@@ -77,7 +77,7 @@ static vnode_executor_map register_all() {
     register_executor<whisper_dec2_self_attn_executor<KT_MLAS, float>>(vem, "whisper_dec2_self_attn,MLAS,FP32");
     register_executor<whisper_dec2_enc_attn_executor<KT_MLAS, float>>(vem, "whisper_dec2_enc_attn,MLAS,FP32");
     #endif
-    #ifdef OV_CPU_WITH_LLM
+    #ifdef OV_CPU_WITH_LLMDNN
     register_executor<gpt2_attention_executor<KT_LLMDNN, ov::bfloat16>>(vem, "gpt2_attention,LLMDNN,BF16");
     register_executor<gptneox_attention_executor<KT_LLMDNN, ov::bfloat16>>(vem, "gptneox_attention,LLMDNN,BF16");
     register_executor<open_llama_attention_executor<KT_LLMDNN, ov::bfloat16>>(vem, "open_llama_attention,LLMDNN,BF16");

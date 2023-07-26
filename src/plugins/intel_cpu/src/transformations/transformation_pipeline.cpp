@@ -98,6 +98,7 @@
 #include "transformations/cpu_opset/convert_to_cpu_specific_opset.hpp"
 #include "transformations/snippets/x64/pass/snippets_mark_skipped.hpp"
 #include "transformations/cpu_opset/x64/pass/mha_fusion.hpp"
+#include "transformations/cpu_opset/x64/pass/dyn_mha_fusion.hpp"
 #include "transformations/cpu_opset/x64/pass/convert_to_interaction.hpp"
 #include "transformations/cpu_opset/arm/pass/convert_group_conv.hpp"
 #include "transformations/cpu_opset/arm/pass/convert_group_conv1d.hpp"
@@ -574,6 +575,8 @@ void Transformations::PostLpt() {
         CPU_REGISTER_PASS_X64(postLPTPassManager, DumpModel, "VNode0.txt");
 
     CPU_REGISTER_PASS_X64(postLPTPassManager, MHADynamicVNodeIn);
+    CPU_REGISTER_PASS_X64(postLPTPassManager, MHADynamicFloatFusion4D);
+    CPU_REGISTER_PASS_X64(postLPTPassManager, MHADynamicFloatFusionWhisper);
 
     if (dump_vnode)
         CPU_REGISTER_PASS_X64(postLPTPassManager, DumpModel, "VNode1.txt");

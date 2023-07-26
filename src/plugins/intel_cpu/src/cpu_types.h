@@ -112,7 +112,9 @@ enum class Type {
     MHA,
     Unique,
     Ngram,
-    VNode
+    VNode,
+    MHADynamic,
+    RPE,
 };
 
 enum class Algorithm {

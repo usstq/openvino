@@ -1734,7 +1734,8 @@ void Graph::EnforceInferencePrecision() {
                         Type::MatMul,         // bert nets
                         Type::ROIPooling,     // object detection nets
                         Type::Interpolate,    // super resolution nets
-                        Type::VNode))         // dynamic MHA
+                        Type::VNode,
+                        Type::MHADynamic))     // dynamic MHA
                     continue;   // stop at significant nodes
             } else if (inferPrec == InferenceEngine::Precision::FP16) {
                 /* list of node types that must be forced to be executed in FP16 precision

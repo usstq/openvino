@@ -60,6 +60,7 @@
 #include "utils/general_utils.h"
 #include "utils/cpu_utils.hpp"
 #include "utils/verbose.h"
+#include "utils/profiler.hpp"
 #include "nodes/common/cpu_convert.h"
 #include "memory_desc/cpu_memory_desc_utils.h"
 #include "memory_desc/dnnl_blocked_memory_desc.h"
@@ -577,6 +578,7 @@ std::vector<memory::format_tag> Node::getAvailableFormatsForDims(const Shape &di
 void Node::updateShapes() {
     IE_ASSERT(isDynamicNode()) << "Node::updateShapes() is called to a static shape node of type: " << getTypeStr() << " with name: " << getName();
     if (needShapeInfer()) {
+        //auto prof = Profile([&](ProfileData * p) { p->name = this->getName() + "_s"; });
         auto result = shapeInfer();
         if (ShapeInferStatus::success == result.status) {
             redefineOutputMemory(result.dims);
@@ -588,6 +590,8 @@ void Node::updateDynamicParams() {
     IE_ASSERT(isDynamicNode()) << "Node::updateDynamicParams() is called to a static shape node of type: " << getTypeStr() << " with name: " << getName();
     if (isExecutable()) {
         if (needPrepareParams()) {
+            //auto prof = Profile([&](ProfileData * p) { p->name = this->getName() + "_p"; });
+
             IE_ASSERT(inputShapesDefined()) << "Can't prepare params for " << getTypeStr() << " node with name: " << getName() <<
                 " since the input shapes are not defined.";
             DEBUG_LOG(" prepareParams() on #", getExecIndex(), " ", getTypeStr(), " ", algToString(getAlgorithm()),

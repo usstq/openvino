@@ -24,6 +24,7 @@
 #include "openvino/opsets/opset7.hpp"
 #include "openvino/pass/pattern/matcher.hpp"
 #include "openvino/pass/pattern/op/label.hpp"
+#include "openvino/pass/pattern/op/or.hpp"
 #include "openvino/pass/pattern/op/wrap_type.hpp"
 
 namespace ov {
@@ -116,6 +117,10 @@ struct attr {
         type = 2;
         value.f32 = v;
     }
+    attr(const char* name, std::initializer_list<int64_t> vec_i64) : name(name) {
+        type = 3;
+        vec_i64 = vec_i64;
+    }
     bool predicate(int v) const {
         bool ret = (type == 1 && v == value.i32);
         return ret;
@@ -136,7 +141,10 @@ struct attr {
         bool ret = (type == 0 && v == value.str);
         return ret;
     }
-
+    bool predicate(const std::vector<int64_t>& vec_i64) const {
+        bool ret = (type == 3 && vec_i64 == vec_i64);
+        return ret;
+    }
     std::string to_string() const {
         std::stringstream ss;
         ss << name << ":";
@@ -154,6 +162,7 @@ struct attr {
         int i32;
         float f32;
     } value;
+    std::vector<int64_t> vec_i64;
     int type;
 };
 
@@ -288,6 +297,17 @@ std::string vec2str(const std::vector<T>& vec, int cnt_limit = 9) {
 struct GenPatternNode {
     std::shared_ptr<Node> node;
 
+    GenPatternNode(ov::Rank rank) {
+        node = ov::pass::pattern::any_input([rank](const Output<Node>& value) {
+            if (!rank.compatible(value.get_partial_shape().rank())) {
+                verbose_log("*mismatched GenPatternNode rank ", value);
+                return false;
+            }
+            verbose_log(" matched GenPatternNode rank ", value);
+            return true;
+        });
+    }
+
     GenPatternNode(values_info vt) {
         node = ov::pass::pattern::any_input([vt](const Output<Node>& value) {
             if (!vt.predicate(value)) {
@@ -299,6 +319,7 @@ struct GenPatternNode {
         });
     }
     GenPatternNode(const std::shared_ptr<Node>& node) : node(node) {}
+    GenPatternNode(const std::shared_ptr<ov::pass::pattern::op::Or>& pattern) : node(std::dynamic_pointer_cast<Node>(pattern)) {}
     GenPatternNode(const Output<Node>& out) : node(out.get_node_shared_ptr()) {}
     GenPatternNode(int v) {
         node = ConstVector(std::vector<int>{v}, "i32[]");
@@ -377,9 +398,19 @@ std::shared_ptr<Node> GenConst(std::initializer_list<T> v, values_info vt = null
     return g.node;
 }
 
+inline std::shared_ptr<Node> GenPattern(ov::Rank rank) {
+    GenPatternNode g(rank);
+    return g.node;
+}
+
+inline std::shared_ptr<Node> GenPattern(values_info vt) {
+    GenPatternNode g(vt);
+    return g.node;
+}
+
 template <class... Args>
 std::shared_ptr<Node> GenPattern(const std::vector<GenPatternNode>& inputs,
-                                 values_info vt,
+                                 values_info vt = nullptr,
                                  const std::vector<attr>& attrs = {},
                                  const char * friendly_name = "") {
     OutputVector ovs;
@@ -394,7 +425,7 @@ std::shared_ptr<Node> GenPattern(const std::vector<GenPatternNode>& inputs,
         }
 
         // match parent node with attribute a0/a1/...
-        if (!attr_compatible(*value.get_node_shared_ptr(), attrs)) {
+        if (!attrs.empty() && !attr_compatible(*value.get_node_shared_ptr(), attrs)) {
             verbose_log("*mismatched GenPattern ", friendly_name, " attr ", value);
             return false;
         }

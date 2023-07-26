@@ -116,6 +116,22 @@ cross_compiled_file(${TARGET_NAME}
         NAMESPACE   InferenceEngine::Extensions::Cpu::XARCH
 )
 
+cross_compiled_file(${TARGET_NAME}
+        ARCH AVX512F AVX2 ANY
+                    src/nodes/vnode_utils.cpp
+        API         src/nodes/vnode_utils.hpp
+        NAME        scale_add_softmax
+        NAMESPACE   InferenceEngine::Extensions::Cpu::XARCH
+)
+
+cross_compiled_file(${TARGET_NAME}
+        ARCH AVX2 ANY
+                    src/nodes/rope_impl.cpp
+        API         src/nodes/rope_impl.hpp
+        NAME        rope_impl
+        NAMESPACE   InferenceEngine::Extensions::Cpu::XARCH
+)
+
 # must be called after all target_link_libraries
 ie_add_api_validator_post_build_step(TARGET ${TARGET_NAME})
 

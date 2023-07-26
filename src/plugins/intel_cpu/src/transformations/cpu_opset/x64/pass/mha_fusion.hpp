@@ -49,17 +49,6 @@ public:
     MHAQuantFusion2();
 };
 
-class MHADynamicVNodeIn: public ngraph::pass::GraphRewrite {
-public:
-    OPENVINO_RTTI("MHADynamicVNodeIn", "0");
-    MHADynamicVNodeIn();
-};
-class MHADynamicVNodeOut: public ngraph::pass::MatcherPass {
-public:
-    OPENVINO_RTTI("MHADynamicVNodeOut", "0");
-    MHADynamicVNodeOut();
-};
-
 class MHAFusion : public ngraph::pass::GraphRewrite {
 public:
     OPENVINO_RTTI("MHAFusion", "0");

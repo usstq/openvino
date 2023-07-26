@@ -2,17 +2,24 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
+#include <array>
 #include <cstddef>
 #include <vector>
-#include <array>
+#include <cstdint>
 
 namespace InferenceEngine {
 namespace Extensions {
 namespace Cpu {
 namespace XARCH {
 
-void scale_add_softmax(float* a, float scale, float* mask, float* aliba, size_t len, size_t total_size);
-
+void scale_add_softmax(float* a,
+                       float scale,
+                       float* alibi,
+                       float* attn_mask,
+                       uint8_t* causal_mask,
+                       bool select_nfltmax_at_0,
+                       size_t len,
+                       size_t total_size);
 }  // namespace XARCH
 }  // namespace Cpu
 }  // namespace Extensions

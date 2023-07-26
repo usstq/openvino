@@ -103,13 +103,16 @@ public:
             return;
         attr_match[name] = it->second.predicate(adapter.get());
     }
+
+    void on_adapter(const std::string& name, ngraph::ValueAccessor<std::vector<int64_t>>& adapter) override {
+        auto it = attr_map.find(name);
+        if (it == attr_map.end())
+            return;
+        attr_match[name] = it->second.predicate(adapter.get());
+    }
+
     /*
         void on_adapter(const std::string& name, ngraph::ValueAccessor<std::vector<int>>& adapter) override {
-            const auto& value = join(adapter.get());
-            append_attribute(name.c_str(), value.c_str());
-        }
-
-        void on_adapter(const std::string& name, ngraph::ValueAccessor<std::vector<int64_t>>& adapter) override {
             const auto& value = join(adapter.get());
             append_attribute(name.c_str(), value.c_str());
         }

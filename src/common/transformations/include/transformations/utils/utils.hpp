@@ -66,15 +66,10 @@ inline std::string create_ie_output_name(const Output<const Node>& output) {
     if (!tensor_name.empty()) {
         out_name = std::move(tensor_name);
     } else {
-        auto names = output.get_tensor().get_names();
-        if (!names.empty()) {
-            out_name = *names.cbegin();
-        } else {
-            const auto& prev_layer = output.get_node_shared_ptr();
-            out_name = prev_layer->get_friendly_name();
-            if (prev_layer->get_output_size() != 1) {
-                out_name += "." + std::to_string(output.get_index());
-            }
+        const auto& prev_layer = output.get_node_shared_ptr();
+        out_name = prev_layer->get_friendly_name();
+        if (prev_layer->get_output_size() != 1) {
+            out_name += "." + std::to_string(output.get_index());
         }
     }
     return out_name;

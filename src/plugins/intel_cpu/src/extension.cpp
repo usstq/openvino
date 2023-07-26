@@ -10,6 +10,7 @@
 #include "transformations/cpu_opset/common/op/ngram.hpp"
 #include "transformations/cpu_opset/common/op/vnode.hpp"
 #include "transformations/cpu_opset/x64/op/mha.hpp"
+#include "transformations/cpu_opset/x64/op/dyn_mha.hpp"
 #include "transformations/cpu_opset/x64/op/interaction.hpp"
 #include "transformations/snippets/x64/op/load_convert.hpp"
 #include "transformations/snippets/x64/op/store_convert.hpp"
@@ -23,6 +24,7 @@
 #include <ov_ops/nms_ie_internal.hpp>
 #include <ov_ops/nms_static_shape_ie.hpp>
 #include <ov_ops/multiclass_nms_ie_internal.hpp>
+#include <ov_ops/rotary_positional_embeddings.hpp>
 
 #include <snippets/op/subgraph.hpp>
 
@@ -60,6 +62,8 @@ std::map<std::string, ngraph::OpSet> Extension::getOpSets() {
         NGRAPH_OP(SwishNode, ov::intel_cpu)
         NGRAPH_OP(NgramNode, ov::intel_cpu)
         NGRAPH_OP(VNode, ov::intel_cpu)
+        NGRAPH_OP(MHADynamic, ov::intel_cpu)
+        NGRAPH_OP(RPE, ov::op::internal)
         NGRAPH_OP_X64(MHANode, ov::intel_cpu)
         NGRAPH_OP_X64(InteractionNode, ov::intel_cpu)
 #undef NGRAPH_OP
