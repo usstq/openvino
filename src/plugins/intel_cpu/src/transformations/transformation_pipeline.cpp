@@ -81,6 +81,7 @@
 #include "transformations/smart_reshape/matmul_sr.hpp"
 #include "transformations/init_node_info.hpp"
 #include "utils/ngraph_transformation.hpp"
+#include "utils/debug_capabilities.h"
 
 // LPT transformations
 #include "low_precision/add.hpp"
@@ -566,6 +567,17 @@ void Transformations::PostLpt() {
 
     // Execute before snippets. Otherwise FQ will be converted to Subgraph
     CPU_REGISTER_PASS_X64(postLPTPassManager, ConvertFqRnnToQuantizedRnn);
+
+    // Execute VNode before snippets. Otherwise some part in VNode will be converted to Subgraph
+    bool dump_vnode = std::getenv("DUMP_VNODE") ? atoi(std::getenv("DUMP_VNODE")) : 0;
+    if (dump_vnode)
+        CPU_REGISTER_PASS_X64(postLPTPassManager, DumpModel, "VNode0.txt");
+
+    CPU_REGISTER_PASS_X64(postLPTPassManager, MHADynamicVNodeIn);
+
+    if (dump_vnode)
+        CPU_REGISTER_PASS_X64(postLPTPassManager, DumpModel, "VNode1.txt");
+
     postLPTPassManager.run_passes(model);
 }
 

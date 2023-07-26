@@ -7,12 +7,14 @@
 #include <oneapi/dnnl/dnnl.hpp>
 #include "memory_desc/blocked_memory_desc.h"
 #include "onednn/iml_type_mapper.h"
+#include "debug_capabilities.h"
 #ifdef CPU_DEBUG_CAPS
 
-#include "debug_capabilities.h"
 #include "node.h"
 #include "edge.h"
 #include <iomanip>
+#include <cfloat>
+#include <climits>
 #include "nodes/input.h"
 #include "nodes/eltwise.h"
 #include "snippets/op/subgraph.hpp"
@@ -151,6 +153,61 @@ std::ostream & operator<<(std::ostream & os, const NodeDesc& desc) {
 std::ostream & operator<<(std::ostream & os, const Edge& edge) {
     os << edge.getParent()->getName() << "[" << edge.getInputNum() << "]->"
        << edge.getChild()->getName() << "[" << edge.getOutputNum() << "]";
+    return os;
+}
+
+template<typename DT>
+void dump_tensor(std::ostream& os, void * ptr, const VectorDims& dims) {
+    DT * p = reinterpret_cast<DT*>(ptr);
+    auto rank = dims.size();
+    const char * sep = "";
+    os << "{";
+
+    if (rank > 1) os << "\n\t";
+
+    auto last_dim_size = dims[rank - 1];
+
+    auto sz = shape_size(dims);
+    std::stringstream ss;
+    int lines = 0;
+    for (size_t i = 0; i < sz; i++) {
+        if (ss.tellp() < 256)
+            ss << p[i] << ",";
+
+        if ((i % last_dim_size) == (last_dim_size - 1)) {
+            os << lines << " : " <<  ss.str() << "...\n\t";
+            ss.str("");
+            lines++;
+            if (lines > 16) {
+                os << "... ... ... ... \n\t";
+                break;
+            }
+        }
+    }
+    os << "}";
+}
+
+std::ostream& operator<<(std::ostream& os, const Memory& mem) {
+    auto nbytes = mem.getSize();
+    void* ptr = mem.getData();
+    auto& dims = mem.getStaticDims();
+    switch (mem.getDataType()) {
+    case dnnl::memory::data_type::bf16:
+        dump_tensor<ov::bfloat16>(os, ptr, dims);
+        break;
+    case dnnl::memory::data_type::f32:
+        dump_tensor<float>(os, ptr, dims);
+        break;
+    case dnnl::memory::data_type::s32:
+        dump_tensor<int32_t>(os, ptr, dims);
+        break;
+    case dnnl::memory::data_type::s8:
+        dump_tensor<int8_t>(os, ptr, dims);
+        break;
+    case dnnl::memory::data_type::u8:
+        dump_tensor<uint8_t>(os, ptr, dims);
+        break;
+    }
     return os;
 }
 
@@ -340,7 +397,7 @@ std::ostream & operator<<(std::ostream & os, const Node &c_node) {
     os << " " << node.getPrimitiveDescriptorType();
 
     // last line(s): fused layers
-    os << " " << node.getOriginalLayers();
+    os << " orglayers:" << node.getOriginalLayers();
 
     if (node.PerfCounter().count()) {
         os << " latency:" << node.PerfCounter().avg() << "(us) x" << node.PerfCounter().count();
@@ -350,6 +407,18 @@ std::ostream & operator<<(std::ostream & os, const Node &c_node) {
         os << "\n\t  FusedWith: " << *fn;
     }
 
+    // output result values
+    /*
+    for (int i = 0; i < num_output_port; i++) {
+        auto edge = node.getChildEdgeAt(i);
+        if (edge->getStatus() != Edge::Status::NotAllocated) {
+            auto ptr = edge->getMemoryPtr();
+            if (ptr->getDesc().getShape().isStatic()) {
+                os << "\n\t ChildEdgeAt(" << i << "): " << *ptr << std::endl;
+            }
+        }
+    }
+    */
     // primArgs
     /*
     if (node.primArgs.size()) {
@@ -368,8 +437,39 @@ std::ostream & operator<<(std::ostream & os, const Node &c_node) {
     return os;
 }
 
+template <typename T>
+void stream_output_scalar(std::ostream& os, const T& value) {
+    if (std::is_floating_point<T>::value) {
+        if (std::isnan(value)) {
+            os << "NAN";
+        } else if (std::isinf(value)) {
+            os << (value > 0 ? "INFINITY" : "-INFINITY");
+        } else if (value == FLT_MIN) {
+                os << "FLT_MIN";
+        } else if (value == -FLT_MIN) {
+                os << "-FLT_MIN";
+        } else if (value == FLT_MAX) {
+                os << "FLT_MAX";
+        } else if (value == -FLT_MAX) {
+                os << "-FLT_MAX";
+        } else {
+            std::stringstream ss;
+            ss << value;
+            auto strv = ss.str();
+            os << strv;
+            if (strv.find(".") == std::string::npos && strv.find("e") == std::string::npos)
+            os << ".0";
+            if (std::is_same<T, float>::value)
+            os << "f";
+        }
+    } else {
+        os << value;
+    }
+}
+
 class OstreamAttributeVisitor : public ngraph::AttributeVisitor {
     std::ostream & os;
+    const char * sep = "";
 
 public:
     OstreamAttributeVisitor(std::ostream & os) : os(os) {}
@@ -381,25 +481,36 @@ public:
         } else if (auto a = ov::as_type<ov::AttributeAdapter<std::vector<ov::element::Type>>>(&adapter)) {
             const auto& value = join(a->get());
             append_attribute(name.c_str(), value.c_str());
+        } else if (auto a = ov::as_type<ov::AttributeAdapter<ov::PartialShape>>(&adapter)) {
+            const auto& value = a->get();
+            append_attribute(name.c_str(), value.to_string().c_str());
         } else {
             append_attribute(name.c_str(), "?");
         }
     }
 
     void on_adapter(const std::string& name, ngraph::ValueAccessor<bool>& adapter) override {
-        append_attribute(name.c_str(), std::to_string(adapter.get()).c_str());
+        append_attribute(name.c_str(), adapter.get());
     }
 
     void on_adapter(const std::string& name, ngraph::ValueAccessor<std::string>& adapter) override {
-        append_attribute(name.c_str(), adapter.get().c_str());
+        append_attribute(name.c_str(), adapter.get());
     }
 
     void on_adapter(const std::string& name, ngraph::ValueAccessor<int64_t>& adapter) override {
-        append_attribute(name.c_str(), std::to_string(adapter.get()).c_str());
+        append_attribute(name.c_str(), adapter.get());
     }
 
     void on_adapter(const std::string& name, ngraph::ValueAccessor<double>& adapter) override {
-        append_attribute(name.c_str(), std::to_string(adapter.get()).c_str());
+        append_attribute(name.c_str(), adapter.get());
+    }
+
+    void on_adapter(const std::string& name, ngraph::ValueAccessor<int32_t>& adapter) override {
+        append_attribute(name.c_str(), adapter.get());
+    }
+
+    void on_adapter(const std::string& name, ngraph::ValueAccessor<float>& adapter) override {
+        append_attribute(name.c_str(), adapter.get());
     }
 
     void on_adapter(const std::string& name, ngraph::ValueAccessor<std::vector<int>>& adapter) override {
@@ -427,9 +538,24 @@ public:
         append_attribute(name.c_str(), value.c_str());
     }
 
-    void append_attribute(const char * name, const char * value) {
-        os << " " << name << "=" << value;
+    void append_attribute(const char * name, const std::string& value) {
+        os << sep << "{\"" << name << "\", \"" << value << "\"}";
+        sep = ", ";
     }
+
+    void append_attribute(const char * name, const char * value) {
+        os << sep << "{\"" << name << "\", \"" << value << "\"}";
+        sep = ", ";
+    }
+
+    template<typename T, typename std::enable_if<std::is_arithmetic<T>::value, bool>::type = true>
+    void append_attribute(const char * name, const T& value) {
+        os << sep << "{\"" << name << "\", ";
+        stream_output_scalar(os, value);
+        os << "}";
+        sep = ", ";
+    }
+
     void on_adapter(const std::string& name, ngraph::ValueAccessor<std::shared_ptr<ov::Model>>& adapter) override {
         append_attribute(name.c_str(), "Model");
     }
@@ -458,8 +584,33 @@ std::ostream & operator<<(std::ostream & os, const PrintableModel& model) {
         os << "\t" << tag << op->get_friendly_name() << ",\n" << prefix;
     }
     os << ") {\n";
+
+    // collect all scalar & short 1D vectors for literal-style display
+    std::map<std::shared_ptr<ov::Node>, std::string> literal_consts;
+    for (auto op : f.get_ordered_ops()) {
+        const auto & type_info = op->get_type_info();
+        if (auto constop = std::dynamic_pointer_cast<op::v0::Constant>(op)) {
+            auto shape = constop->get_shape();
+            if (shape.size() > 1) continue;
+            auto is_scalar = shape.size() == 0;
+            if (shape_size(constop->get_shape()) > 8) continue;
+            std::stringstream ss;
+            sep = "";
+            ss << op->get_output_element_type(0) << "(" << (!is_scalar? "[" : "");
+            for (auto v : constop->get_value_strings()) {
+                ss << sep << v;
+                sep = ",";
+            }
+            ss << (!is_scalar? "]" : "") << ")";
+            literal_consts[op] = ss.str();
+        }
+    }
+
     for (const auto& op : f.get_ordered_ops()) {
-        auto type = op->get_type_name();
+        //if (literal_consts.count(op)) continue;
+
+        const auto & type_info = op->get_type_info();
+        auto type = std::string(type_info.get_version()) + "::" + type_info.name;
         auto name = op->get_friendly_name();
         os << prefix << "\t";
         if (op->get_output_size() > 1)
@@ -480,7 +631,10 @@ std::ostream & operator<<(std::ostream & os, const PrintableModel& model) {
                 auto out_port = vout.get_index();
                 os << sep << tag << iop->get_friendly_name() << "[" << out_port << "]";
             } else {
-                os << sep << tag << iop->get_friendly_name();
+                if (literal_consts.count(iop))
+                    os << sep << tag << literal_consts[iop];
+                else
+                    os << sep << tag << iop->get_friendly_name();
             }
             sep = ",";
         }
@@ -596,7 +750,224 @@ std::ostream & operator<<(std::ostream & os, const dnnl::memory::format_tag form
     return os;
 }
 
+DumpModel::DumpModel(const std::string& _file_name) {
+    static int dump_index = 0;
+    file_name = "dump_model" + std::to_string(dump_index) + "_" + _file_name;
+    dump_index++;
+}
+
+void stream_output_constant(std::ostream & os, op::v0::Constant * constop) {
+    auto shape = constop->get_shape();
+    auto is_scalar = shape.size() == 0;
+    auto total_size = shape_size(shape);
+    auto eletype = constop->get_output_element_type(0);
+    const char * sep = "";
+    os << (is_scalar? "" : "{");
+    if (eletype == ov::element::f32) {
+        for (float value : constop->get_vector<float>()) {
+            os << sep;
+            stream_output_scalar(os, value);
+            sep = ", ";
+        }
+    } else {
+        for (auto v : constop->get_value_strings()) {
+            os << sep << v;
+            sep = ", ";
+        }
+    }
+    os << (is_scalar? "" : "}");
+}
+
+void DumpModel::dump_cpp_style(std::ostream & os, const std::shared_ptr<ov::Model>& model) {
+    const ov::Model& f = *model;
+    std::string prefix = "";
+    std::string tag = "";
+    std::string sep = "";
+    os << prefix;
+    for (auto op : f.get_results()) {
+        os << sep << op->get_name();
+        sep = ",";
+    }
+    os << " " << f.get_friendly_name() << "(\n" << prefix;
+    for (auto op : f.get_parameters()) {
+        os << "    " << tag << op->get_friendly_name() << ",\n" << prefix;
+    }
+    os << ") {\n";
+
+    // collect all scalar & short 1D vectors for literal-style display
+    std::map<std::shared_ptr<ov::Node>, std::string> literal_consts;
+    for (auto op : f.get_ordered_ops()) {
+        const auto & type_info = op->get_type_info();
+        if (auto constop = std::dynamic_pointer_cast<op::v0::Constant>(op)) {
+            // only i32/f32 type const literal can be parsed by C++ compiler
+            if (constop->get_output_element_type(0) != ov::element::i32 &&
+                constop->get_output_element_type(0) != ov::element::f32)
+                continue;
+            auto shape = constop->get_shape();
+            if (shape.size() > 1) continue;
+            auto is_scalar = shape.size() == 0;
+            if (shape_size(constop->get_shape()) > 8) continue;
+
+            // literal construct
+            std::stringstream ss;
+            stream_output_constant(ss, constop.get());
+            literal_consts[op] = ss.str();
+        }
+    }
+
+    auto get_output_values_info = [](std::shared_ptr<ov::Node> & op) {
+        std::stringstream ss;
+        const char *sep = "";
+        for (int i = 0; i < op->get_output_size(); i++) {
+            ss << sep << op->get_output_element_type(i) << op->get_output_partial_shape(i);
+            sep = " ";
+        }
+        return ss.str();
+    };
+
+    // change name convension
+    std::map<ov::Node*, std::string> opname;
+    std::map<std::string, int> opname_count;
+    for (auto op : f.get_ordered_ops()) {
+        auto name = op->get_friendly_name();
+        std::replace(name.begin(), name.end(), '\\', '_');
+        std::replace(name.begin(), name.end(), '/', '_');
+        std::replace(name.begin(), name.end(), '.', '_');
+        std::replace(name.begin(), name.end(), '[', '_');
+        std::replace(name.begin(), name.end(), ']', '_');
+        std::replace(name.begin(), name.end(), '-', 'n');
+
+        int idx = 0;
+        if (opname_count.count(name)) {
+            idx = opname_count[name] + 1;
+        }
+        opname_count[name] = idx;
+
+        if (idx)
+            name += std::to_string(idx);
+
+        opname[op.get()] = name;
+    }
+
+    for (auto op : f.get_ordered_ops()) {
+        if (literal_consts.count(op)) continue;
+
+        const auto & type_info = op->get_type_info();
+        auto version_info = std::string(type_info.get_version());
+        auto type = version_info + "::" + type_info.name;
+        // fix name for cpu custom name
+        if (version_info == "cpu_plugin_opset") {
+            type = type_info.name;
+            type += "Node";
+        }
+        auto name = opname[op.get()];
+        os << prefix << "    ";
+
+        if (auto constop = std::dynamic_pointer_cast<op::v0::Constant>(op)) {
+            auto ele_size = shape_size(constop->get_shape());
+            auto ele_type = constop->get_element_type();
+            bool use_comment = false;
+            if (ele_type.is_integral_number() && ele_size < 9) {
+                use_comment = false;
+                os << "    auto " << name << " = GenConst({";
+            } else {
+                use_comment = true;
+                os << "    auto " << name << " = GenPattern<" << type << ">({/*";
+            }
+            if (ele_type == element::Type_t::f32) {
+                os << PrintableVector<float>(constop->get_vector<float>());
+            } else if (ele_type == element::Type_t::i8) {
+                os << PrintableVector<int8_t>(constop->get_vector<int8_t>());
+            } else if (ele_type == element::Type_t::u8) {
+                os << PrintableVector<uint8_t>(constop->get_vector<uint8_t>());
+            } else {
+                if (ele_size < 9) {
+                    sep = "";
+                    for (auto v : constop->get_value_strings()) {
+                        os << sep << v;
+                        sep = ", ";
+                    }
+                } else {
+                    os << "...";
+                }
+            }
+            if (use_comment) os << "*/";
+            os << "}, \"" << get_output_values_info(op) << "\");" << std::endl;
+        } else {
+            os << "    auto " << name << " = GenPattern<" << type << ">({";
+            sep = "";
+            for (int i = 0; i < op->get_input_size(); i++) {
+                auto vout = op->get_input_source_output(i);
+                auto iop = vout.get_node_shared_ptr();
+                if (iop->get_output_size() > 1) {
+                    auto out_port = vout.get_index();
+                    os << sep << tag << opname[iop.get()] << "->output(" << out_port << ")";
+                } else {
+                    if (literal_consts.count(iop))
+                        os << sep << tag << literal_consts[iop];
+                    else
+                        os << sep << tag << opname[iop.get()];
+                }
+                sep = ", ";
+            }
+            // attributes are passed in using dict
+            os << "}, \"" << get_output_values_info(op) << "\"";
+
+            std::stringstream ss2;
+            OstreamAttributeVisitor osvis(ss2);
+            op->visit_attributes(osvis);
+            auto str_attr = ss2.str();
+            if (str_attr.size())
+                os << ", {" << str_attr << "}";
+            os << ");   //  " << op->get_friendly_name() << std::endl;
+
+            //auto op_output_size = op->get_output_size();
+            //if (op_output_size > 1) {
+            //    os << "    " << name << "->set_output_size(" << op_output_size << ");" << std::endl;
+            //}
+        }
+
+        // recursively output subgraphs
+        if (auto msubgraph = std::dynamic_pointer_cast<op::util::MultiSubGraphOp>(op)) {
+            auto cnt = msubgraph->get_internal_subgraphs_size();
+            for (int i = 0; i < cnt; i++) {
+                os << "        MultiSubGraphOp " << tag << msubgraph->get_friendly_name() << "[" << i << "]" << std::endl;
+                dump_cpp_style(os, msubgraph->get_function(i));
+                //os << PrintableModel(, tag, prefix + "\t\t");
+            }
+        }
+    }
+    os << prefix << "}\n";
+}
+
+bool DumpModel::run_on_model(const std::shared_ptr<ov::Model>& model) {
+    std::ofstream ofs(file_name);
+    if (!ofs) {
+        std::cout << "Error opening file " << file_name << " for output" << std::endl;
+        return false;
+    }
+    dump_cpp_style(ofs, model);
+    // ofs << PrintableModel(*model);
+    ofs.close();
+
+    ov::serialize(model, file_name + ".xml", "/dev/null");
+    std::cout << "Model dumpped into " << file_name << " and " << file_name << ".xml" << std::endl;
+
+    return false;
+}
 }   // namespace intel_cpu
 }   // namespace ov
+#else
+namespace ov {
+namespace intel_cpu {
 
+DumpModel::DumpModel(const std::string&) {
+}
+
+bool DumpModel::run_on_model(const std::shared_ptr<ov::Model>&) {
+    return false;
+}
+
+}   // namespace intel_cpu
+}   // namespace ov
 #endif

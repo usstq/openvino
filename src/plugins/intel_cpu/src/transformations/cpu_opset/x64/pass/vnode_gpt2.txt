@@ -1,0 +1,52 @@
+OutputVector vnode_gpt2(const OutputVector& inputs) {
+    int ii = 0;
+
+    // GenPattern<opset1::Reshape>({., .}, "f32[?,?,2304]", {{"special_zero", 1}});   //  /transformer/h.1/attn/c_attn/Reshape_1
+    // GenPattern<opset1::Parameter>({}, "f32[?,12,?,64]", {{"shape", "[?,12,?,64]"}, {"element_type", "f32"}});   //  past_key_values.1.key
+    // GenPattern<opset1::Parameter>({}, "f32[?,12,?,64]", {{"shape", "[?,12,?,64]"}, {"element_type", "f32"}});   //  past_key_values.1.value
+    // GenPattern<opset1::Constant>({...}, "u8[1,1,1024,1024]");
+    // GenPattern<opset1::Add>({Multiply_37055, Constant_37057}, "f32[?,1,1,?]", {{"auto_broadcast", "numpy"}});   //  /transformer/Mul
+    auto _transformer_h_1_attn_c_attn_Reshape_1 = inputs[ii++];
+    auto past_key_values_1_key = inputs[ii++];
+    auto past_key_values_1_value = inputs[ii++];
+    auto _transformer_Mul = inputs[ii++];
+
+    auto Constant_174 = GenConst_tril<uint8_t>("u8[...]");
+
+    auto _transformer_h_1_attn_Split = GenPattern<opset1::VariadicSplit>({_transformer_h_1_attn_c_attn_Reshape_1, 2, {768, 768, 768}}, "f32[?,?,768] f32[?,?,768] f32[?,?,768]");   //  /transformer/h.1/attn/Split
+    auto _transformer_h_1_attn_Reshape_1 = GenPattern<opset1::Reshape>({_transformer_h_1_attn_Split->output(1), {0, 0, 12, 64}}, "f32[?,?,12,64]", {{"special_zero", 1}});   //  /transformer/h.1/attn/Reshape_1
+    auto _transformer_h_1_attn_Transpose_1 = GenPattern<opset1::Transpose>({_transformer_h_1_attn_Reshape_1, {0, 2, 1, 3}}, "f32[?,12,?,64]");   //  /transformer/h.1/attn/Transpose_1
+    auto present_1_key = GenPattern<opset1::Concat>({past_key_values_1_key, _transformer_h_1_attn_Transpose_1}, "f32[?,12,?,64]", {{"axis", -2}});   //  present.1.key
+    auto _transformer_h_1_attn_Shape_8 = GenPattern<opset1::ShapeOf>({present_1_key}, "i32[4]", {{"type_relax", 1}});   //  /transformer/h.1/attn/Shape_8
+    auto _transformer_h_1_attn_Slice_2 = GenPattern<opset8::Slice>({_transformer_h_1_attn_Shape_8, {-2}, {-1}, {1}, {0}}, "i32[1]");   //  /transformer/h.1/attn/Slice_2
+    auto _transformer_h_1_attn_Squeeze_2 = GenPattern<opset1::Squeeze>({_transformer_h_1_attn_Slice_2, {0}}, "i32[]");   //  /transformer/h.1/attn/Squeeze_2
+    auto _transformer_h_1_attn_Reshape = GenPattern<opset1::Reshape>({_transformer_h_1_attn_Split->output(0), {0, 0, 12, 64}}, "f32[?,?,12,64]", {{"special_zero", 1}});   //  /transformer/h.1/attn/Reshape
+    auto _transformer_h_1_attn_Transpose = GenPattern<opset1::Transpose>({_transformer_h_1_attn_Reshape, {0, 2, 1, 3}}, "f32[?,12,?,64]");   //  /transformer/h.1/attn/Transpose
+    auto _transformer_h_1_attn_Shape_7 = GenPattern<opset1::ShapeOf>({_transformer_h_1_attn_Transpose}, "i32[4]", {{"type_relax", 1}});   //  /transformer/h.1/attn/Shape_7
+    auto _transformer_h_1_attn_Slice_1 = GenPattern<opset8::Slice>({_transformer_h_1_attn_Shape_7, {-2}, {-1}, {1}, {0}}, "i32[1]");   //  /transformer/h.1/attn/Slice_1
+    auto Multiply_44462 = GenPattern<opset1::Multiply>({_transformer_h_1_attn_Slice_1, -1}, "i32[1]", {{"auto_broadcast", "numpy"}});   //  Multiply_44462
+    auto _transformer_h_1_attn_Squeeze_1 = GenPattern<opset1::Squeeze>({Multiply_44462, {0}}, "i32[]");   //  /transformer/h.1/attn/Squeeze_1
+    auto _transformer_h_1_attn_Sub = GenPattern<opset1::Add>({_transformer_h_1_attn_Squeeze_2, _transformer_h_1_attn_Squeeze_1}, "i32[]", {{"auto_broadcast", "numpy"}});   //  /transformer/h.1/attn/Sub
+    auto _transformer_h_1_attn_Unsqueeze_6 = GenPattern<opset1::Reshape>({_transformer_h_1_attn_Sub, {1}}, "i32[1]", {{"special_zero", 0}});   //  /transformer/h.1/attn/Unsqueeze_6
+    auto _transformer_h_1_attn_Slice_3 = GenPattern<opset8::Slice>({Constant_174, _transformer_h_1_attn_Unsqueeze_6, _transformer_h_1_attn_Slice_2, {1}, {2}}, "u8[1,1,..1024,1024]");   //  /transformer/h.1/attn/Slice_3
+    auto _transformer_h_1_attn_Slice_4 = GenPattern<opset8::Slice>({_transformer_h_1_attn_Slice_3, {0}, _transformer_h_1_attn_Slice_2, {1}, {3}}, "u8[1,1,..1024,..1024]");   //  /transformer/h.1/attn/Slice_4
+    auto _transformer_h_1_attn_MatMul = GenPattern<opset1::MatMul>({_transformer_h_1_attn_Transpose, present_1_key}, "f32[?,12,?,?]", {{"transpose_a", 0}, {"transpose_b", 1}});   //  /transformer/h.1/attn/MatMul
+    auto _transformer_h_1_attn_Reshape_2 = GenPattern<opset1::Reshape>({_transformer_h_1_attn_Split->output(2), {0, 0, 12, 64}}, "f32[?,?,12,64]", {{"special_zero", 1}});   //  /transformer/h.1/attn/Reshape_2
+    auto _transformer_h_1_attn_Transpose_2 = GenPattern<opset1::Transpose>({_transformer_h_1_attn_Reshape_2, {0, 2, 1, 3}}, "f32[?,12,?,64]");   //  /transformer/h.1/attn/Transpose_2
+    auto present_1_value = GenPattern<opset1::Concat>({past_key_values_1_value, _transformer_h_1_attn_Transpose_2}, "f32[?,12,?,64]", {{"axis", -2}});   //  present.1.value
+    auto _transformer_h_1_attn_Shape_6 = GenPattern<opset1::ShapeOf>({present_1_value}, "i32[4]", {{"type_relax", 1}});   //  /transformer/h.1/attn/Shape_6
+    auto _transformer_h_1_attn_Slice = GenPattern<opset8::Slice>({_transformer_h_1_attn_Shape_6, {-1}, {2147483647}, {1}, {0}}, "i32[1]");   //  /transformer/h.1/attn/Slice
+    auto _transformer_h_1_attn_Squeeze = GenPattern<opset1::Squeeze>({_transformer_h_1_attn_Slice, {0}}, "i32[]");   //  /transformer/h.1/attn/Squeeze
+    auto _transformer_h_1_attn_Cast = GenPattern<opset1::Convert>({_transformer_h_1_attn_Squeeze}, "f32[]", {{"destination_type", "f32"}});   //  /transformer/h.1/attn/Cast
+    auto _transformer_h_1_attn_Pow = GenPattern<opset1::Power>({_transformer_h_1_attn_Cast, 0.5f}, "f32[]", {{"auto_broadcast", "numpy"}});   //  /transformer/h.1/attn/Pow
+    auto Power_35992 = GenPattern<opset1::Power>({_transformer_h_1_attn_Pow, -1.0f}, "f32[]", {{"auto_broadcast", "numpy"}});   //  Power_35992
+    auto _transformer_h_1_attn_Div = GenPattern<opset1::Multiply>({_transformer_h_1_attn_MatMul, Power_35992}, "f32[?,12,?,?]", {{"auto_broadcast", "numpy"}});   //  /transformer/h.1/attn/Div
+    auto _transformer_h_1_attn_Where = GenPattern<opset1::Select>({_transformer_h_1_attn_Slice_4, _transformer_h_1_attn_Div, -FLT_MAX}, "f32[?,12,?,?]", {{"type_relax", 1}, {"auto_broadcast", "numpy"}});   //  /transformer/h.1/attn/Where
+    auto _transformer_h_1_attn_Add_1 = GenPattern<opset1::Add>({_transformer_h_1_attn_Where, _transformer_Mul}, "f32[?,12,?,?]", {{"auto_broadcast", "numpy"}});   //  /transformer/h.1/attn/Add_1
+    auto _transformer_h_1_attn_Softmax = GenPattern<opset1::Softmax>({_transformer_h_1_attn_Add_1}, "f32[?,12,?,?]", {{"axis", 3}});   //  /transformer/h.1/attn/Softmax
+    auto _transformer_h_1_attn_MatMul_1 = GenPattern<opset1::MatMul>({_transformer_h_1_attn_Softmax, present_1_value}, "f32[?,12,?,64]", {{"transpose_a", 0}, {"transpose_b", 0}});   //  /transformer/h.1/attn/MatMul_1
+    auto _transformer_h_1_attn_Transpose_4 = GenPattern<opset1::Transpose>({_transformer_h_1_attn_MatMul_1, {0, 2, 1, 3}}, "f32[?,?,12,64]");   //  /transformer/h.1/attn/Transpose_4
+    auto _transformer_h_1_attn_Reshape_3 = GenPattern<opset1::Reshape>({_transformer_h_1_attn_Transpose_4, {0, 0, 768}}, "f32[?,?,768]", {{"special_zero", 1}});   //  /transformer/h.1/attn/Reshape_3
+
+    return {_transformer_h_1_attn_Reshape_3, present_1_key, present_1_value};
+}

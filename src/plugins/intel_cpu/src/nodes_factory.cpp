@@ -92,6 +92,7 @@
 #include "nodes/mha.h"
 #include "nodes/unique.hpp"
 #include "nodes/ngram.h"
+#include "nodes/vnode.h"
 
 namespace ov {
 namespace intel_cpu {
@@ -179,6 +180,7 @@ Node::NodesFactory::NodesFactory()
     INTEL_CPU_NODE(Eye, Type::Eye);
     INTEL_CPU_NODE(Unique, Type::Unique);
     INTEL_CPU_NODE(Ngram, Type::Ngram);
+    INTEL_CPU_NODE(ov::intel_cpu::node::VNode, Type::VNode);
     INTEL_CPU_NODE(Interpolate, Type::Interpolate);
     INTEL_CPU_NODE(Reduce, Type::Reduce);
     INTEL_CPU_NODE(Gather, Type::Gather);

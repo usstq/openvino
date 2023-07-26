@@ -233,7 +233,12 @@ bool ov::pass::CommonOptimizations::run_on_model(const std::shared_ptr<ov::Model
     // because we cannot insert any MaxPools since they may prevent
     // other optimizations
     REGISTER_PASS(manager, StridesOptimization)
-    REGISTER_PASS(manager, SymbolicOptimizations)
+
+    auto enable_symbolic = std::getenv("JANE") ? atoi(std::getenv("JANE")) : 1;
+    if(enable_symbolic) {
+        std::cout << "=================== Jane's SymbolicOptimizations is enabled =====================" << std::endl;
+        REGISTER_PASS(manager, SymbolicOptimizations)
+    }
     REGISTER_PASS(manager, Validate)
     manager.run_passes(f);
 

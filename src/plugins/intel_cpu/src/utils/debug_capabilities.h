@@ -8,12 +8,14 @@
 #include <string>
 #include <iostream>
 #include <sstream>
+#include <fstream>
 #include <chrono>
 
 #include <onednn/dnnl.h>
 #include <dnnl_debug.h>
 #include "onednn/iml_type_mapper.h"
 #include "openvino/core/model.hpp"
+#include "openvino/pass/pass.hpp"
 #include "edge.h"
 
 namespace ov {
@@ -106,6 +108,16 @@ std::ostream & operator<<(std::ostream & os, const dnnl::memory::format_tag dtyp
 std::ostream & operator<<(std::ostream & os, const dnnl::primitive_attr& attr);
 std::ostream & operator<<(std::ostream & os, const dnnl::algorithm& alg);
 
+class DumpModel : public ov::pass::ModelPass {
+public:
+    OPENVINO_RTTI("DumpModel");
+    DumpModel(const std::string& file_name);
+    void dump_cpp_style(std::ostream & os, const std::shared_ptr<ov::Model>& model);
+    bool run_on_model(const std::shared_ptr<ov::Model>& model) override;
+protected:
+    std::string file_name;
+};
+
 template<typename T>
 std::ostream & operator<<(std::ostream & os, const PrintableVector<T>& vec) {
     std::stringstream ss;
@@ -197,6 +209,28 @@ struct EnforceInferPrcDebug {
 };
 
 #else // !CPU_DEBUG_CAPS
+
+#include <string>
+#include <iostream>
+#include <sstream>
+#include <chrono>
+
+#include <onednn/dnnl.h>
+#include <dnnl_debug.h>
+#include "onednn/iml_type_mapper.h"
+#include "openvino/core/model.hpp"
+#include "openvino/pass/pass.hpp"
+
+namespace ov {
+namespace intel_cpu {
+class DumpModel : public ov::pass::ModelPass {
+public:
+    OPENVINO_RTTI("DumpModel");
+    DumpModel(const std::string& file_name);
+    bool run_on_model(const std::shared_ptr<ov::Model>& model) override;
+};
+}  // namespace intel_cpu
+}  // namespace ov
 
 #define CPU_DEBUG_CAP_ENABLE(...)
 #define CPU_DEBUG_CAPS_ALWAYS_TRUE(x) x

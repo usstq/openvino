@@ -11,6 +11,8 @@
 #include <ngraph/pattern/op/or.hpp>
 #include "transformations/cpu_opset/x64/op/mha.hpp"
 #include "simplify_fakequantize.hpp"
+#include "transformations/cpu_opset/common/op/vnode.hpp"
+#include "utils/pattern_node.hpp"
 
 #include "itt.hpp"
 
@@ -586,3 +588,139 @@ ov::intel_cpu::MHAQuantFusion2::MHAQuantFusion2() {
     auto m = std::make_shared<ngraph::pattern::Matcher>(transpose3, matcher_name);
     this->register_matcher(m, callback);
 }
+
+namespace ov {
+namespace intel_cpu {
+
+class VNodeIn : public ngraph::pass::MatcherPass {
+public:
+    OPENVINO_RTTI("VNodeIn", "0");
+
+    int get_all_labels(const Output<Node>& value, OutputVector& all_labels) {
+        auto node = value.get_node_shared_ptr();
+        if (dynamic_cast<ov::pass::pattern::op::Label*>(node.get())) {
+            all_labels.push_back(node);
+            return 1;
+        }
+        int ret = 0;
+        for (size_t i = 0; i < node->get_input_size(); i++) {
+            ret += get_all_labels(node->input_value(i), all_labels);
+        }
+        return ret;
+    }
+
+    template <typename F>
+    VNodeIn(const char* vtype, F func, std::function<bool(OutputVector&)> pred = {}) {
+        MATCHER_SCOPE(VNodeIn);
+
+        if (auto * wlist = std::getenv("VNODE_WLIST")) {
+            std::string vnode_whitelist(wlist);
+            if (vnode_whitelist.find(std::string(vtype) + ",") == std::string::npos) {
+                return;
+            }
+        }
+
+        OutputVector fake_inputs;
+        for (int i = 0; i < 32; i++) {
+            fake_inputs.push_back(GenInput());
+        }
+        auto pattern_values = func(fake_inputs);
+
+        matcher_pass_callback callback = [=](ngraph::pattern::Matcher& m) {
+            auto& pvmap = m.get_pattern_value_map();
+            // auto node_src = pvmap.at(select.node).get_node_shared_ptr();
+            auto root_value = m.get_match_value();
+            std::map<std::string, double> symbol_name2value;
+            std::cout << "VNodeIn::callback " << root_value << std::endl;
+            if (!validate_matched_symbols(m, symbol_name2value)) {
+                std::cout << "VNodeIn: symbol validation failed!" << std::endl;
+                return false;
+            }
+
+            OutputVector real_inputs;
+            for (auto& in : fake_inputs) {
+                auto it = pvmap.find(in.get_node_shared_ptr());
+                if (it == pvmap.end())
+                    break;
+                real_inputs.push_back(it->second);
+            }
+            OutputVector real_outputs;
+            for (size_t i = 0; i < pattern_values.size(); i++) {
+                real_outputs.push_back(pvmap[pattern_values[i].get_node_shared_ptr()]);
+            }
+
+            if (pred && !pred(real_inputs))
+                return false;
+
+            auto vnode = std::make_shared<VNode>(real_inputs, real_outputs, vtype);
+
+            vnode->get_rt_info()["symbol_name2value"] = symbol_name2value;
+
+            for (size_t i = 0; i < pattern_values.size(); i++) {
+                auto out = pvmap[pattern_values[i].get_node_shared_ptr()];
+                ngraph::replace_node(out.get_node_shared_ptr(), {vnode->output(i)});
+                auto name = out.get_node_shared_ptr()->get_friendly_name();
+                vnode->output(i).set_names({name});
+            }
+            return true;
+        };
+        auto m = std::make_shared<ngraph::pattern::Matcher>(pattern_values[0], matcher_name);
+        this->register_matcher(m, callback);
+    }
+};
+
+#include "vnode_gptneox_attn.txt"
+#include "vnode_gpt2.txt"
+#include "vnode_opt.txt"
+#include "vnode_llama.txt"
+#include "vnode_bloom.txt"
+#include "vnode_whisper.txt"
+
+MHADynamicVNodeIn::MHADynamicVNodeIn() {
+    add_matcher<VNodeIn>("gptneox_attention", vnode_gptneox_attn);
+    add_matcher<VNodeIn>("gpt2_attention", vnode_gpt2);
+    add_matcher<VNodeIn>("opt_attention", vnode_opt_attn);
+    add_matcher<VNodeIn>("open_llama_attention", vnode_llama_attn);
+    add_matcher<VNodeIn>("bloom_attention", vnode_bloom_attn);
+    add_matcher<VNodeIn>("whisper_enc_attention", vnode_whisper_enc_attention);
+    add_matcher<VNodeIn>("whisper_dec_self_attn", vnode_whisper_dec_self_attn);
+    add_matcher<VNodeIn>("whisper_dec_enc_attn", vnode_whisper_dec_enc_attn);
+    add_matcher<VNodeIn>("whisper_dec2_self_attn", vnode_whisper_dec2_self_attn);
+    add_matcher<VNodeIn>("whisper_dec2_enc_attn", vnode_whisper_dec2_enc_attn);
+}
+
+MHADynamicVNodeOut::MHADynamicVNodeOut() {
+    MATCHER_SCOPE(MHADynamicVNodeOut);
+    auto vnode = ov::pass::pattern::wrap_type<VNode>();
+    std::string vnode_whitelist = std::getenv("VNODE_WLIST") ? std::getenv("VNODE_WLIST") : "gpt2_attention,";
+
+    matcher_pass_callback callback = [=](ngraph::pattern::Matcher& m) {
+        auto& pattern_to_output = m.get_pattern_value_map();
+        auto root_value = m.get_match_value();
+        auto vnode = std::dynamic_pointer_cast<VNode>(root_value.get_node_shared_ptr());
+
+        std::cout << "MHADynamicVNodeOut found : " << root_value.get_node_shared_ptr()->get_friendly_name() << std::endl;
+
+        if (vnode_whitelist.find(vnode->get_vtype() + ",") != std::string::npos) {
+            // leave this VNode since it's in the white-list, clear it's internal references to original subgraph
+            vnode->clear_org();
+            return false;
+        }
+
+        // all nodes inside vnode may contain vnodes
+        OutputVector org_outputs = vnode->get_org();
+        ov::NodeVector nv;
+        vnode->get_internal_vnodes(nv, org_outputs[0]);
+        for (auto & n : nv) {
+            register_new_node(n);
+        }
+
+        ngraph::replace_node(vnode, org_outputs);
+        return true;
+    };
+    auto m = std::make_shared<ngraph::pattern::Matcher>(vnode, matcher_name);
+    this->register_matcher(m, callback);
+}
+
+}   // namespace intel_cpu
+}   // namespace ov
