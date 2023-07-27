@@ -395,10 +395,12 @@ void FullyConnected::createPrimitive() {
         return;
     }
 #endif
+
 #ifdef OV_CPU_WITH_LLMDNN
     if (stateLLMFc == State_Use)
         return;
 #endif
+
     setPostOps(attr, outDims);
     attr.set_scratchpad_mode(dnnl::scratchpad_mode::user);
     Node::createPrimitive();

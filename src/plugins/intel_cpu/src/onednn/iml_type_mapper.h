@@ -102,8 +102,9 @@ enum impl_desc_type {
     dw_acl             = _dw | acl,
     gemm_acl           = gemm | acl,
     winograd_acl       = winograd | acl,
+
     gemm_mlas          = gemm | mlas,
-    gemm_llmdnn        = gemm | llmdnn,
+    gemm_llmdnn        = gemm | llmdnn
 };
 
 const char * impl_type_to_string(impl_desc_type type);
