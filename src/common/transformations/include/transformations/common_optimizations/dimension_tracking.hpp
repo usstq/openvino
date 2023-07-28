@@ -17,29 +17,26 @@ namespace pass {
 class TRANSFORMATIONS_API FindBatch;
 
 class TRANSFORMATIONS_API SymbolicOptimizations;
+
+// pre-symbolic
+class TRANSFORMATIONS_API ReshapeUpThroughBEAWithConstScalar;  // To be added to NopOptimization
+class TRANSFORMATIONS_API SharedTransposeOptimization;         //  TS Slice Backward before and TS Slice Forward after
+class TRANSFORMATIONS_API GroupedSliceToVSplitOptimization;
+
+// symbolic
 class TRANSFORMATIONS_API SymbolicPOC;
 class TRANSFORMATIONS_API ChainedMaximumOptimization;
 class TRANSFORMATIONS_API NopBroadcast;
-class TRANSFORMATIONS_API BroadcastOnes;
-class TRANSFORMATIONS_API RemoveSliceBeforeGatherElements;
-class TRANSFORMATIONS_API ReshapeUpThroughBEAWithConstScalar;
-
-class TRANSFORMATIONS_API SharedTransposeOptimization;
-class TRANSFORMATIONS_API SharedConcatOptimization;
-class TRANSFORMATIONS_API SharedReshapeOptimization;
-
-class TRANSFORMATIONS_API GroupedSliceToVSplitOptimization;
-class TRANSFORMATIONS_API ChainedReshapeOptimization;
-
-class TRANSFORMATIONS_API RPE_Optimization;
-class TRANSFORMATIONS_API Fused_RPE_MHA_Replacer;
-
+class TRANSFORMATIONS_API LabelResolvingThroughSelect;
 class TRANSFORMATIONS_API ApplyTableOfEquivalence;
 class TRANSFORMATIONS_API OptimizeLabelsUsedAsValues;
-class TRANSFORMATIONS_API LabelResolvingThroughSelect;
-
 class TRANSFORMATIONS_API DeReshapeMatMul;
 class TRANSFORMATIONS_API DeReshapeMatMulWithComplications;
+
+// post-symbolic
+class TRANSFORMATIONS_API RPE_Optimization;
+class TRANSFORMATIONS_API Fused_RPE_MHA_Replacer;
+// NopElimination + SharedOpOptimization
 
 }  // namespace pass
 }  // namespace ov
@@ -84,12 +81,6 @@ public:
     NopBroadcast();
 };
 
-class ov::pass::BroadcastOnes : public ov::pass::MatcherPass {
-public:
-    OPENVINO_RTTI("BroadcastOnes", "0");
-    BroadcastOnes();
-};
-
 class ov::pass::DeReshapeMatMul : public ov::pass::MatcherPass {
 public:
     OPENVINO_RTTI("DeReshapeMatMul", "0");
@@ -108,18 +99,6 @@ public:
     LabelResolvingThroughSelect();
 };
 
-class ov::pass::RemoveSliceBeforeGatherElements : public ov::pass::MatcherPass {
-public:
-    OPENVINO_RTTI("RemoveSliceBeforeGatherElements", "0");
-    RemoveSliceBeforeGatherElements();
-};
-
-class ov::pass::ChainedReshapeOptimization : public ov::pass::MatcherPass {
-public:
-    OPENVINO_RTTI("ChainedReshapeOptimization", "0");
-    ChainedReshapeOptimization();
-};
-
 class ov::pass::ReshapeUpThroughBEAWithConstScalar : public ov::pass::MatcherPass {
 public:
     OPENVINO_RTTI("ReshapeUpThroughBEAWithConstScalar", "0");
@@ -136,18 +115,6 @@ class ov::pass::Fused_RPE_MHA_Replacer : public ov::pass::MatcherPass {
 public:
     OPENVINO_RTTI("Fused_RPE_MHA_Replacer", "0");
     Fused_RPE_MHA_Replacer();
-};
-
-class ov::pass::SharedConcatOptimization : public ov::pass::ModelPass {
-public:
-    OPENVINO_RTTI("SharedConcatOptimization", "0");
-    bool run_on_model(const std::shared_ptr<ov::Model>& m) override;
-};
-
-class ov::pass::SharedReshapeOptimization : public ov::pass::ModelPass {
-public:
-    OPENVINO_RTTI("SharedReshapeOptimization", "0");
-    bool run_on_model(const std::shared_ptr<ov::Model>& m) override;
 };
 
 class ov::pass::SharedTransposeOptimization : public ov::pass::ModelPass {
