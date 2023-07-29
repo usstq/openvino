@@ -2170,7 +2170,7 @@ void GraphOptimizer::MergeTransposeAndReorder(Graph &graph) {
 
     auto isSuitableChildNode = [](NodePtr node) {
         return node->getType() == Type::Reorder
-                && node->getChildEdges().size() == 1
+                //&& node->getChildEdges().size() == 1
                 && !node->isDynamicNode();   // TODO [DS]: enable for dynamic shapes when inPlace in the dynamic case is available (CVS-74863)
     };
 
@@ -2326,6 +2326,7 @@ void GraphOptimizer::MergeTransposeAndReorder(Graph &graph) {
         auto reorderNode = graph.InsertReorder(edge, reorderlayerName, *reorderInDesc, *reorderOutDesc, isOptimized, srcPerm);
 
         // case 2
+        auto lastReorder = reorderNode;
         if (inPrec != outPrec) {
             auto reorderInDesc2 = reorderOutDesc;
             auto reorderOutDesc2 = outDesc;
@@ -2333,7 +2334,31 @@ void GraphOptimizer::MergeTransposeAndReorder(Graph &graph) {
             std::string reorderLayerName2 = reorderNode->getName() + "_" +
                                     Reorder::getReorderArgs(*reorderInDesc2, *reorderOutDesc2) + "_" + childChildNode->getName();
 
-            graph.InsertReorder(reorderNode->getChildEdgeAt(0), reorderLayerName2, *reorderInDesc2, *reorderOutDesc2, false);
+            lastReorder = graph.InsertReorder(reorderNode->getChildEdgeAt(0), reorderLayerName2, *reorderInDesc2, *reorderOutDesc2, false);
+        }
+
+        // all children of [transpose + reorder] should take data from new reorder now.
+        for (auto& ce : childEdges) {
+            if (edge->getChild() == ce->getChild() && edge->getOutputNum() == ce->getOutputNum())
+                continue;
+
+            EdgePtr pp2cc;
+            for (auto &cce : parentParentNode->getChildEdges()) {
+                if (cce.lock()->getChild() == ce->getChild()) {
+                    pp2cc = cce.lock();
+                    break;
+                }
+            }
+            if (!pp2cc)
+                continue;
+            // drop old edge
+            pp2cc->drop();
+
+            // add new edge
+            EdgePtr new_edge(new Edge(lastReorder, pp2cc->getChild(), 0, pp2cc->getOutputNum()));
+            graph.GetEdges().push_back(new_edge);
+            new_edge->getChild()->parentEdges.push_back(new_edge);
+            new_edge->getParent()->childEdges.push_back(new_edge);
         }
     };
 
