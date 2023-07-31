@@ -213,13 +213,24 @@ void MemoryMngrWithReuse::setExtBuff(void *ptr, size_t size) {
     m_data = decltype(m_data)(ptr, release);
 }
 
+bool get_optmem() {
+    auto* flag = std::getenv("OPTMEM");
+    if (flag) {
+        return static_cast<bool>(atoi(flag));
+    }
+    return true;
+}
+
+static bool g_optmem = get_optmem();
+
 bool MemoryMngrWithReuse::resize(size_t size) {
     constexpr int cacheLineSize = 64;
     bool sizeChanged = false;
     if (size > m_memUpperBound) {
         // this is rather a WA to minimize the memory foot print when the mem manger is used for actually static memory
         const size_t resizeFactor = m_firstResize ? 1 : 2;
-        size *= resizeFactor;
+        if (g_optmem)
+            size *= resizeFactor;
         void *ptr = dnnl::impl::malloc(size, cacheLineSize);
         if (!ptr) {
             IE_THROW() << "Failed to allocate " << size << " bytes of memory";
