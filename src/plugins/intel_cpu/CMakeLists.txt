@@ -37,6 +37,11 @@ set(OV_CPU_ARM_TARGET_ARCH ${OV_CPU_ARM_TARGET_ARCH_DEFAULT})
 ie_dependent_option(ENABLE_MLAS_FOR_CPU "MLAS GEMM for OpenVINO CPU Plugin" ON "X86 OR X86_64" OFF)
 add_subdirectory(thirdparty)
 
+ie_dependent_option(ENABLE_CPU_PROFILER "enable CPU profiler" OFF "X86 OR X86_64" OFF)
+if (ENABLE_CPU_PROFILER)
+    add_definitions(-DOV_CPU_WITH_PROFILER)
+endif()
+
 if(WIN32)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DNOMINMAX")
 endif()
