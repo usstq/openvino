@@ -11,12 +11,16 @@ target_link_libraries(cpuSpecificRtInfo PRIVATE openvino::runtime)
 
 set(INCLUDES ${CMAKE_CURRENT_SOURCE_DIR} $<TARGET_PROPERTY:openvino_intel_cpu_plugin,SOURCE_DIR>/src)
 set(DEPENDENCIES openvino_intel_cpu_plugin template_extension)
-set(LINK_LIBRARIES funcSharedTests cpuSpecificRtInfo inference_engine_snippets snippetsNgraphFunctions)
+set(LINK_LIBRARIES funcSharedTests cpuSpecificRtInfo openvino::snippets snippetsNgraphFunctions)
 
 if(ENABLE_OV_ONNX_FRONTEND)
     list(APPEND DEFINES TEST_MODELS="${TEST_MODEL_ZOO}")
 else()
     set(EXCLUDED_SOURCE_PATHS ${CMAKE_CURRENT_SOURCE_DIR}/extension ${CMAKE_CURRENT_SOURCE_DIR}/shared_tests_instances/onnx)
+endif()
+
+if(ENABLE_CPU_EXTENSIONS)
+    list(APPEND DEFINES OV_CPU_WITH_LLMDNN)
 endif()
 
 if(X86_64)

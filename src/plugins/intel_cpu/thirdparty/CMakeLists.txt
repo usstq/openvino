@@ -36,6 +36,7 @@ function(ov_add_onednn)
     # select needed primitives
     set(DNNL_ENABLE_PRIMITIVE "CONVOLUTION;DECONVOLUTION;CONCAT;LRN;INNER_PRODUCT;MATMUL;POOLING;REDUCTION;REORDER;RNN;SOFTMAX" CACHE STRING "" FORCE)
     set(DNNL_ENABLE_WORKLOAD "INFERENCE" CACHE STRING "" FORCE)
+    set(DNNL_LIBRARY_NAME "openvino_onednn_cpu" CACHE STRING "" FORCE)
 
     # Allow to enable oneDNN verbose with CPU_DEBUG_CAPS and rely on oneDNN default configuration otherwise
     if(ENABLE_CPU_DEBUG_CAPS)
@@ -137,3 +138,23 @@ if(ENABLE_MLAS_FOR_CPU)
 endif()
 
 ov_add_onednn()
+
+if(ENABLE_CPU_EXTENSIONS)
+    if(CMAKE_COMPILER_IS_GNUCC OR CMAKE_COMPILER_IS_GNUCXX)
+        if(NOT CMAKE_CXX_COMPILER_VERSION VERSION_LESS "11.2")
+            set(COMPILE_CPU_EXTENSIONS TRUE CACHE INTERNAL "")
+        endif()
+    elseif(OV_COMPILER_IS_CLANG)
+        if(NOT CMAKE_CXX_COMPILER_VERSION VERSION_LESS "12")
+            set(COMPILE_CPU_EXTENSIONS TRUE CACHE INTERNAL "")
+        endif()
+    endif()
+
+    if(COMPILE_CPU_EXTENSIONS)
+        add_subdirectory(cpu_extensions EXCLUDE_FROM_ALL)
+        # install static libraries
+        ov_install_static_lib(cpu_extensions cpu)
+        # align with prebuilt package
+        add_library(cpu_extensions::cpu_extensions ALIAS cpu_extensions)
+    endif()
+endif()

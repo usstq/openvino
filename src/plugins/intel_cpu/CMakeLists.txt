@@ -22,7 +22,7 @@ endif()
 
 if(ARM)
     set(OV_CPU_ARM_TARGET_ARCH_DEFAULT armv7a)
-else()
+elseif(AARCH64)
     if(APPLE)
         # Apple M1 / M2 is assumed
         set(OV_CPU_ARM_TARGET_ARCH_DEFAULT arm64-v8.2-a)
@@ -33,8 +33,18 @@ else()
 endif()
 set(OV_CPU_ARM_TARGET_ARCH ${OV_CPU_ARM_TARGET_ARCH_DEFAULT})
 
-# enbale mlas for X86 cpus only
-ie_dependent_option(ENABLE_MLAS_FOR_CPU "MLAS GEMM for OpenVINO CPU Plugin" ON "X86 OR X86_64" OFF)
+if(X86 OR X86_64 OR AARCH64)
+    # disable mlas with webassembly
+    if(EMSCRIPTEN OR (CMAKE_COMPILER_IS_GNUCXX AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 7))
+        set(ENABLE_MLAS_FOR_CPU_DEFAULT OFF)
+    else()
+        set(ENABLE_MLAS_FOR_CPU_DEFAULT ON)
+    endif()
+else()
+    set(ENABLE_MLAS_FOR_CPU_DEFAULT OFF)
+endif()
+ie_option(ENABLE_MLAS_FOR_CPU "Enable MLAS for OpenVINO CPU Plugin" ${ENABLE_MLAS_FOR_CPU_DEFAULT})
+
 add_subdirectory(thirdparty)
 
 ie_dependent_option(ENABLE_CPU_PROFILER "enable CPU profiler" OFF "X86 OR X86_64" OFF)
@@ -85,6 +95,7 @@ if(NOT (AARCH64 OR ARM))
 endif()
 
 if (NOT ENABLE_MLAS_FOR_CPU)
+    list(APPEND EXCLUDE_PATHS ${CMAKE_CURRENT_SOURCE_DIR}/src/nodes/executors/mlas/*)
     list(APPEND EXCLUDE_PATHS ${CMAKE_CURRENT_SOURCE_DIR}/src/mlas/*)
 endif()
 
@@ -107,14 +118,11 @@ elseif(RISCV64)
     set_target_properties(${TARGET_NAME} PROPERTIES OUTPUT_NAME "openvino_riscv_cpu_plugin")
 endif()
 
-set_ie_threading_interface_for(${TARGET_NAME})
-
 ie_mark_target_as_cc(${TARGET_NAME})
 
 target_link_libraries(${TARGET_NAME} PRIVATE dnnl
-                                             ov_shape_inference
-                                             openvino::pugixml
-                                             inference_engine_snippets)
+                                             openvino::shape_inference
+                                             openvino::snippets)
 
 target_compile_definitions(${TARGET_NAME} PRIVATE IMPLEMENT_INFERENCE_EXTENSION_API)
 target_include_directories(${TARGET_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
@@ -133,6 +141,10 @@ cross_compiled_file(${TARGET_NAME}
         NAME        proposal_exec
         NAMESPACE   InferenceEngine::Extensions::Cpu::XARCH
 )
+
+# system dependencies must go last
+target_link_libraries(${TARGET_NAME} PRIVATE openvino::pugixml)
+set_ie_threading_interface_for(${TARGET_NAME})
 
 # must be called after all target_link_libraries
 ie_add_api_validator_post_build_step(TARGET ${TARGET_NAME})
@@ -154,8 +166,8 @@ if(BUILD_SHARED_LIBS)
         PRIVATE
             $<TARGET_PROPERTY:openvino::runtime::dev,INTERFACE_INCLUDE_DIRECTORIES>
             $<TARGET_PROPERTY:openvino::itt,INTERFACE_INCLUDE_DIRECTORIES>
-            $<TARGET_PROPERTY:ov_shape_inference,INTERFACE_INCLUDE_DIRECTORIES>
-            $<TARGET_PROPERTY:inference_engine_snippets,INTERFACE_INCLUDE_DIRECTORIES>
+            $<TARGET_PROPERTY:openvino::shape_inference,INTERFACE_INCLUDE_DIRECTORIES>
+            $<TARGET_PROPERTY:openvino::snippets,INTERFACE_INCLUDE_DIRECTORIES>
         PUBLIC
             ${CMAKE_CURRENT_SOURCE_DIR}/src
             $<TARGET_PROPERTY:openvino::conditional_compilation,INTERFACE_INCLUDE_DIRECTORIES>)
@@ -181,4 +193,18 @@ endif()
 
 if(ENABLE_TESTS)
     add_subdirectory(tests)
+endif()
+
+if(ENABLE_CPU_EXTENSIONS)
+    if(NOT COMPILE_CPU_EXTENSIONS)
+        # use downloaded binary
+        find_package(cpu_extensions REQUIRED)
+    endif()
+    target_link_libraries(${TARGET_NAME} PRIVATE cpu_extensions::cpu_extensions)
+    target_include_directories(${TARGET_NAME} PRIVATE SYSTEM PRIVATE $<TARGET_PROPERTY:cpu_extensions::cpu_extensions,INTERFACE_INCLUDE_DIRECTORIES>)
+    target_compile_definitions(${TARGET_NAME} PRIVATE OV_CPU_WITH_LLMDNN)
+    if(BUILD_SHARED_LIBS)
+        target_include_directories(${TARGET_NAME}_obj SYSTEM PRIVATE $<TARGET_PROPERTY:cpu_extensions::cpu_extensions,INTERFACE_INCLUDE_DIRECTORIES>)
+        target_compile_definitions(${TARGET_NAME}_obj PRIVATE OV_CPU_WITH_LLMDNN)
+    endif()
 endif()

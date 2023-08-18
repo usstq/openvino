@@ -11,6 +11,9 @@
 #include <string>
 #include <vector>
 #include "common/dnnl_executor.h"
+#ifdef OV_CPU_WITH_LLMDNN
+#include "llm_fc.hpp"
+#endif
 
 namespace ov {
 namespace intel_cpu {
@@ -56,6 +59,9 @@ public:
     void prepareParams() override;
     void executeDynamicImpl(dnnl::stream strm) override;
     bool canBeExecutedInInt8() const override;
+    void keepWeightsNonTransposed(bool weightsNonTransposed) {
+        this->weightsNonTransposed = weightsNonTransposed;
+    }
 
     void fuseDecompressionMultiply(const NodePtr& constData);
     const std::vector<float>& getDecompressionMultiply() const { return decompressionMultiply; }
@@ -81,6 +87,7 @@ private:
     static const size_t DATA_ID = 0;
     static const size_t WEIGHTS_ID = 1;
     static const size_t BIAS_ID = 2;
+    dnnl::memory::data_type inputDataType = dnnl::memory::data_type::undef;
     dnnl::memory::data_type outputDataType = dnnl::memory::data_type::undef;
 
     using executorPtr = std::shared_ptr<DnnlExecutor>;
@@ -115,8 +122,30 @@ private:
     void prepackMLASWeight();
 #endif
 
+#ifdef OV_CPU_WITH_LLMDNN
+    bool extractParamForLLMFc(llmdnn::fc_create_param& param);
+    bool initLLMFc();
+    void execLLMFc();
+
+    std::vector<std::shared_ptr<llmdnn::fc_kernel>> fcLLMs;
+    enum StateLLMFc {
+        Not_Init,
+        State_Use,
+        State_NotUse
+    };
+    StateLLMFc stateLLMFc = Not_Init;
+    std::shared_ptr<float> dequant;
+    std::shared_ptr<float> requant;
+    std::shared_ptr<float> biasRnd;
+    VectorDims weightDims;
+#endif
+    bool useWeightsDecompressionImpl = false;
     std::vector<float> decompressionSubtract;
     std::vector<float> decompressionMultiply;
+
+    // FC with transposed weights
+    bool weightsNonTransposed = false;
+    DnnlMemoryDescPtr makeTransposedWeightDescriptor();
 };
 
 }   // namespace node
