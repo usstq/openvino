@@ -92,6 +92,8 @@
 #include "nodes/mha.h"
 #include "nodes/unique.hpp"
 #include "nodes/ngram.h"
+#include "nodes/vnode.h"
+#include "nodes/rope.h"
 
 namespace ov {
 namespace intel_cpu {
@@ -196,7 +198,9 @@ Node::NodesFactory::NodesFactory()
     INTEL_CPU_NODE(GridSample, Type::GridSample);
     INTEL_CPU_NODE(Interaction, Type::Interaction);
     INTEL_CPU_NODE(MHA, Type::MHA);
+    INTEL_CPU_NODE(RoPE, Type::RoPE);
     INTEL_CPU_NODE(Snippet, Type::Subgraph);
+    INTEL_CPU_NODE(ov::intel_cpu::node::VNode, Type::VNode);
 #endif
 }
 
