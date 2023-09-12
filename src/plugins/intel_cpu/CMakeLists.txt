@@ -155,12 +155,25 @@ cross_compiled_file(${TARGET_NAME}
         NAME        rms_norm
         NAMESPACE   InferenceEngine::Extensions::Cpu::XARCH
 )
+
+# for avx2 compilation
+set_property(SOURCE src/nodes/vnode.cpp APPEND_STRING PROPERTY COMPILE_OPTIONS
+        "-mavx2")
+set_property(SOURCE src/nodes/vnode.cpp APPEND_STRING PROPERTY COMPILE_OPTIONS
+        "-mfma")
+
+check_cxx_source_compiles("#include <immintrin.h>\nint main() {auto v_scale = _mm512_set1_ps(0.0f);return 0;}" ENABLE_AVX512)
+if(ENABLE_AVX512)
 set_property(SOURCE src/nodes/vnode.cpp APPEND_STRING PROPERTY COMPILE_OPTIONS
         "-mavx512f")
 set_property(SOURCE src/nodes/vnode.cpp APPEND_STRING PROPERTY COMPILE_OPTIONS
         "-mfma")
+endif()
+check_cxx_source_compiles("#include <immintrin.h>\nint main() { __m256bh _s; __m512bh _a, _b; _s = _mm512_cvtneps_pbh(_mm512_dpbf16_ps(_mm512_cvtpbh_ps(_s), _a, _b)); return 0; }" ENABLE_AVX512_BF16)
+if(ENABLE_AVX512_BF16)
 set_property(SOURCE src/nodes/vnode.cpp APPEND_STRING PROPERTY COMPILE_OPTIONS
         "-mavx512bf16")
+endif()
 # system dependencies must go last
 target_link_libraries(${TARGET_NAME} PRIVATE openvino::pugixml)
 set_ie_threading_interface_for(${TARGET_NAME})
