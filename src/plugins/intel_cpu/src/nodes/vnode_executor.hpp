@@ -13,11 +13,6 @@
 #include <string>
 #include <vector>
 
-#include "openvino/core/parallel.hpp"
-#include "utils/plain_tensor.hpp"
-#include "vnode_kernels.hpp"
-#include "vnode_rms_norm.hpp"
-
 extern "C" {
 #ifdef _WIN32
 #    include <intrin.h>
@@ -25,6 +20,11 @@ extern "C" {
 #    include <x86intrin.h>
 #endif
 }
+
+#include "openvino/core/parallel.hpp"
+#include "utils/plain_tensor.hpp"
+#include "vnode_kernels.hpp"
+#include "vnode_rms_norm.hpp"
 
 namespace ov {
 namespace intel_cpu {
@@ -507,6 +507,7 @@ struct experimental_attention_executor : public vnode_executor {
         auto num_kv_heads = static_cast<int>(attr_map["num_kv_heads"]);
         auto n_head = static_cast<int>(attr_map["n_head"]);
         PlainTensor<RT> rope_q, rope_k, rope_v;
+        bool multi_query_is_planar;
         if (!qkv_combined) {
             qkv_input.assert_dims({B, L1, H * S});
             k_input.assert_dims({B, L1, H * S});
@@ -516,13 +517,24 @@ struct experimental_attention_executor : public vnode_executor {
             rope_k = k_input.reshape({B, L1, H, S});
             rope_v = v_input.reshape({B, L1, H, S});
         } else if (num_kv_heads > 0) {
-            // 5D [B, L1, num_kv_heads * (gH + 2) * S]
-            // G*gH = n_head = H
-            gH = H / num_kv_heads;
-            auto qkv5d = qkv_input.reshape({B, L1, num_kv_heads, (gH + 2), S});
-            rope_q = qkv5d.slice(3, 0, gH);
-            rope_k = qkv5d.slice(3, gH, gH + 1);
-            rope_v = qkv5d.slice(3, gH + 1, gH + 2);
+            multi_query_is_planar = static_cast<int>(attr_map["multi_query_is_planar"]);
+            if (multi_query_is_planar) {
+                // 4D [B, L1, H+2*num_kv_heads, S]
+                // G*gH = n_head = H
+                gH = H;
+                auto qkv5d = qkv_input.reshape({B, L1, H + 2 * num_kv_heads, S});
+                rope_q = qkv5d.slice(2, 0, gH);
+                rope_k = qkv5d.slice(2, gH, gH + 1 * num_kv_heads);
+                rope_v = qkv5d.slice(2, gH + 1 * num_kv_heads, gH + 2 * num_kv_heads);
+            } else {
+                // 5D [B, L1, num_kv_heads * (gH + 2) * S]
+                // G*gH = n_head = H
+                gH = H / num_kv_heads;
+                auto qkv5d = qkv_input.reshape({B, L1, num_kv_heads, (gH + 2), S});
+                rope_q = qkv5d.slice(3, 0, gH);
+                rope_k = qkv5d.slice(3, gH, gH + 1);
+                rope_v = qkv5d.slice(3, gH + 1, gH + 2);
+            }
         } else {
             auto qkv_4d = qkv_input.reshape({B, L1, H, 3 * S});
             rope_q = qkv_4d.slice(3, 0, S);
@@ -568,12 +580,20 @@ struct experimental_attention_executor : public vnode_executor {
             RT* v;
 
             if (gH > 0) {
-                // multi-query: h = G*gH
-                size_t g = h / gH;
-                size_t hg = h % gH;
-                q = &rope_q.at({b, p, g, hg, 0});
-                k = &rope_k.at({b, p, g, 0, 0});
-                v = &rope_v.at({b, p, g, 0, 0});
+                if (multi_query_is_planar) {
+                    // multi-query: h + 2 * num_kv_heads
+                    size_t hg = h / (H / num_kv_heads);
+                    q = &rope_q.at({b, p, h, 0});
+                    k = &rope_k.at({b, p, hg, 0});
+                    v = &rope_v.at({b, p, hg, 0});
+                } else {
+                    // multi-query: h = G*gH
+                    size_t g = h / gH;
+                    size_t hg = h % gH;
+                    q = &rope_q.at({b, p, g, hg, 0});
+                    k = &rope_k.at({b, p, g, 0, 0});
+                    v = &rope_v.at({b, p, g, 0, 0});
+                }
             } else {
                 q = &rope_q.at({b, p, h, 0});
                 k = &rope_k.at({b, p, h, 0});
