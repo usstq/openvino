@@ -484,17 +484,11 @@ struct experimental_attention_executor : public vnode_executor {
 
         auto B = qkv_input.size(0);
         auto L1 = qkv_input.size(1);
-        auto H = kv_cache.size(2);
         auto L0 = attn_mask.size(1) - L1;
         auto S = kv_cache.size(-1);
         auto half_rotary_dims = cos_tab.size(-1);
-        size_t gH = 0;
+        size_t gH = 1;
         // DEBUG_LOG_TEMP(" B=", B, " H=", H, " S=", S, " L0=", L0, " L1=", L1);
-        {
-            PROFILE(prof, "redefineOutputMemory");
-            node->redefineOutputMemory({{B, L1, H * S}});
-            update_outputs(node);
-        }
 
         attn_mask.assert_dims({B, L0 + L1});
         cos_tab.assert_dims({0, half_rotary_dims}, true);
@@ -505,9 +499,16 @@ struct experimental_attention_executor : public vnode_executor {
         auto rotary_dims = static_cast<int>(attr_map["rotary_dims"]);
         auto rope_type = static_cast<int>(attr_map["rope_type"]);
         auto num_kv_heads = static_cast<int>(attr_map["num_kv_heads"]);
-        auto n_head = static_cast<int>(attr_map["n_head"]);
+        auto H = static_cast<size_t>(attr_map["n_head"]);
         PlainTensor<RT> rope_q, rope_k, rope_v;
         bool multi_query_is_planar;
+
+        {
+            PROFILE(prof, "redefineOutputMemory");
+            node->redefineOutputMemory({{B, L1, H * S}});
+            update_outputs(node);
+        }
+
         if (!qkv_combined) {
             qkv_input.assert_dims({B, L1, H * S});
             k_input.assert_dims({B, L1, H * S});
@@ -518,18 +519,17 @@ struct experimental_attention_executor : public vnode_executor {
             rope_v = v_input.reshape({B, L1, H, S});
         } else if (num_kv_heads > 0) {
             multi_query_is_planar = static_cast<int>(attr_map["multi_query_is_planar"]);
+            gH = H / num_kv_heads;
             if (multi_query_is_planar) {
                 // 4D [B, L1, H+2*num_kv_heads, S]
                 // G*gH = n_head = H
-                gH = H;
                 auto qkv5d = qkv_input.reshape({B, L1, H + 2 * num_kv_heads, S});
-                rope_q = qkv5d.slice(2, 0, gH);
-                rope_k = qkv5d.slice(2, gH, gH + 1 * num_kv_heads);
-                rope_v = qkv5d.slice(2, gH + 1 * num_kv_heads, gH + 2 * num_kv_heads);
+                rope_q = qkv5d.slice(2, 0, H);
+                rope_k = qkv5d.slice(2, H, H + 1 * num_kv_heads);
+                rope_v = qkv5d.slice(2, H + 1 * num_kv_heads, H + 2 * num_kv_heads);
             } else {
                 // 5D [B, L1, num_kv_heads * (gH + 2) * S]
                 // G*gH = n_head = H
-                gH = H / num_kv_heads;
                 auto qkv5d = qkv_input.reshape({B, L1, num_kv_heads, (gH + 2), S});
                 rope_q = qkv5d.slice(3, 0, gH);
                 rope_k = qkv5d.slice(3, gH, gH + 1);
@@ -552,8 +552,8 @@ struct experimental_attention_executor : public vnode_executor {
 
         m_query_emb.resize({B, H, L1, S});
 
-        auto present_key = kv_cache.index({{layer_id * 2 + 0}, {0, B}, {}, {0, L0 + L1}, {}});
-        auto present_value = kv_cache.index({{layer_id * 2 + 1}, {0, B}, {}, {0, L0 + L1}, {}});
+        auto present_key = kv_cache.index({{layer_id * 2 + 0}, {0, B}, {0, H / gH}, {0, L0 + L1}, {}});
+        auto present_value = kv_cache.index({{layer_id * 2 + 1}, {0, B}, {0, H / gH}, {0, L0 + L1}, {}});
 
         half_rotary_dims = rotary_dims / 2;
 
@@ -570,8 +570,6 @@ struct experimental_attention_executor : public vnode_executor {
                 }
             }
             */
-            auto* present_k = &present_key.at({b, h, p1, 0});    // f32[B, H, L0+L1, 64]
-            auto* present_v = &present_value.at({b, h, p1, 0});  // f32[B, H, L0+L1, 64]
             auto* q_embed = &m_query_emb.at({b, h, p, 0});
             auto* cos = &cos_tab({position_id, 0});
             auto* sin = &sin_tab({position_id, 0});
@@ -579,17 +577,16 @@ struct experimental_attention_executor : public vnode_executor {
             RT* k;
             RT* v;
 
-            if (gH > 0) {
+            size_t g = h / gH;
+            size_t hg = h % gH;
+            if (gH > 1) {
                 if (multi_query_is_planar) {
                     // multi-query: h + 2 * num_kv_heads
-                    size_t hg = h / (H / num_kv_heads);
                     q = &rope_q.at({b, p, h, 0});
-                    k = &rope_k.at({b, p, hg, 0});
-                    v = &rope_v.at({b, p, hg, 0});
+                    k = &rope_k.at({b, p, g, 0});
+                    v = &rope_v.at({b, p, g, 0});
                 } else {
                     // multi-query: h = G*gH
-                    size_t g = h / gH;
-                    size_t hg = h % gH;
                     q = &rope_q.at({b, p, g, hg, 0});
                     k = &rope_k.at({b, p, g, 0, 0});
                     v = &rope_v.at({b, p, g, 0, 0});
@@ -599,42 +596,48 @@ struct experimental_attention_executor : public vnode_executor {
                 k = &rope_k.at({b, p, h, 0});
                 v = &rope_v.at({b, p, h, 0});
             }
+            auto* present_k = &present_key.at({b, g, p1, 0});    // f32[B, H, L0+L1, 64]
+            auto* present_v = &present_value.at({b, g, p1, 0});  // f32[B, H, L0+L1, 64]
 
             size_t s = 0;
             if (rope_type > 0) {
                 // gptneox RoPE
                 for (size_t i = 0; s < half_rotary_dims; i++, s++) {
                     q_embed[s] = cos[i] * q[s] + sin[i] * (-q[s + half_rotary_dims]);
-                    present_k[s] = cos[i] * k[s] + sin[i] * (-k[s + half_rotary_dims]);
-                    present_v[s] = v[s];
+                    if (hg == 0) {
+                        present_k[s] = cos[i] * k[s] + sin[i] * (-k[s + half_rotary_dims]);
+                        present_v[s] = v[s];
+                    }
                 }
                 for (size_t i = 0; s < rotary_dims; i++, s++) {
                     q_embed[s] = cos[i] * q[s] + sin[i] * (q[i]);
-                    present_k[s] = cos[i] * k[s] + sin[i] * (k[i]);
-                    present_v[s] = v[s];
+                    if (hg == 0) {
+                        present_k[s] = cos[i] * k[s] + sin[i] * (k[i]);
+                        present_v[s] = v[s];
+                    }
                 }
             } else {
                 // gptj RoPE
-                present_k = &present_key.at({b, h, p1, 0});    // f32[B, H, L0+L1, 64]
-                present_v = &present_value.at({b, h, p1, 0});  // f32[B, H, L0+L1, 64]
-                q_embed = &m_query_emb.at({b, h, p, 0});
-
                 for (size_t i = 0; s < rotary_dims; i++, s += 2) {
                     q_embed[s] = cos[i] * q[s] - sin[i] * q[s + 1];
                     q_embed[s + 1] = cos[i] * q[s + 1] + sin[i] * q[s];
 
-                    present_k[s] = cos[i] * k[s] - sin[i] * k[s + 1];
-                    present_k[s + 1] = cos[i] * k[s + 1] + sin[i] * k[s];
+                    if (hg == 0) {
+                        present_k[s] = cos[i] * k[s] - sin[i] * k[s + 1];
+                        present_k[s + 1] = cos[i] * k[s + 1] + sin[i] * k[s];
 
-                    present_v[s] = v[s];
-                    present_v[s + 1] = v[s + 1];
+                        present_v[s] = v[s];
+                        present_v[s + 1] = v[s + 1];
+                    }
                 }
             }
 
             for (; s < S; s++) {
                 q_embed[s] = q[s];
-                present_k[s] = k[s];
-                present_v[s] = v[s];
+                if (hg == 0) {
+                    present_k[s] = k[s];
+                    present_v[s] = v[s];
+                }
             }
         });
 

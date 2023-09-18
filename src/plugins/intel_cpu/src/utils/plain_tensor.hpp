@@ -293,7 +293,7 @@ struct PlainTensor : public PlainTensorBase {
         // only valid for dense memory
         PlainTensor<DT> new_tensor_view;
         assert(is_dense());
-        assert(shape_size(target_shape) == shape_size(m_dims));
+        //assert(shape_size(target_shape) == shape_size(m_dims));
         new_tensor_view.resize(VectorDims(target_shape), reinterpret_cast<DT*>(m_ptr));
         return new_tensor_view;
     }

@@ -654,6 +654,8 @@ struct MHA_kernel<KT_MLAS, float> {
         auto q_len = query.size(2);
         auto head_size = query.size(3);
         auto kv_len = present_key.size(2);
+        auto h_group_num = present_key.size(1);
+        size_t h_each_group_len = H / h_group_num;
 
         if (d_scale == 0.0f)
             d_scale = 1.0f / sqrt(head_size);
@@ -673,8 +675,8 @@ struct MHA_kernel<KT_MLAS, float> {
             auto kv_len_cache_align = (((kv_len * sizeof(float)) + 63) / 64 * 64) / sizeof(float);
             qk_buf.resize({m_block_size, kv_len_cache_align});
             const float* q_ptr = &query.at({b, h, m_start, 0});
-            const float* k_ptr = &present_key.at({b, h, 0, 0});
-            const float* v_ptr = &present_value.at({b, h, 0, 0});
+            const float* k_ptr = &present_key.at({b, h / h_each_group_len, 0, 0});
+            const float* v_ptr = &present_value.at({b, h / h_each_group_len, 0, 0});
 
             float* alibi_ptr = nullptr;
             auto alibi_stride = 0;
@@ -801,6 +803,11 @@ struct MHA_1Token {
         auto q_len = query.size(2);
         auto S = query.size(3);
         auto kv_len = present_key.size(2);
+        auto h_group_num = present_key.size(1);
+        size_t h_each_group_len = 0;
+        if (h_group_num != H) {
+            h_each_group_len = H / h_group_num;
+        }
 
         if (d_scale == 0.0f)
             d_scale = 1.0f / sqrt(S);
@@ -815,14 +822,27 @@ struct MHA_1Token {
         //  attn mask is a matrix of q_len(kv_len)
         m_attn_w.resize({B, H, q_len, kv_len});
 
-        parallel_for3d(B, H, kv_len, [&](size_t b, size_t h, size_t pk) {
-            // which batch item should be used at postion pk?
-            auto b_kv = beams ? beams.at({b, pk}) : b;
-            for (size_t pq = 0; pq < q_len; pq++) {
-                auto sum = dot_product_opt(&query.at({b, h, pq, 0}), &present_key.at({b_kv, h, pk, 0}), S);
-                m_attn_w.at({b, h, pq, pk}) = sum;
-            }
-        });
+        if (h_each_group_len) {
+            parallel_for3d(B, H / h_each_group_len, kv_len, [&](size_t b, size_t h_group, size_t pk) {
+                // which batch item should be used at postion pk?
+                auto b_kv = beams ? beams.at({b, pk}) : b;
+                for (size_t pq = 0; pq < q_len; pq++) {
+                    for (size_t h = h_group * h_each_group_len; h < (h_group + 1) * h_each_group_len; h++) {
+                        auto sum = dot_product_opt(&query.at({b, h, pq, 0}), &present_key.at({b_kv, h_group, pk, 0}), S);
+                        m_attn_w.at({b, h, pq, pk}) = sum;
+                    }
+                }
+            });
+        } else {
+            parallel_for3d(B, H, kv_len, [&](size_t b, size_t h, size_t pk) {
+                // which batch item should be used at postion pk?
+                auto b_kv = beams ? beams.at({b, pk}) : b;
+                for (size_t pq = 0; pq < q_len; pq++) {
+                    auto sum = dot_product_opt(&query.at({b, h, pq, 0}), &present_key.at({b_kv, h, pk, 0}), S);
+                    m_attn_w.at({b, h, pq, pk}) = sum;
+                }
+            });
+        }
 
         PROFILE_NEXT(prof, "softmax");
 
@@ -847,25 +867,49 @@ struct MHA_1Token {
         auto nthr = parallel_get_max_threads();
         m_temp.resize({nthr, B, q_len, H, S});
         // m_attn_w {B, H, q_len, kv_len}
-        parallel_nt_static(nthr, [&](const size_t ithr, const size_t nthr) {
-            size_t kv_start{0}, kv_end{0};
-            splitter(kv_len, nthr, ithr, kv_start, kv_end);
+        if (h_each_group_len == 0) {
+            parallel_nt_static(nthr, [&](const size_t ithr, const size_t nthr) {
+                size_t start{0}, end{0};
+                splitter(B * H * kv_len, nthr, ithr, start, end);
 
-            memset(&m_temp.at({ithr, 0, 0, 0, 0}), 0, m_temp.stride(0) * sizeof(float));
+                memset(&m_temp.at({ithr, 0, 0, 0, 0}), 0, m_temp.stride(0) * sizeof(float));
 
-            for (size_t b = 0; b < B; b++)
-                for (size_t h = 0; h < H; h++)
-                    for (size_t pv = kv_start; pv < kv_end; pv++) {
-                        // which batch item should be used at postion pv?
-                        auto b_kv = beams ? beams.at({b, pv}) : b;
-                        auto* v = &present_value.at({b_kv, h, pv, 0});
-                        for (size_t pq = 0; pq < q_len; pq++) {
+                size_t b, h, pv;
+                parallel_it_init(start, b, B, h, H, pv, kv_len);
+                for (size_t iwork = start; iwork < end; ++iwork) {
+                    auto b_kv = beams ? beams.at({b, pv}) : b;
+                    auto* v = &present_value.at({b_kv, h, pv, 0});
+                    for (size_t pq = 0; pq < q_len; pq++) {
+                        auto* out = &m_temp.at({ithr, b, pq, h, 0});
+                        auto weight = m_attn_w.at({b, h, pq, pv});
+                        accumulate_weighted_v(out, weight, v, S);
+                    }
+                    parallel_it_step(b, B, h, H, pv, kv_len);
+                }
+            });
+        } else {
+            parallel_nt_static(nthr, [&](const size_t ithr, const size_t nthr) {
+                size_t start{0}, end{0};
+                splitter(B * h_group_num * kv_len, nthr, ithr, start, end);
+
+                memset(&m_temp.at({ithr, 0, 0, 0, 0}), 0, m_temp.stride(0) * sizeof(float));
+
+                size_t b, h_group, pv;
+                parallel_it_init(start, b, B, h_group, h_group_num, pv, kv_len);
+                for (size_t iwork = start; iwork < end; ++iwork) {
+                    auto b_kv = beams ? beams.at({b, pv}) : b;
+                    auto* v = &present_value.at({b_kv, h_group, pv, 0});
+                    for (size_t pq = 0; pq < q_len; pq++) {
+                        for (size_t h = h_group * h_each_group_len; h < (h_group + 1) * h_each_group_len; h++) {
                             auto* out = &m_temp.at({ithr, b, pq, h, 0});
                             auto weight = m_attn_w.at({b, h, pq, pv});
                             accumulate_weighted_v(out, weight, v, S);
                         }
                     }
-        });
+                    parallel_it_step(b, B, h_group, h_group_num, pv, kv_len);
+                }
+            });
+        }
 
         PROFILE_NEXT(prof, "Reduce");
         parallel_for3d(B, H, q_len, [&](size_t b, size_t h, size_t pq) {
@@ -1090,9 +1134,9 @@ struct generic_attention {
             } else {
                 // q_len must be 1, points to where previous token is
                 assert(q_len == 1);
-                assert(m_beam_idx[-1] == B);
                 auto pos = past_kv_len;
                 auto B = m_beam_idx_tab.size(0);
+                assert(m_beam_idx[-1] == B);
                 for (size_t b = 0; b < B; b++) {
                     m_beam_idx_tab.at({b, pos}) = m_beam_idx[b];
                 }
