@@ -17,7 +17,12 @@
 #include "openvino/core/parallel.hpp"
 #include "utils/profiler.hpp"
 #include "vnode_attn_softmax.hpp"
-
+#ifdef _WIN32
+#include <intrin.h>
+#else
+#include <x86intrin.h>
+#include <immintrin.h>
+#endif
 #ifdef OV_CPU_WITH_LLMDNN
 #    include "llm_emb_gpt.hpp"
 #    include "llm_mha_gpt.hpp"
@@ -765,7 +770,9 @@ struct MHA_kernel<KT_MLAS, float> {
 };
 #endif
 
+#ifdef __AVX512F__
 #define ENABLE_AVX512_OPT
+#endif
 
 // 2nd token case : only 1 token in query
 template <typename RT>
@@ -938,9 +945,11 @@ struct MHA_1Token {
     }
 
     inline __m512 mm512_uni_loadu_ps(ov::bfloat16* a) {
+#ifdef __AVX512BF16__
         auto vec_bf16 = _mm256_loadu_si256(reinterpret_cast<__m256i*>(a));
         __m512i y = _mm512_cvtepu16_epi32(vec_bf16);
         return _mm512_castsi512_ps(_mm512_slli_epi32(y, 16));
+#endif
     }
     inline __m512 mm512_uni_loadu_ps(float* a) {
         return _mm512_loadu_ps(a);
@@ -949,9 +958,54 @@ struct MHA_1Token {
         _mm512_storeu_ps(a, v);
     }
     inline void mm512_uni_storeu_ps(ov::bfloat16* a,  __m512 v) {
+#ifdef __AVX512BF16__
         _mm256_storeu_si256(reinterpret_cast<__m256i*>(a),
                             reinterpret_cast<__m256i>(_mm512_cvtneps_pbh(v)));
+#endif
     }
+
+#ifdef __AVX2__
+    inline __m256 mm256_uni_loadu_ps(float* a) {
+        return _mm256_loadu_ps(a);
+    }
+    inline void mm256_uni_storeu_ps(float* a,  __m256 v) {
+        _mm256_storeu_ps(a, v);
+    }
+
+    inline __m256 mm256_uni_loadu_ps(ov::bfloat16* a) {
+        auto vec_bf16 = _mm_loadu_si128(reinterpret_cast<__m128i*>(a));
+        auto o = _mm256_castsi256_ps(_mm256_slli_epi32(_mm256_cvtepu16_epi32(vec_bf16), 16));
+        return o;
+    }
+
+    inline void mm256_uni_storeu_ps(ov::bfloat16* a,  __m256 v) {
+        __m256i iv = _mm256_castps_si256(v);
+        __m256i nan = _mm256_set1_epi32(0xffff);
+        __m256i mask = _mm256_castps_si256(_mm256_cmp_ps(v, v, _CMP_ORD_Q));
+        __m256i ones = _mm256_set1_epi32(0x00010000);;
+        // uint32_t int_i =  input & 1;
+        auto int_i = _mm256_and_si256(iv, ones);
+        int_i = _mm256_srli_epi32(int_i, 1);
+        int_i = _mm256_srli_epi32(_mm256_add_epi32(int_i, iv), 16);
+        int_i = _mm256_blendv_epi8(nan, int_i, mask);
+        int_i = _mm256_packus_epi32(int_i, int_i);
+        int_i = _mm256_permute4x64_epi64(int_i, 0xd8);
+        __m128i bf16_o = _mm256_extractf128_si256(int_i, 1);
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(a),
+                    reinterpret_cast<__m128i>(bf16_o));
+    }
+
+inline void hsum(__m256& x) {
+    __m256 y;                             // x:  0 1 2 3   4 5 6 7
+    y = _mm256_permute_ps(x, 0x39);       // y:  1 2 3 0   5 6 7 4
+    x = _mm256_add_ps(x, y);              // X:  01 12 23 30  45 56 67 74
+    y = _mm256_permute_ps(x, 0x4e);       // y:  23 30 01 12  67 74 45 56
+    x = _mm256_add_ps(x, y);              // x: 0123 x x x   4567 x x x
+    y = _mm256_permute2f128_ps(x, x, 1);  // y: 4567 x x x  0123 x x x
+    x = _mm256_add_ps(x, y);              // x: 01234567 x x x x x x x
+}
+#endif
+
 
     template<typename T>
     float dot_product_opt(T* a, T* b, size_t n) {
@@ -965,6 +1019,15 @@ struct MHA_1Token {
             vsum = _mm512_fmadd_ps(va, vb, vsum);
         }
         sum = _mm512_reduce_add_ps(vsum);
+#elif defined(__AVX2__)
+        auto vsum = _mm256_set1_ps(0.0f);
+        for (; i <= n - 8; i += 8) {
+            auto va = mm256_uni_loadu_ps(a + i);
+            auto vb = mm256_uni_loadu_ps(b + i);
+            vsum = _mm256_fmadd_ps(va, vb, vsum);
+        }
+        hsum(vsum);
+        sum = _mm256_cvtss_f32(vsum);
 #endif
         for (; i < n; i++) {
             sum += a[i] * b[i];
@@ -982,6 +1045,14 @@ struct MHA_1Token {
             auto v_out = mm512_uni_loadu_ps(out + i);
             v_out = _mm512_fmadd_ps(attn_w_vec_fp32, v_value, v_out);
             _mm512_storeu_ps(out + i, v_out);
+        }
+#elif defined(__AVX2__)
+        auto attn_w_vec_fp32 = _mm256_set1_ps(weight);
+        for (; i <= S - 8; i += 8) {
+            auto v_value = mm256_uni_loadu_ps(v + i);
+            auto v_out = mm256_uni_loadu_ps(out + i);
+            v_out = _mm256_fmadd_ps(attn_w_vec_fp32, v_value, v_out);
+            mm256_uni_storeu_ps(out + i, v_out);
         }
 #endif
         for (; i < S; i++) {
@@ -1004,6 +1075,17 @@ struct MHA_1Token {
             }
             // save to bf16
             mm512_uni_storeu_ps(dst + i, result_vec_fp32);
+        }
+#elif defined(__AVX2__)
+        for (; i <= S - 8; i += 8) {
+            auto* src = temp + i;
+            auto result_vec_fp32 = _mm256_set1_ps(0.0f);
+            for (size_t m = 0; m < M; m++) {
+                auto o_vec_fp32 = mm256_uni_loadu_ps(src);
+                result_vec_fp32 = _mm256_add_ps(result_vec_fp32, o_vec_fp32);
+                src += temp_stride;
+            }
+            mm256_uni_storeu_ps(dst + i, result_vec_fp32);
         }
 #endif
         for (; i <S; i++) {
