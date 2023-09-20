@@ -872,7 +872,7 @@ struct MHA_1Token {
         PROFILE_NEXT(prof, "W*V");
         // attn_w * V
         auto nthr = parallel_get_max_threads();
-        m_temp.resize({nthr, B, q_len, H, S});
+        m_temp.resize({static_cast<size_t>(nthr), B, q_len, H, S});
         // m_attn_w {B, H, q_len, kv_len}
         if (h_each_group_len == 0) {
             parallel_nt_static(nthr, [&](const size_t ithr, const size_t nthr) {
@@ -1230,8 +1230,8 @@ struct generic_attention {
             for (size_t beam = 0; beam < beam_size; beam++) {
                 // the last one is always in right order
                 m_beams({beam, kv_len - 1}) = beam;
-                for (int p = kv_len - 2; p >=0; p--) {
-                    auto batch_id = m_beams({beam, p + 1});
+                for (size_t p = kv_len - 2; p >= 0; p--) {
+                    size_t batch_id = static_cast<size_t>(m_beams({beam, p + 1}));
                     m_beams({beam, p}) = m_beam_idx_tab({batch_id, p + 1});
                 }
             }

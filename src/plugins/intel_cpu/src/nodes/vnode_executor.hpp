@@ -498,7 +498,7 @@ struct experimental_attention_executor : public vnode_executor {
         auto layer_id = static_cast<int>(attr_map["layer_id"]);
         auto rotary_dims = static_cast<int>(attr_map["rotary_dims"]);
         auto rope_type = static_cast<int>(attr_map["rope_type"]);
-        auto num_kv_heads = static_cast<int>(attr_map["num_kv_heads"]);
+        auto num_kv_heads = static_cast<size_t>(attr_map["num_kv_heads"]);
         auto H = static_cast<size_t>(attr_map["n_head"]);
         PlainTensor<RT> rope_q, rope_k, rope_v;
         bool multi_query_is_planar;
@@ -552,8 +552,16 @@ struct experimental_attention_executor : public vnode_executor {
 
         m_query_emb.resize({B, H, L1, S});
 
-        auto present_key = kv_cache.index({{layer_id * 2 + 0}, {0, B}, {0, H / gH}, {0, L0 + L1}, {}});
-        auto present_value = kv_cache.index({{layer_id * 2 + 1}, {0, B}, {0, H / gH}, {0, L0 + L1}, {}});
+        auto present_key = kv_cache.index({{layer_id * 2 + 0},
+                                           {0, static_cast<int>(B)},
+                                           {0, static_cast<int>(H / gH)},
+                                           {0, static_cast<int>(L0 + L1)},
+                                           {}});
+        auto present_value = kv_cache.index({{layer_id * 2 + 1},
+                                             {0, static_cast<int>(B)},
+                                             {0, static_cast<int>(H / gH)},
+                                             {0, static_cast<int>(L0 + L1)},
+                                             {}});
 
         half_rotary_dims = rotary_dims / 2;
 

@@ -15,6 +15,10 @@
 #include <string>
 #include <vector>
 
+#ifdef _WIN32
+#include <cstdlib>
+#endif
+
 namespace ov {
 namespace intel_cpu {
 
@@ -333,7 +337,11 @@ struct PlainTensor : public PlainTensorBase {
         if (!data) {
             auto capacity_new = m_strides[0] * m_dims[0] * sizeof(DT);
             if (capacity_new > m_capacity) {
-                m_ptr = aligned_alloc(64, capacity_new);
+                #ifdef _WIN32
+                    m_ptr = _aligned_malloc(capacity_new, 64);
+                #else
+                    m_ptr = aligned_alloc(64, capacity_new);
+                #endif
                 m_capacity = capacity_new;
             }
         } else {
