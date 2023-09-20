@@ -464,7 +464,7 @@ struct GenPatternNode {
     // 1d const tensor or scalar
     template <typename T, typename std::enable_if<std::is_arithmetic<T>::value, bool>::type = true>
     static std::shared_ptr<Node> ConstVector(const std::vector<T>& vec, values_info vt) {
-        auto friendly_name = vt.to_string() + vec2str(vec);
+        auto friendly_name = vt.to_string() + vec2str(vec, 9);
         auto pnode = std::make_shared<GenericPattern>();
         pnode->set_friendly_name(friendly_name);
         pnode->set_predicate([vec, vt, friendly_name](const Output<Node>& value) {
