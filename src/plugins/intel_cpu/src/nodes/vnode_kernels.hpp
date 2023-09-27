@@ -42,20 +42,20 @@ enum KernelTypes { KT_REF, KT_LLMDNN, KT_MLAS};
 
 template <KernelTypes KType>
 struct ktype_name_of {
-    static constexpr char* value = "?";
+    static constexpr const char* value = "?";
 };
 
 template <>
 struct ktype_name_of<KT_REF> {
-    static constexpr char* value = "REF";
+    static constexpr const char* value = "REF";
 };
 template <>
 struct ktype_name_of<KT_LLMDNN> {
-    static constexpr char* value = "LLMDNN";
+    static constexpr const char* value = "LLMDNN";
 };
 template <>
 struct ktype_name_of<KT_MLAS> {
-    static constexpr char* value = "MLAS";
+    static constexpr const char* value = "MLAS";
 };
 
 // default implementation: reference

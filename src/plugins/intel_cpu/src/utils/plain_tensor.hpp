@@ -52,6 +52,11 @@ inline void assert_dt<int32_t>(dnnl::memory::data_type dt) {
     IE_ASSERT(dt == dnnl::memory::data_type::s32);
 }
 
+template <>
+inline void assert_dt<float16>(dnnl::memory::data_type dt) {
+    IE_ASSERT(dt == dnnl::memory::data_type::f16);
+}
+
 template <typename T>
 struct data_type_name {
     static constexpr const char* value = "?";
@@ -95,6 +100,11 @@ struct precision_of<bfloat16> {
 template <>
 struct precision_of<uint8_t> {
     static constexpr InferenceEngine::Precision::ePrecision value = InferenceEngine::Precision::ePrecision::U8;
+};
+
+template <>
+struct precision_of<float16> {
+    static constexpr InferenceEngine::Precision::ePrecision value = InferenceEngine::Precision::ePrecision::FP16;
 };
 
 #define PLAINTENSOR_RANK_MAX 8

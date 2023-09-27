@@ -84,8 +84,8 @@ struct vnode_executor {
 };
 
 #define EXECUTOR_SIGNATURE(vtype_name)                                                               \
-    static constexpr char* vtype = vtype_name;                                                       \
-    static constexpr char* impl_type = ktype_name_of<KType>::value;                                  \
+    static constexpr const char* vtype = vtype_name;                                                       \
+    static constexpr const char* impl_type = ktype_name_of<KType>::value;                                  \
     static constexpr InferenceEngine::Precision::ePrecision prec = precision_of<RT>::value;          \
     static inline std::string get_signature() {                                                      \
         return std::string(vtype) + "," + impl_type + "," + InferenceEngine::Precision(prec).name(); \
