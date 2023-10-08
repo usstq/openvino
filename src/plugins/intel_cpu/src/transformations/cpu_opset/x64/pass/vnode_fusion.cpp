@@ -198,6 +198,7 @@ public:
             //     vnode->output(i).set_names({name});
             // }
             // std::cout << root << std::endl;
+            vnode->set_friendly_name(root->get_friendly_name());
             return true;
         };
         auto m = std::make_shared<ngraph::pattern::Matcher>(pnode, matcher_name);
@@ -215,6 +216,7 @@ VNodeFusion::VNodeFusion(const ov::element::Type inferencePrecision) {
 
     add_matcher<EliminateMaximum>();
     add_matcher<VNodeFromExtension>("llm::experimental::MultiHeadAttention");
+    //add_matcher<VNodeFromExtension>("llm::experimental::FC");
 
     // enable attention fusion only when proper backend support is ready
     bool enable_attn_fusion = false;
