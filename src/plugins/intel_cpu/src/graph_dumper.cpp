@@ -218,6 +218,8 @@ void serialize(const Graph &graph) {
         serializeToCout(graph);
     else if (!path.compare(path.size() - 4, 4, ".xml"))
         serializeToXML(graph, path);
+    else if (path.size() >= 4 && !path.compare(path.size() - 4, 4, ".cpp"))
+        DEBUG_DUMP_GRAPH(graph, path);
     else
         IE_THROW() << "Unknown serialize format. Should be either 'cout' or '*.xml'. Got " << path;
 }
