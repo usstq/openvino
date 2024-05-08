@@ -110,6 +110,7 @@
 #include "transformations/cpu_opset/convert_to_cpu_specific_opset.hpp"
 #include "transformations/snippets/x64/pass/snippets_mark_skipped.hpp"
 #include "transformations/cpu_opset/x64/pass/convert_to_interaction.hpp"
+#include "transformations/cpu_opset/x64/pass/mlp_fusion.hpp"
 #include "transformations/cpu_opset/arm/pass/convert_group_conv.hpp"
 #include "transformations/cpu_opset/arm/pass/convert_group_conv1d.hpp"
 #include "transformations/cpu_opset/arm/pass/convert_reduce_multi_axis.hpp"
@@ -769,6 +770,13 @@ void Transformations::PostLpt() {
     CPU_REGISTER_PASS_X64(postLPTPassManager, EliminateStridedSlice);
     CPU_REGISTER_PASS_X64(postLPTPassManager, RoPEFusion);
     CPU_REGISTER_PASS_X64(postLPTPassManager, CausalMaskPreprocessFusion);
+    
+    //CPU_REGISTER_PASS_X64(postLPTPassManager, ov::pass::PrintModel, "_before_MLP.cpp");
+    CPU_REGISTER_PASS_X64(postLPTPassManager, MLPFusion);
+    CPU_REGISTER_PASS_X64(postLPTPassManager, QKVProjFusion);
+    //CPU_REGISTER_PASS_X64(postLPTPassManager, ov::pass::PrintModel, "_after_MLP.cpp");
+
+    //CPU_REGISTER_PASS_X64(postLPTPassManager, ov::pass::PrintModel, "_after_MLP.cpp");
 
     CPU_REGISTER_PASS_X64(postLPTPassManager, StatefulSDPAFusion);
 

@@ -121,6 +121,7 @@ enum class Type {
     PagedAttention,
     RoPE,
     CausalMaskPreprocess,
+    LLMMLP,
 };
 
 enum class Algorithm {

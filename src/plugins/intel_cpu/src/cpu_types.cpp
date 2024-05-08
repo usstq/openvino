@@ -241,6 +241,7 @@ static const TypeToNameMap& get_type_to_name_tbl() {
         {"RoPE", Type::RoPE},
         {"GatherCompressed", Type::Gather},
         {"CausalMaskPreprocess", Type::CausalMaskPreprocess},
+        {"LLMMLP", Type::LLMMLP},
     };
     return type_to_name_tbl;
 }
@@ -361,6 +362,7 @@ std::string NameFromType(const Type type) {
         CASE(PagedAttention);
         CASE(RoPE);
         CASE(CausalMaskPreprocess);
+        CASE(LLMMLP);
         CASE(Unknown);
     }
 #undef CASE
