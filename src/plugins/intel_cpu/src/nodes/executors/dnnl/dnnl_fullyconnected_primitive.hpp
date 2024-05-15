@@ -26,6 +26,7 @@ class DnnlFCPrimitive {
         dnnl::primitive_attr attr;
         bool sparseWeights;
         bool transposedWeights;
+        bool isLLM;
 
         size_t hash() const;
         bool operator==(const Key& rhs) const;
@@ -63,6 +64,7 @@ public:
                                                             const bool cacheWeights);
 
     static bool useWeightsDecompressionImpl(const ov::element::Type inputType, const ov::element::Type weightsType);
+    static bool useF16CImpl(const dnnl::memory::desc& inputDesc, const dnnl::memory::desc& weightDesc, bool isLLM);
 
     static std::shared_ptr<DnnlFCPrimitive> create(const MemoryArgs& memory,
                                                    const FCAttrs& attrs,
