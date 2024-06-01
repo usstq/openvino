@@ -24,6 +24,7 @@
 #include "utils/debug_capabilities.h"
 #include "utils/ngraph_utils.hpp"
 #include "utils/rt_info/memory_formats_attribute.hpp"
+#include "utils/profiler.hpp"
 #include <openvino/opsets/opset1.hpp>
 
 #include <dnnl_types.h>
@@ -550,6 +551,7 @@ void Node::updateShapes() {
                     getName());
         try {
             if (needShapeInfer()) {
+                //PROFILE(_prof, "shapeInfer", getName());
                 auto result = shapeInfer();
                 if (ShapeInferStatus::success == result.status) {
                     redefineOutputMemory(result.dims);
@@ -568,6 +570,7 @@ void Node::updateDynamicParams() {
                     getName());
     try {
         if (isExecutable()) {
+            //PROFILE(_prof, "prepareParams", getName());
             if (needPrepareParams()) {
                 OPENVINO_ASSERT(inputShapesDefined(),
                                 "Input shapes are not defined.");

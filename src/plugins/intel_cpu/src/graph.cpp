@@ -39,6 +39,7 @@
 #include "utils/node_dumper.h"
 #include "utils/verbose.h"
 #include "utils/precision_support.h"
+#include "utils/profiler.hpp"
 
 #include <oneapi/dnnl/dnnl.hpp>
 #include "common/primitive_desc_iface.hpp"
@@ -1343,6 +1344,7 @@ public:
 void Graph::InferDynamic(SyncInferRequest* request) {
     dnnl::stream stream(getEngine());
 
+    PROFILE(_prof0, std::string("Graph::InferDynamic_#") + std::to_string(infer_count));
     std::unique_ptr<IUpdateNodes> updateNodes{};
     if (parallel_get_max_threads() > 1) {
         updateNodes.reset(new UpdateNodes(m_executableGraphNodes));
@@ -1357,7 +1359,7 @@ void Graph::InferDynamic(SyncInferRequest* request) {
             auto& node = m_executableGraphNodes[inferCounter];
             VERBOSE(node, getConfig().debugCaps.verbose);
             PERF(node, getConfig().collectPerfCounters);
-
+            PROFILE(_prof, node->getTypeStr(), node->getName());
             if (request)
                 request->throw_if_canceled();
             try {
@@ -1467,7 +1469,7 @@ void Graph::Infer(SyncInferRequest* request) {
         OPENVINO_THROW("Unknown ov::intel_cpu::Graph state: " , static_cast<size_t>(status));
     }
 
-    if (infer_count != -1) infer_count++;
+    infer_count++;
 }
 
 void Graph::SortTopologically() {
