@@ -14,6 +14,8 @@
 #include "shape_inference/shape_inference_internal_dyn.hpp"
 #include "utils/plain_tensor.hpp"
 
+#include "utils/profiler.hpp"
+
 #if defined(OPENVINO_ARCH_X86_64)
 #include "kernels/x64/mlp_kernel.hpp"
 #endif
@@ -98,7 +100,6 @@ public:
                 work.setup(p_weight, stride);
             }
         });
-        DEBUG_LOG("   setup is done. weight @ ", static_cast<void*>(p_weight));
     }
 
     void run(uint8_t* pA, int strideA, int M, ov::bfloat16* dstC, int strideC, std::vector<PlainTensor>& m_tempC) {
@@ -160,7 +161,31 @@ public:
             }
         });
     }
+
+    void runUp(uint8_t* pA, int strideA, int M,
+               ov::bfloat16* dstC, int strideC,
+               const LLMMLPNode::Config& config,
+               std::vector<PlainTensor>& m_tempC) {
+        static UpAct2bh jit_up_gelu(dnnl_eltwise_gelu_tanh);
+
+        if (config.act != LLMMLPNode::ACT_FN::GPT2_GELU_NEW)
+            OPENVINO_THROW("unsupported act in GateUpCombine");
+
+        ov::parallel_nt_static(0, [&](const size_t ithr, const size_t nthr) {
+            auto& work = works[ithr];
+            auto& workC = m_tempC[ithr];
+            if (work.BN > 0) {
+                work.run(M, pA, strideA, workC);
+                // K reduce is done, results of [M, BN] sub-block is ready in L2.
+                // combine Gate & Up
+                jit_up_gelu.call(workC.ptr<float>(), workC.stride(0),
+                                 dstC + (work.n0), strideC / sizeof(*dstC),
+                                 M, work.BN);
+            }
+        });
+    }
 };
+
 
 struct LLMMLP::Impl {
     const LLMMLPNode::Config m_config;
@@ -176,6 +201,7 @@ struct LLMMLP::Impl {
     PlainTensor m_actUp;
     std::vector<PlainTensor> m_tempC;
 
+    bool m_is_gpt2_style = false;
     // [M, K] x [N, K] => [M, N] x [K, N] => [M, K]
     // w_gate/w_up : [N, K]
     //     w_down  : [K, N]
@@ -197,6 +223,23 @@ struct LLMMLP::Impl {
 
         m_tempC.resize(parallel_get_max_threads());
         m_N = N;
+    }
+
+    // GPT2 style MLP:  down(act(up()))
+    Impl(PlainTensor wei_up, PlainTensor bias_up, PlainTensor wei_down, PlainTensor bias_down, const LLMMLPNode::Config& config, DnnlScratchPadPtr scrachPad)
+         : m_config(config), m_scrachPad(scrachPad) {
+        
+        if (config.act != LLMMLPNode::ACT_FN::GPT2_GELU_NEW) {
+            OPENVINO_THROW("unsupported act in gpt2");
+        }
+
+        gate_up.setup(wei_up.ptr<ov::bfloat16>(), wei_up.stride_bytes(0), wei_up.size(0), wei_up.size(1), false);
+        down.setup(wei_down.ptr<ov::bfloat16>(), wei_down.stride_bytes(0), wei_down.size(0), wei_down.size(1), true);
+
+        m_tempC.resize(parallel_get_max_threads());
+        m_N = wei_up.size(0);
+
+        m_is_gpt2_style = true;
     }
 
     void setM(int M) {
@@ -221,6 +264,8 @@ struct LLMMLP::Impl {
                 m_tempC[ithr].resize<float>({1, scratch_C_sizes[ithr]}, reinterpret_cast<float*>(scratch_base + scratch_offsets[ithr]));
             }
             m_M = M;
+
+            DEBUG_LOG("setM to ", M);
         }
     }
 
@@ -242,7 +287,12 @@ struct LLMMLP::Impl {
             int BM = std::min(M - m, 512);
             setM(BM);
 
-            gate_up.runGateUp(pA, strideA, BM, m_actUp.ptr<ov::bfloat16>(), m_actUp.stride_bytes(0), m_config, m_tempC);
+            if (m_is_gpt2_style) {
+                gate_up.runUp(pA, strideA, BM, m_actUp.ptr<ov::bfloat16>(), m_actUp.stride_bytes(0), m_config, m_tempC);
+            } else {
+                gate_up.runGateUp(pA, strideA, BM, m_actUp.ptr<ov::bfloat16>(), m_actUp.stride_bytes(0), m_config, m_tempC);
+            }
+
             down.run(reinterpret_cast<uint8_t*>(m_actUp.ptr<ov::bfloat16>()), m_actUp.stride_bytes(0), BM, dstC, strideC, m_tempC);
 
             m += BM;
@@ -277,10 +327,18 @@ void LLMMLP::initSupportedPrimitiveDescriptors() {
 
     // initialize input ports
     std::vector<PortConfigurator> inPortConfigs;
-    inPortConfigs.emplace_back(LayoutType::ncsp, rtPrecision, getInputShapeAtPort(0), false, -1);      // input
-    inPortConfigs.emplace_back(LayoutType::ncsp, weightPrecision, getInputShapeAtPort(1), false, -1);  // gate
-    inPortConfigs.emplace_back(LayoutType::ncsp, weightPrecision, getInputShapeAtPort(2), false, -1);  // up
-    inPortConfigs.emplace_back(LayoutType::ncsp, weightPrecision, getInputShapeAtPort(3), false, -1);  // down
+    if (m_mlp_config.act == LLMMLPNode::ACT_FN::GPT2_GELU_NEW) {
+        inPortConfigs.emplace_back(LayoutType::ncsp, rtPrecision, getInputShapeAtPort(0), false, -1);       // input
+        inPortConfigs.emplace_back(LayoutType::ncsp, weightPrecision, getInputShapeAtPort(1), false, -1);   // weight_c_fc
+        inPortConfigs.emplace_back(LayoutType::ncsp, ov::element::f32, getInputShapeAtPort(2), false, -1);  // bias_c_fc
+        inPortConfigs.emplace_back(LayoutType::ncsp, weightPrecision, getInputShapeAtPort(3), false, -1);   // weight_c_proj
+        inPortConfigs.emplace_back(LayoutType::ncsp, ov::element::f32, getInputShapeAtPort(4), false, -1);  // bias_c_proj
+    } else {
+        inPortConfigs.emplace_back(LayoutType::ncsp, rtPrecision, getInputShapeAtPort(0), false, -1);      // input
+        inPortConfigs.emplace_back(LayoutType::ncsp, weightPrecision, getInputShapeAtPort(1), false, -1);  // gate
+        inPortConfigs.emplace_back(LayoutType::ncsp, weightPrecision, getInputShapeAtPort(2), false, -1);  // up
+        inPortConfigs.emplace_back(LayoutType::ncsp, weightPrecision, getInputShapeAtPort(3), false, -1);  // down
+    }
 
     // initialize output port
     std::vector<PortConfigurator> outPortConfigs;
@@ -291,11 +349,20 @@ void LLMMLP::initSupportedPrimitiveDescriptors() {
 
 void LLMMLP::prepareParams() {
     if (!m_pimpl) {
-        m_pimpl = std::make_shared<Impl>(getSrcMemoryAtPort(1),
-                                         getSrcMemoryAtPort(2),
-                                         getSrcMemoryAtPort(3),
-                                         m_mlp_config,
-                                         context->getScratchPad());
+        if (m_mlp_config.act == LLMMLPNode::ACT_FN::GPT2_GELU_NEW) {
+            m_pimpl = std::make_shared<Impl>(getSrcMemoryAtPort(1),
+                                            getSrcMemoryAtPort(2),
+                                            getSrcMemoryAtPort(3),
+                                            getSrcMemoryAtPort(4),
+                                            m_mlp_config,
+                                            context->getScratchPad());
+        } else {
+            m_pimpl = std::make_shared<Impl>(getSrcMemoryAtPort(1),
+                                            getSrcMemoryAtPort(2),
+                                            getSrcMemoryAtPort(3),
+                                            m_mlp_config,
+                                            context->getScratchPad());
+        }
     }
 }
 

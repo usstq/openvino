@@ -11,7 +11,7 @@ template <>
 EnumNames<ov::intel_cpu::LLMMLPNode::ACT_FN>& EnumNames<ov::intel_cpu::LLMMLPNode::ACT_FN>::get() {
     static auto enum_names = EnumNames<ov::intel_cpu::LLMMLPNode::ACT_FN>(
         "op::intel_cpu::LLMMLPNode::ACT_FN",
-        {{"GELU", ov::intel_cpu::LLMMLPNode::ACT_FN::GELU}, {"SILU", ov::intel_cpu::LLMMLPNode::ACT_FN::SILU}});
+        {{"GELU", ov::intel_cpu::LLMMLPNode::ACT_FN::GELU}, {"SILU", ov::intel_cpu::LLMMLPNode::ACT_FN::SILU}, {"GPT2_GELU_NEW", ov::intel_cpu::LLMMLPNode::ACT_FN::GPT2_GELU_NEW}});
     return enum_names;
 }
 
@@ -32,7 +32,7 @@ bool LLMMLPNode::visit_attributes(ov::AttributeVisitor& visitor) {
 void LLMMLPNode::validate_and_infer_types() {
     INTERNAL_OP_SCOPE(LLMMLPNode_validate_and_infer_types);
     const auto input_size = get_input_size();
-    NODE_VALIDATION_CHECK(this, input_size == 4);
+    NODE_VALIDATION_CHECK(this, input_size >= 4);
 
     const auto& ishape = get_input_partial_shape(0);
     const auto& itype = get_input_element_type(0);

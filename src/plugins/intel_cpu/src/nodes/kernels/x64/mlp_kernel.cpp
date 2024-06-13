@@ -322,6 +322,54 @@ void GateUpCombine::generate() {
     injector->prepare_table();
 }
 
+void UpAct2bh::generate() {
+    Xbyak::Label loop_begin;
+
+    Xbyak::Reg64 src = abi_param1;
+    Xbyak::Reg64 dst = abi_param2;
+    Xbyak::Reg64 prefetch_dst = abi_param3;
+    Xbyak::Reg64 BN = abi_param4;
+
+    Xbyak::Reg64 loop_i = rax;
+    const auto zmm_up = zmm6;
+    const auto ymm_dst = ymm5;
+
+    // when save_state is false, push/pop will not be generated.
+    auto injector = std::make_shared<jit_uni_eltwise_injector_f32<dnnl::impl::cpu::x64::avx512_core>>(
+        this,
+        m_act_alg,
+        1.f,
+        1.0f,
+        1.f,
+        false,                              // save_state, state will be saved in our function
+        Xbyak::Reg64(Xbyak::Operand::R10),  // p_table
+        Xbyak::Opmask(1),                   // k_mask
+        true,                               // is_fwd
+        false,                              // use_dst
+        false,                              // preserve_vmm
+        false);                             // preserve_p_table
+
+    xor_(loop_i, loop_i);
+    injector->load_table_addr();
+
+    align(64);
+    L(loop_begin);
+    {
+        vmovups(zmm_up, ptr[src + loop_i * 4]);
+        injector->compute_vector(zmm_up.getIdx());
+        vcvtneps2bf16(ymm_dst, zmm_up);
+        prefetchwt1(ptr[prefetch_dst + loop_i * 2]);
+        vmovdqu(ptr[dst + loop_i * 2], ymm_dst);
+    }
+    add(loop_i, 16);
+    cmp(loop_i, BN);
+    jl(loop_begin, T_NEAR);
+
+    ret();
+
+    injector->prepare_table();
+}
+
 void ReduceAdd2bh::generate() {
     if (m_do_reduce2) {
         Xbyak::Reg64 src0 = abi_param1;

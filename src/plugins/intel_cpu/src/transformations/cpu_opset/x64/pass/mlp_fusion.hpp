@@ -15,5 +15,11 @@ public:
     MLPFusion();
 };
 
+class GPT2MLPFusion: public ov::pass::MatcherPass {
+public:
+    OPENVINO_RTTI("GPT2MLPFusion", "0");
+    GPT2MLPFusion();
+};
+
 }   // namespace intel_cpu
 }   // namespace ov

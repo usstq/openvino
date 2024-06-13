@@ -801,6 +801,9 @@ void Transformations::PostLpt() {
                 MLPFusion);
         }
 
+        if (std::getenv("USE_MLP"))
+            CPU_REGISTER_PASS_X64(postLPTPassManager, GPT2MLPFusion);
+
         // Limitations: at least 3 workers are required for QKV fusion
         size_t concurrency = config.streamExecutorConfig.get_threads_per_stream();
         if (concurrency == 0)
@@ -817,6 +820,7 @@ void Transformations::PostLpt() {
             }
         }
     }
+    CPU_REGISTER_PASS_X64(postLPTPassManager, ov::pass::PrintModel, "_after.cpp");
 
     CPU_REGISTER_PASS_X64(postLPTPassManager, StatefulSDPAFusion);
 

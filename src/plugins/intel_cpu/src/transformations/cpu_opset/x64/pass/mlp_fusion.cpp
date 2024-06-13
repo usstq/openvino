@@ -130,3 +130,82 @@ ov::intel_cpu::MLPFusion::MLPFusion() {
     auto m = std::make_shared<ov::pass::pattern::Matcher>(result, matcher_name);
     this->register_matcher(m, callback);
 }
+
+ov::intel_cpu::GPT2MLPFusion::GPT2MLPFusion() {
+    MATCHER_SCOPE(MLPFusion);
+
+    auto input = makePattern("[?,?,1024]"); // tensor_array<f32[?,?,1024]>
+    auto mlp_c_fcview_Reshape = makePattern<opset1::Reshape>({input, {-1,1024}}, {{"special_zero", false}});   //  tensor_array<f32[?,1024]>
+    auto bias_c_fc = makePattern<opset1::Constant>({}, {}, "f32[1,4096]");
+    auto weight_c_fc = makePattern<opset1::Constant>({}, {}, "f16[4096,1024]");
+    auto weight_c_fc_f32 = makePattern<opset1::Convert>({weight_c_fc}, {{"destination_type", "f32"}});   //  tensor_array<f32[4096,1024]>
+    auto mlp_c_fcaddmm_MatMul = makePattern<opset1::MatMul>({mlp_c_fcview_Reshape, weight_c_fc_f32}, {{"transpose_a", false}, {"transpose_b", true}});   //  tensor_array<f32[?,4096]>
+    auto mlp_c_fcaddmm_Add = makePattern<opset1::Add>({bias_c_fc, mlp_c_fcaddmm_MatMul}, {{"auto_broadcast", "numpy"}});   //  tensor_array<f32[?,4096]>
+
+    auto mlp_c_fcsize_ShapeOf_1 = makePattern<opset1::ShapeOf>({input});   //  tensor_array<i32[3]>
+    auto Gather_72470 = makePattern<opset8::Gather>({mlp_c_fcsize_ShapeOf_1, {0,1}, 0}, {{"batch_dims", 0}});   //  tensor_array<i32[2]>
+    auto ListConstruct_Concat_1 = makePattern<opset1::Concat>({Gather_72470, {4096}}, {{"axis", 0}});   //  tensor_array<i32[3]>
+    auto mlp_c_fcview_Reshape_1 = makePattern<opset1::Reshape>({mlp_c_fcaddmm_Add, ListConstruct_Concat_1}, {{"special_zero", false}});   //  tensor_array<f32[?,?,4096]>
+    //auto Constant_0_5 = makePattern<opset1::Constant>({}, {}, "f32[1,1,1]"); //makeConst(element::f32, ov::Shape({1,1,1,}), {0.500000f});
+    auto mlp_actmul_Multiply = makePattern<opset1::Multiply>({mlp_c_fcview_Reshape_1, 0.5f}, {{"auto_broadcast", "numpy"}});   //  tensor_array<f32[?,?,4096]>
+    //auto Constant_3_0 = makePattern<opset1::Constant>({}, {}, "f32[1,1,1]"); // makeConst(element::f32, ov::Shape({1,1,1,}), {3.000000f});
+    auto mlp_actpow_Power = makePattern<opset1::Power>({mlp_c_fcview_Reshape_1, 3.0f}, {{"auto_broadcast", "numpy"}});   //  tensor_array<f32[?,?,4096]>
+    auto Constant_0_044708 = makePattern<opset1::Constant>({}, {}, "f32[1,1,1]"); //makeConst(element::f32, ov::Shape({1,1,1,}), {0.044708f});
+    auto mlp_actmul_Multiply_1 = makePattern<opset1::Multiply>({mlp_actpow_Power, Constant_0_044708}, {{"auto_broadcast", "numpy"}});   //  tensor_array<f32[?,?,4096]>
+    auto mlp_actadd_Add = makePattern<opset1::Add>({mlp_c_fcview_Reshape_1, mlp_actmul_Multiply_1}, {{"auto_broadcast", "numpy"}});   //  tensor_array<f32[?,?,4096]>
+    auto Constant_0_797852 = makePattern<opset1::Constant>({}, {}, "f32[1,1,1]"); //makeConst(element::f32, ov::Shape({1,1,1,}), {0.797852f});
+    auto mlp_actmul_Multiply_2 = makePattern<opset1::Multiply>({mlp_actadd_Add, Constant_0_797852}, {{"auto_broadcast", "numpy"}});   //  tensor_array<f32[?,?,4096]>
+    auto mlp_acttanh_Tanh = makePattern<opset1::Tanh>({mlp_actmul_Multiply_2});   //  tensor_array<f32[?,?,4096]>
+    // auto Constant_1_0 = makePattern<opset1::Constant>({}, {}, "f32[1,1,1]"); // makeConst(element::f32, ov::Shape({1,1,1,}), {1.000000f});
+    auto mlp_actadd_Add_1 = makePattern<opset1::Add>({mlp_acttanh_Tanh, 1.0f}, {{"auto_broadcast", "numpy"}});   //  tensor_array<f32[?,?,4096]>
+    auto mlp_actmul_Multiply_3 = makePattern<opset1::Multiply>({mlp_actmul_Multiply, mlp_actadd_Add_1}, {{"auto_broadcast", "numpy"}});   //  tensor_array<f32[?,?,4096]>
+    auto mlp_c_projview_Reshape = makePattern<opset1::Reshape>({mlp_actmul_Multiply_3, {-1,4096}}, {{"special_zero", false}});   //  tensor_array<f32[?,4096]>
+    auto weight_c_proj = makePattern<opset1::Constant>({}, {}, "f16[1024,4096]"); //makeConst(element::f16, ov::Shape({1024,4096,}), {...});
+    auto weight_c_proj_f32 = makePattern<opset1::Convert>({weight_c_proj}, {{"destination_type", "f32"}});   //  tensor_array<f32[1024,4096]>
+    auto mlp_c_projaddmm_MatMul = makePattern<opset1::MatMul>({mlp_c_projview_Reshape, weight_c_proj_f32}, {{"transpose_a", false}, {"transpose_b", true}});   //  tensor_array<f32[?,1024]>
+    auto bias_c_proj = makePattern<opset1::Constant>({}, {}, "f32[1,1024]");
+    auto mlp_c_projaddmm_Add = makePattern<opset1::Add>({bias_c_proj, mlp_c_projaddmm_MatMul}, {{"auto_broadcast", "numpy"}});   //  tensor_array<f32[?,1024]>
+    auto mlp_c_projsize_ShapeOf_1 = makePattern<opset1::ShapeOf>({mlp_actmul_Multiply_3});   //  tensor_array<i32[3]>
+    auto Gather_72475 = makePattern<opset8::Gather>({mlp_c_projsize_ShapeOf_1, {0,1}, 0}, {{"batch_dims", 0}});   //  tensor_array<i32[2]>
+    auto ListConstruct_Concat_2 = makePattern<opset1::Concat>({Gather_72475, {1024}}, {{"axis", 0}});   //  tensor_array<i32[3]>
+    auto mlp_c_projview_Reshape_1 = makePattern<opset1::Reshape>({mlp_c_projaddmm_Add, ListConstruct_Concat_2}, {{"special_zero", false}});   //  tensor_array<f32[?,?,1024]>
+
+    auto result = mlp_c_projview_Reshape_1;
+
+    matcher_pass_callback callback = [=](ov::pass::pattern::Matcher& m) {
+        PatternValidator validator(m);
+        if (!validator) {
+            return false;
+        }
+
+        const auto& pattern_map = m.get_pattern_value_map();
+        auto root = m.get_match_root();
+
+        auto const1 = ov::as_type_ptr<opset1::Constant>(pattern_map.at(Constant_0_044708).get_node_shared_ptr());
+        auto const2 = ov::as_type_ptr<opset1::Constant>(pattern_map.at(Constant_0_797852).get_node_shared_ptr());
+        auto const_0_044708 = const1->cast_vector<float>()[0];
+        auto const_0_797852 = const2->cast_vector<float>()[0];
+
+        LLMMLPNode::Config config;
+        OutputVector new_args;
+        config.act = LLMMLPNode::ACT_FN::GPT2_GELU_NEW;
+
+        new_args.push_back(pattern_map.at(input));
+        new_args.push_back(pattern_map.at(weight_c_fc));
+        new_args.push_back(pattern_map.at(bias_c_fc));
+        new_args.push_back(pattern_map.at(weight_c_proj));
+        new_args.push_back(pattern_map.at(bias_c_proj));
+
+
+        auto old_node = root;
+        auto new_node = std::make_shared<LLMMLPNode>(new_args, config);
+        new_node->set_friendly_name(old_node->get_friendly_name());
+        ov::replace_node(old_node, new_node);
+
+        std::cout << "GPT2MLPFusion: " << root->get_friendly_name() << "," << const_0_044708 << "," << const_0_797852 << std::endl;
+        return true;
+    };
+
+    auto m = std::make_shared<ov::pass::pattern::Matcher>(result, matcher_name);
+    this->register_matcher(m, callback);
+}

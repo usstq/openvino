@@ -203,7 +203,7 @@ public:
     DECLARE_CPU_JIT_AUX_FUNCTIONS(GateUpCombine)
 
     const dnnl_alg_kind_t m_act_alg;
-    GateUpCombine(dnnl_alg_kind_t act_alg) : jit_generator(jit_name()), m_act_alg(act_alg) {
+    GateUpCombine(dnnl_alg_kind_t act_alg, bool with_gate = true) : jit_generator(jit_name()), m_act_alg(act_alg) {
         create_kernel();
     }
 
@@ -227,6 +227,28 @@ public:
         }
     }
 };
+
+// combine up_proj using activation algo, then convert to bf16
+//     ConvertFP32toBF16(act_fn(up))
+class UpAct2bh : public dnnl::impl::cpu::x64::jit_generator {
+public:
+    DECLARE_CPU_JIT_AUX_FUNCTIONS(UpAct2bh)
+
+    const dnnl_alg_kind_t m_act_alg;
+    UpAct2bh(dnnl_alg_kind_t act_alg) : jit_generator(jit_name()), m_act_alg(act_alg) {
+        create_kernel();
+    }
+
+    void generate() override;
+
+    void call(float* src, size_t src_stride, ov::bfloat16 * dst, size_t dst_stride, int num_rows, int num_cols) {
+        for (int m = 0; m < num_rows; m++, src += src_stride, dst += dst_stride) {
+            auto* prefetch_dst = (m + 1 < num_rows) ? (dst + dst_stride) : (dst);
+            (*this)(src, dst, prefetch_dst, num_cols);
+        }
+    }
+};
+
 
 class ReduceAdd2bh : public dnnl::impl::cpu::x64::jit_generator {
 public:
