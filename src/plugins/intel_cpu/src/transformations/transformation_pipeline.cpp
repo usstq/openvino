@@ -118,6 +118,7 @@
 #include "transformations/cpu_opset/x64/pass/convert_to_interaction.hpp"
 #include "transformations/cpu_opset/x64/pass/mlp_fusion.hpp"
 #include "transformations/cpu_opset/x64/pass/qkv_proj_fusion.hpp"
+#include "transformations/cpu_opset/x64/pass/gelu_fusion.hpp"
 #include "transformations/cpu_opset/arm/pass/convert_group_conv.hpp"
 #include "transformations/cpu_opset/arm/pass/convert_group_conv1d.hpp"
 #include "transformations/cpu_opset/arm/pass/convert_reduce_multi_axis.hpp"
@@ -804,6 +805,7 @@ void Transformations::PostLpt() {
         if (std::getenv("USE_MLP"))
             CPU_REGISTER_PASS_X64(postLPTPassManager, GPT2MLPFusion);
 
+        CPU_REGISTER_PASS_X64(postLPTPassManager, GELUFusion);
         // Limitations: at least 3 workers are required for QKV fusion
         size_t concurrency = config.streamExecutorConfig.get_threads_per_stream();
         if (concurrency == 0)

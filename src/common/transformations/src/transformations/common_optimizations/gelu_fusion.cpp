@@ -312,6 +312,7 @@ ov::pass::GeluFusionWithTanh::GeluFusionWithTanh() {
             op::util::has_constant_value<float>(add_1_constant_value, 1.0f);
 
         if (!valid_constant_values) {
+            std::cout << "GeluFusionWithTanh failed\n";
             return false;
         }
 
