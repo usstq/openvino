@@ -265,7 +265,8 @@ void VariableStateKVcache::set_state_impl(const ov::SoPtr<ov::ITensor>& state) {
                           internal.ptr<uint8_t>(b, h, m),
                           S,
                           m_scale_zp.at<float>({b, h, m, size_t{0}}),
-                          m_scale_zp.at<float>({b, h, m, size_t{1}}));
+                          m_scale_zp.at<float>({b, h, m, size_t{1}}),
+                          ov::element::f32);
         });
     } else {
         m_internal_mem->load(external_mem);

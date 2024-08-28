@@ -1388,7 +1388,11 @@ void Graph::Infer(SyncInferRequest* request) {
 
     switch (status) {
     case Status::ReadyDynamic:
+#if (OV_THREAD == OV_THREAD_OMP)
+        InferDynamic(request, UpdateNodesSeq(m_executableGraphNodes));
+#else
         InferDynamic(request, UpdateNodes(m_executableGraphNodes));
+#endif
         break;
     case Status::ReadyDynamicSeq:
         InferDynamic(request, UpdateNodesSeq(m_executableGraphNodes));

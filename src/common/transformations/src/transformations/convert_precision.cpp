@@ -604,7 +604,8 @@ bool fuse_type_to_parameter(const std::shared_ptr<ov::Node>& node,
                     // TODO: refactor after ngraph op defined
                     // The fourth and fifth inputs are kvcache and should be directly connected to parameters
                     (consumer->get_type_name() == std::string("PagedAttentionExtension") &&
-                     (input.get_index() == 3 || input.get_index() == 4))) {
+                     (input.get_index() == 3 || input.get_index() == 4)) ||
+                    (consumer->get_type_name() == std::string("MultiHeadAttention") && input.get_index() == 3)) {
                     continue;
                 }
                 input.replace_source_output(convert);

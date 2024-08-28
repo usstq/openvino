@@ -13,6 +13,7 @@
 #include "memory_desc/dnnl_blocked_memory_desc.h"
 #include "onednn/dnnl.h"
 #include "openvino/core/parallel.hpp"
+#include "openvino/op/mha.hpp"
 #include "openvino/op/scaled_dot_product_attention.hpp"
 #include "openvino/util/common_util.hpp"
 #include "shape_inference/custom/scaled_attn.hpp"
@@ -33,6 +34,7 @@
 #include "kernels/scaled_attn/attn_memcpy.hpp"
 #include "kernels/scaled_attn/attn_quant.hpp"
 #include "kernels/x64/brgemm_kernel.hpp"
+#include "kernels/x64/rope_kernel.hpp"
 #include "nodes/common/cpu_convert.h"
 
 #include <algorithm>
@@ -42,6 +44,7 @@
 using namespace ov::Extensions::Cpu::XARCH;
 using namespace dnnl::impl;
 using namespace dnnl::impl::cpu::x64;
+using namespace ov::intel_cpu::kernel;
 
 namespace ov {
 namespace intel_cpu {
@@ -65,6 +68,61 @@ bool ScaledDotProductAttentionKey::operator==(const ScaledDotProductAttentionKey
     auto retVal = rtPrecision == rhs.rtPrecision;
 
     return retVal;
+}
+
+static std::shared_ptr<kernel::JitKernelBase> createJitKernel(const jit_rotary_compile_params& param, bool check_vec_size2 = false) {
+    std::shared_ptr<kernel::JitKernelBase> res;
+
+    MAYBE_UNUSED(param);
+    MAYBE_UNUSED(check_vec_size2);
+
+#if defined(OPENVINO_ARCH_X86_64)
+
+    if (dnnl::impl::cpu::x64::mayiuse(dnnl::impl::cpu::x64::avx512_core)) {
+        bool flag = true;
+        if (check_vec_size2) {
+            auto vec_size = jit_rotary_kernel<dnnl::impl::cpu::x64::avx512_core>::vec_size;
+            if (param.rotary_ndims % (vec_size * 2) != 0)
+                flag = false;
+        }
+        if (flag)
+            res = std::make_shared<jit_rotary_kernel<dnnl::impl::cpu::x64::avx512_core>>(param);
+    } else if (dnnl::impl::cpu::x64::mayiuse(dnnl::impl::cpu::x64::avx2)) {
+        bool flag = true;
+        if (check_vec_size2) {
+            auto vec_size = jit_rotary_kernel<dnnl::impl::cpu::x64::avx2>::vec_size;
+            if (param.rotary_ndims % (vec_size * 2) != 0)
+                flag = false;
+        }
+        if (flag)
+            res = std::make_shared<jit_rotary_kernel<dnnl::impl::cpu::x64::avx2>>(param);
+    }
+
+    if (res)
+        res->create_kernel();
+
+#endif // OPENVINO_ARCH_X86_64
+
+    return res;
+}
+
+static void execJitKernel(const std::shared_ptr<kernel::JitKernelBase>& ker, const void* src, void* dst, const float* cos, const float* sin) {
+    MAYBE_UNUSED(ker);
+    MAYBE_UNUSED(src);
+    MAYBE_UNUSED(dst);
+    MAYBE_UNUSED(cos);
+    MAYBE_UNUSED(sin);
+
+#if defined(OPENVINO_ARCH_X86_64)
+
+    jit_rotary_call_args call_args;
+    call_args.src = src;
+    call_args.cos = cos;
+    call_args.sin = sin;
+    call_args.dst = dst;
+    (*ker)(&call_args);
+
+#endif // OPENVINO_ARCH_X86_64
 }
 
 // default implementation: reference
@@ -836,6 +894,144 @@ struct MHASingleToken {
     }
 };
 
+template <typename T>
+struct ScaledDotProductAttention::MHAExecutor : public ScaledDotProductAttention::Executor {
+    GraphContext::CPtr context;
+    PlainTensor attn_buf;          // f32[[B|1],[H|1], L1|1, L0+L1]
+    std::shared_ptr<kernel::JitKernelBase> m_rotaryKernel;
+
+    MHAKernel<KT_ONEDNN, T> kernel;
+    MHASingleToken kernel_single_token;
+
+    MHAExecutor(GraphContext::CPtr ctx) : context(ctx), kernel(context) {}
+
+    void rope_concat(const PlainTensor& q_input, const PlainTensor& k_input, const PlainTensor& v_input,
+        PlainTensor& cos_tab, PlainTensor& sin_tab, PlainTensor& present_key, PlainTensor& present_value, size_t rotary_dims, size_t kv_pos) {
+        if (!m_rotaryKernel) {
+            jit_rotary_compile_params jcp;
+            jcp.src_prc = precision_of<T>::value;
+            jcp.dst_prc = precision_of<T>::value;
+            jcp.rotary_ndims = rotary_dims;
+            jcp.interleave = false;
+            m_rotaryKernel = createJitKernel(jcp);
+        }
+
+        auto batch_size = k_input.size(0);
+        auto head_cnt = k_input.size(1);
+        auto seq_len = k_input.size(2);
+        auto feature_size = k_input.size(3);
+        auto kvcache_precision = present_key.get_precision();
+
+        // TODO: support chatglm ... pattern
+        parallel_for3d(batch_size, head_cnt, seq_len, [&](size_t b, size_t h, size_t p) {
+            auto cos_pos = p + kv_pos;
+            auto* q = q_input.ptr<T>(b, h, p);
+            auto* k = k_input.ptr<T>(b, h, p);
+            auto* v = v_input.ptr<T>(b, h, p);
+            auto* cos = cos_tab.ptr<float>(cos_pos, 0);
+            auto* sin = sin_tab.ptr<float>(cos_pos, 0);
+
+            if (m_rotaryKernel) {
+                execJitKernel(m_rotaryKernel, q, q, cos, sin);
+                execJitKernel(m_rotaryKernel, k, k, cos, sin);
+            } else {
+                auto half_rotary_dims = rotary_dims / 2;
+                for (size_t i = 0; i < half_rotary_dims; i++) {
+                    auto src0 = q[i];
+                    auto src1 = q[i + half_rotary_dims];
+                    q[i] = cos[i] * src0 - sin[i] * src1;
+                    q[i + half_rotary_dims] = cos[i + half_rotary_dims] * src1 + sin[i + half_rotary_dims] * src0;
+                }
+                for (size_t i = 0; i < half_rotary_dims; i++) {
+                    auto src0 = k[i];
+                    auto src1 = k[i + half_rotary_dims];
+                    k[i] = cos[i] * src0 - sin[i] * src1;
+                    k[i + half_rotary_dims] = cos[i + half_rotary_dims] * src1 + sin[i + half_rotary_dims] * src0;
+                }
+            }
+            if (kvcache_precision == ov::element::u8) {
+                auto* k_cache = reinterpret_cast<float*>(present_key.ptr<uint8_t>(b, h, p + kv_pos));
+                attn_quant_u8(k, present_key.ptr<uint8_t>(b, h, p + kv_pos) + 8, feature_size, k_cache[0], k_cache[1], k_input.get_precision());
+                auto* v_cache = reinterpret_cast<float*>(present_value.ptr<uint8_t>(b, h, p + kv_pos));
+                attn_quant_u8(v, present_value.ptr<uint8_t>(b, h, p + kv_pos) + 8, feature_size, v_cache[0], v_cache[1], k_input.get_precision());
+            } else {
+                attn_memcpy2d_kernel(k, present_key.ptr_v(b, h, p + kv_pos), k_input.get_precision(), kvcache_precision, 0, 0, feature_size, 1);
+                attn_memcpy2d_kernel(v, present_value.ptr_v(b, h, p + kv_pos), k_input.get_precision(), kvcache_precision, 0, 0, feature_size, 1);
+            }
+        });
+    }
+
+    void execute(dnnl::stream strm, const Config& config, const std::vector<MemoryPtr>& inputs, const MemoryPtr output,
+                 const MemoryPtr, const MemoryPtr, const MemoryPtr, const PlainTensor&, const PlainTensor&) override {
+        PlainTensor q_input;                        // fx[B, L1, H * S]
+        PlainTensor k_input;
+        PlainTensor v_input;
+        PlainTensor kv_cache;                       // [2 * layer_num, B, Hk, max_kv_len, S]
+        PlainTensor present_key, present_value;     // [B, Hk, max_kv_len, S]
+        PlainTensor beam_table;                     // i32[B, max_kv_len]
+        PlainTensor attn_mask;                      // fx[B, L0 + L1]
+        PlainTensor cos_tab;                        // f32[max_kv_len, rotary_dims]
+        PlainTensor sin_tab;                        // f32[max_kv_len, rotary_dims]
+        PlainTensor output_emb(output);         // fx[B, L1, H * S]
+        float scale_input = 0.0f;
+        size_t B, L1, L0, S, H;
+
+        // init
+        q_input.reset(inputs[0]);
+        k_input.reset(inputs[1]);
+        v_input.reset(inputs[2]);
+        kv_cache.reset(inputs[3]);
+        // TODO: add support
+        beam_table.reset(inputs[4]);
+        attn_mask.reset(inputs[5]);
+        cos_tab.reset(inputs[6]);
+        sin_tab.reset(inputs[7]);
+
+        B = q_input.size(0);
+        L1 = q_input.size(1);
+        S = kv_cache.size(4);
+        L0 = attn_mask.size(1) - L1;
+        // Hk = kv_cache.size(2);
+        H = config.config_mha.n_head;
+        auto layer_id = config.config_mha.layer_id;
+
+        q_input.assert_dims({B, L1, H * S});
+        k_input.assert_dims({B, L1, H * S});
+        v_input.assert_dims({B, L1, H * S});
+        //kv_cache.assert_dims({0, 0, Hk, 0, S}, true);
+        // if (beam_table)
+        //     beam_table.assert_dims({B, 0}, true);
+        attn_mask.assert_dims({B, L0 + L1});
+        cos_tab.assert_dims({0, static_cast<size_t>(config.config_mha.rotary_dims)}, true);
+        sin_tab.assert_dims({0, static_cast<size_t>(config.config_mha.rotary_dims)}, true);
+        output_emb.assert_dims({B, L1, H * S});
+        q_input = q_input.reshape({B, L1, H, S}).permute({0, 2, 1, 3});
+        k_input = k_input.reshape({B, L1, H, S}).permute({0, 2, 1, 3});
+        v_input = v_input.reshape({B, L1, H, S}).permute({0, 2, 1, 3});
+        attn_mask = attn_mask.reshape({B, 1, 1, L0 + L1});
+        present_key = kv_cache.slice(0, 2 * layer_id, 2 * layer_id).slice(2, 0, L0 + L1);
+        present_value = kv_cache.slice(0, 2 * layer_id + 1, 2 * layer_id + 1).slice(2, 0, L0 + L1);
+
+        // rope & concat
+        rope_concat(q_input, k_input, v_input, cos_tab, sin_tab, present_key, present_value, config.config_mha.rotary_dims, L0);
+
+        // attention
+        if (L1 > 1) {
+            // multi-token version
+            kernel(strm, q_input, k_input, v_input, {}, attn_mask, output_emb, true, true, scale_input);
+        } else {
+            // 1-token version
+            // for second token, using a special AVX2/AVX512 float path:
+            //  1, in matrix mutiply, using AMX is not efficency because the M dimension of A will alway be 1
+            //  2, using float will save the repack cost which typically is required for bf16/int8 opt
+            //  3, using dot product can leverage the SIMD while easily adapt to indirect kv cache
+            PlainTensor k_scale_zp, v_scale_zp;
+            kernel_single_token(q_input, present_key, present_value, {}, attn_mask,
+                output_emb, beam_table, true, true, scale_input, k_scale_zp, v_scale_zp);
+        }
+    }
+};
+
 template <ScaledDotProductAttention::KernelTypes KType, typename T>
 struct ScaledDotProductAttention::AttentionExecutor : public ScaledDotProductAttention::Executor {
     GraphContext::CPtr context;
@@ -979,7 +1175,13 @@ ScaledDotProductAttention::ScaledDotProductAttention(const std::shared_ptr<ov::N
         m_config.config.is_causal = node->get_causal();
     } else {
         const auto node = std::dynamic_pointer_cast<const ScaledDotProductAttentionWithKVCache>(op);
-        m_config.config = node->get_config();
+        if (node) {
+            m_config.config = node->get_config();
+        } else {
+            const auto node = std::dynamic_pointer_cast<const ov::op::v15::MultiHeadAttention>(op);
+            m_config.config_mha = node->get_config();
+            m_config.mha_valid = true;
+        }
     }
 }
 
@@ -987,63 +1189,81 @@ void ScaledDotProductAttention::initSupportedPrimitiveDescriptors() {
     if (!supportedPrimitiveDescriptors.empty())
         return;
     auto rtPrecision = getRuntimePrecision();
-    auto orginSDPInputNumber = getOriginalInputsNumber() - (m_config.config.fuse_concat ? 3 : 0);
-
     NodeConfig config;
     auto& creatorsMap = BlockedDescCreator::getCommonCreators();
     config.inConfs.resize(getOriginalInputsNumber());
     config.outConfs.resize(getOriginalOutputsNumber());
+    // q, k, v
     config.inConfs[0].setMemDesc(creatorsMap.at(LayoutType::ncsp)->createSharedDesc(
         rtPrecision, getInputShapeAtPort(0)));
     config.inConfs[1].setMemDesc(creatorsMap.at(LayoutType::ncsp)->createSharedDesc(
         rtPrecision, getInputShapeAtPort(1)));
     config.inConfs[2].setMemDesc(creatorsMap.at(LayoutType::ncsp)->createSharedDesc(
         rtPrecision, getInputShapeAtPort(2)));
-    auto nextPortIdx = 3;
-    if (orginSDPInputNumber > 3) {
-        // attn_mask
-        if (getOriginalInputPrecisionAtPort(nextPortIdx) == ov::element::u8) {
-            config.inConfs[nextPortIdx].setMemDesc(creatorsMap.at(LayoutType::ncsp)->createSharedDesc(
-                ov::element::u8, getInputShapeAtPort(nextPortIdx)));
-        } else {
-            config.inConfs[nextPortIdx].setMemDesc(creatorsMap.at(LayoutType::ncsp)->createSharedDesc(
-                rtPrecision, getInputShapeAtPort(nextPortIdx)));
+    if (!m_config.mha_valid) {
+        auto orginSDPInputNumber = getOriginalInputsNumber() - (m_config.config.fuse_concat ? 3 : 0);
+
+        auto nextPortIdx = 3;
+        if (orginSDPInputNumber > 3) {
+            // attn_mask
+            if (getOriginalInputPrecisionAtPort(nextPortIdx) == ov::element::u8) {
+                config.inConfs[nextPortIdx].setMemDesc(creatorsMap.at(LayoutType::ncsp)->createSharedDesc(
+                    ov::element::u8, getInputShapeAtPort(nextPortIdx)));
+            } else {
+                config.inConfs[nextPortIdx].setMemDesc(creatorsMap.at(LayoutType::ncsp)->createSharedDesc(
+                    rtPrecision, getInputShapeAtPort(nextPortIdx)));
+            }
+            nextPortIdx++;
         }
-        nextPortIdx++;
+        if (orginSDPInputNumber > 4) {
+            config.inConfs[nextPortIdx].setMemDesc(creatorsMap.at(LayoutType::ncsp)->createSharedDesc(
+                ov::element::f32, getInputShapeAtPort(nextPortIdx)));
+        }
+
+        if (m_config.config.fuse_concat) {
+            // beam_idx
+            config.inConfs[orginSDPInputNumber + 0].setMemDesc(creatorsMap.at(LayoutType::ncsp)->createSharedDesc(
+                ov::element::i32, getInputShapeAtPort(orginSDPInputNumber + 0)));
+
+            // Since the InputMemory nodes are simple proxy for the state memory as well as the init subgraph memory,
+            // it doesn't make sense to set the real KV cache precision, since we don't need any precision conversions
+            // provided by the common graph logic. We set precisions equal to the precisions of the state nodes to avoid
+            // reorder insertion in between MemoryInputSDPA and SDPA nodes.
+
+            auto past_k_input_mem_precision = getParentEdgeAt(orginSDPInputNumber + 1)->getParent()->getOriginalOutputPrecisionAtPort(0);
+            // pastk
+            config.inConfs[orginSDPInputNumber + 1].setMemDesc(creatorsMap.at(LayoutType::ncsp)->createSharedDesc(
+                past_k_input_mem_precision, getInputShapeAtPort(orginSDPInputNumber + 1)));
+
+            auto past_v_input_mem_precision = getParentEdgeAt(orginSDPInputNumber + 2)->getParent()->getOriginalOutputPrecisionAtPort(0);
+            // pastv
+            config.inConfs[orginSDPInputNumber + 2].setMemDesc(creatorsMap.at(LayoutType::ncsp)->createSharedDesc(
+                past_v_input_mem_precision, getInputShapeAtPort(orginSDPInputNumber + 2)));
+
+            config.outConfs[1].setMemDesc(creatorsMap.at(LayoutType::ncsp)->createSharedDesc(
+                past_k_input_mem_precision, getOutputShapeAtPort(1)));
+            config.outConfs[1].inPlace(-1);
+            config.outConfs[2].setMemDesc(creatorsMap.at(LayoutType::ncsp)->createSharedDesc(
+                past_v_input_mem_precision, getOutputShapeAtPort(2)));
+            config.outConfs[2].inPlace(-1);
+        }
+    } else {
+        // kvcache
+        config.inConfs[3].setMemDesc(creatorsMap.at(LayoutType::ncsp)->createSharedDesc(
+            getOriginalInputPrecisionAtPort(3), getInputShapeAtPort(3)));
+        // beam table
+        config.inConfs[4].setMemDesc(creatorsMap.at(LayoutType::ncsp)->createSharedDesc(
+            ov::element::i32, getInputShapeAtPort(4)));
+        // attn_mask
+        config.inConfs[5].setMemDesc(creatorsMap.at(LayoutType::ncsp)->createSharedDesc(
+            rtPrecision, getInputShapeAtPort(5)));
+        // cos_tab
+        config.inConfs[6].setMemDesc(creatorsMap.at(LayoutType::ncsp)->createSharedDesc(
+            ov::element::f32, getInputShapeAtPort(6)));
+        // sin_tab
+        config.inConfs[7].setMemDesc(creatorsMap.at(LayoutType::ncsp)->createSharedDesc(
+            ov::element::f32, getInputShapeAtPort(7)));
     }
-    if (orginSDPInputNumber > 4) {
-        config.inConfs[nextPortIdx].setMemDesc(creatorsMap.at(LayoutType::ncsp)->createSharedDesc(
-            ov::element::f32, getInputShapeAtPort(nextPortIdx)));
-    }
-
-    if (m_config.config.fuse_concat) {
-        // beam_idx
-        config.inConfs[orginSDPInputNumber + 0].setMemDesc(creatorsMap.at(LayoutType::ncsp)->createSharedDesc(
-            ov::element::i32, getInputShapeAtPort(orginSDPInputNumber + 0)));
-
-        // Since the InputMemory nodes are simple proxy for the state memory as well as the init subgraph memory,
-        // it doesn't make sense to set the real KV cache precision, since we don't need any precision conversions
-        // provided by the common graph logic. We set precisions equal to the precisions of the state nodes to avoid
-        // reorder insertion in between MemoryInputSDPA and SDPA nodes.
-
-        auto past_k_input_mem_precision = getParentEdgeAt(orginSDPInputNumber + 1)->getParent()->getOriginalOutputPrecisionAtPort(0);
-        // pastk
-        config.inConfs[orginSDPInputNumber + 1].setMemDesc(creatorsMap.at(LayoutType::ncsp)->createSharedDesc(
-            past_k_input_mem_precision, getInputShapeAtPort(orginSDPInputNumber + 1)));
-
-        auto past_v_input_mem_precision = getParentEdgeAt(orginSDPInputNumber + 2)->getParent()->getOriginalOutputPrecisionAtPort(0);
-        // pastv
-        config.inConfs[orginSDPInputNumber + 2].setMemDesc(creatorsMap.at(LayoutType::ncsp)->createSharedDesc(
-            past_v_input_mem_precision, getInputShapeAtPort(orginSDPInputNumber + 2)));
-
-        config.outConfs[1].setMemDesc(creatorsMap.at(LayoutType::ncsp)->createSharedDesc(
-            past_k_input_mem_precision, getOutputShapeAtPort(1)));
-        config.outConfs[1].inPlace(-1);
-        config.outConfs[2].setMemDesc(creatorsMap.at(LayoutType::ncsp)->createSharedDesc(
-            past_v_input_mem_precision, getOutputShapeAtPort(2)));
-        config.outConfs[2].inPlace(-1);
-    }
-
     config.outConfs[0].setMemDesc(creatorsMap.at(LayoutType::ncsp)->createSharedDesc(
         rtPrecision, getOutputShapeAtPort(0)));
 
@@ -1062,6 +1282,17 @@ void ScaledDotProductAttention::createPrimitive() {
 
     auto builder = [&](const ScaledDotProductAttentionKey& key) -> std::shared_ptr<Executor> {
         std::shared_ptr<Executor> executor = nullptr;
+        if (m_config.mha_valid) {
+#ifdef OPENVINO_ARCH_X86_64
+            if (rtPrecision == ov::element::bf16) {
+                executor = std::make_shared<MHAExecutor<ov::bfloat16>>(context);
+            } else {
+                executor = std::make_shared<MHAExecutor<float>>(context);
+            }
+#endif
+            return executor;
+        }
+
         if (rtPrecision == ov::element::bf16) {
 #ifdef OPENVINO_ARCH_X86_64
             executor = std::make_shared<AttentionExecutor<KT_ONEDNN, ov::bfloat16>>(context);
@@ -1102,54 +1333,60 @@ void ScaledDotProductAttention::execute(dnnl::stream strm) {
     }
 
     PlainTensor k_scale_zp, v_scale_zp;
-    if (m_config.config.fuse_concat) {
-        CPU_NODE_ASSERT(m_k_state && m_v_state, "has null input states");
-        // initialization will be also completed in this func
-        gatherConcatPastkv(inputs[1], inputs[2], getSrcMemoryAtPort(orginSDPInputNumber));
+    if (!m_config.mha_valid) {
+        if (m_config.config.fuse_concat) {
+            CPU_NODE_ASSERT(m_k_state && m_v_state, "has null input states");
+            // initialization will be also completed in this func
+            gatherConcatPastkv(inputs[1], inputs[2], getSrcMemoryAtPort(orginSDPInputNumber));
 
-        presentk_input = m_k_state->internal_state_mem();
-        presentv_input = m_v_state->internal_state_mem();
-        beam_input = m_k_state->hidden_state_mem();
-        k_scale_zp = m_k_state->get_scale_zp();
-        v_scale_zp = m_v_state->get_scale_zp();
-    } else {
-        presentk_input = inputs[1];
-        presentv_input = inputs[2];
+            presentk_input = m_k_state->internal_state_mem();
+            presentv_input = m_v_state->internal_state_mem();
+            beam_input = m_k_state->hidden_state_mem();
+            k_scale_zp = m_k_state->get_scale_zp();
+            v_scale_zp = m_v_state->get_scale_zp();
+        } else {
+            presentk_input = inputs[1];
+            presentv_input = inputs[2];
+        }
     }
     m_executor->execute(strm, m_config, inputs, output, presentk_input, presentv_input, beam_input, k_scale_zp, v_scale_zp);
 }
 
 bool ScaledDotProductAttention::isSupportedOperation(const std::shared_ptr<const ov::Node>& op, std::string& errorMessage) noexcept {
     try {
+        const auto mha = std::dynamic_pointer_cast<const op::v15::MultiHeadAttention>(op);
         if (!std::dynamic_pointer_cast<const ov::op::v13::ScaledDotProductAttention>(op) &&
-            !std::dynamic_pointer_cast<const ScaledDotProductAttentionWithKVCache>(op)) {
-            errorMessage = "Only ScaledDotProductAttention or ScaledDotProductAttentionWithKVCache operation are supported";
+            !std::dynamic_pointer_cast<const ScaledDotProductAttentionWithKVCache>(op) &&
+            !mha) {
+            errorMessage = "Only ScaledDotProductAttention or ScaledDotProductAttentionWithKVCache or MultiHeadAttention operation are supported";
             return false;
         }
-        // expect shape of q: [B, H, L, S]
-        auto inRank = op->get_input_partial_shape(0).size();
-        if (inRank != 4u) {
-            errorMessage = "Doesn't support 'data' input with rank: " + std::to_string(inRank);
-            return false;
-        }
-        int orgSDPAInput = static_cast<int>(op->get_input_size());
-        const auto node = std::dynamic_pointer_cast<const ScaledDotProductAttentionWithKVCache>(op);
-        if (node) {
-            if (node->get_config().fuse_concat) {
-                orgSDPAInput -= 3;
-            }
-        }
-        if (orgSDPAInput > 3) {
-            inRank = op->get_input_partial_shape(3).size();
-            if (inRank > 4u) {
-                errorMessage = "Doesn't support 'attention mask' with rank: " + std::to_string(inRank);
+        if (!mha) {
+            // expect shape of q: [B, H, L, S]
+            auto inRank = op->get_input_partial_shape(0).size();
+            if (inRank != 4u) {
+                errorMessage = "Doesn't support 'data' input with rank: " + std::to_string(inRank);
                 return false;
             }
-        }
-        // using mha should be better for static shapes
-        if (!op->is_dynamic()) {
-            errorMessage = "Only run in dynamic mode";
-            return false;
+            int orgSDPAInput = static_cast<int>(op->get_input_size());
+            const auto node = std::dynamic_pointer_cast<const ScaledDotProductAttentionWithKVCache>(op);
+            if (node) {
+                if (node->get_config().fuse_concat) {
+                    orgSDPAInput -= 3;
+                }
+            }
+            if (orgSDPAInput > 3) {
+                inRank = op->get_input_partial_shape(3).size();
+                if (inRank > 4u) {
+                    errorMessage = "Doesn't support 'attention mask' with rank: " + std::to_string(inRank);
+                    return false;
+                }
+            }
+            // using mha should be better for static shapes
+            if (!op->is_dynamic()) {
+                errorMessage = "Only run in dynamic mode";
+                return false;
+            }
         }
     } catch (...) {
         return false;

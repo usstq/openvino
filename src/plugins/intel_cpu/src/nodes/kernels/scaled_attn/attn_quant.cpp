@@ -254,8 +254,16 @@ void paged_attn_quantkv(const ov::intel_cpu::PlainTensor& k_src,
     }
 }
 
-void attn_quant_u8(const float* src, uint8_t* dst, size_t n, float& scale, float& zp) {
-    quant_u8(src, dst, n, scale, zp);
+void attn_quant_u8(const void* src, uint8_t* dst, size_t n, float& scale, float& zp, ov::element::Type src_type) {
+    if (src_type == ov::element::f32) {
+        quant_u8(reinterpret_cast<const float*>(src), dst, n, scale, zp);
+    } else if (src_type == ov::element::bf16) {
+        quant_u8(reinterpret_cast<const ov::bfloat16*>(src), dst, n, scale, zp);
+    // } else if (src_type == ov::element::f16) {
+    //     quant_u8(reinterpret_cast<const ov::float16*>(src), dst, n, scale, zp);
+    } else {
+        OPENVINO_THROW("unsupport src type: ", src_type, " in attn_quant_u8");
+    }
 }
 
 void attn_dequant_u8(const uint8_t* src, float* dst, size_t n, float scale, float zp) {
