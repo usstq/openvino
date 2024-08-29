@@ -48,6 +48,7 @@
 
 #include "openvino/runtime/threading/cpu_streams_executor.hpp"
 #include "openvino/core/parallel.hpp"
+#include "nodes/linux_perf.hpp"
 
 #if (OV_THREAD == OV_THREAD_TBB || OV_THREAD == OV_THREAD_TBB_AUTO)
 #    include <tbb/task.h>
@@ -119,6 +120,7 @@ void Graph::Replicate(const std::shared_ptr<const ov::Model> &model) {
     OV_ITT_SCOPE_CHAIN(FIRST_INFERENCE, taskChain, itt::domains::intel_cpu_LT, "Graph::Replicate", "ov::Model");
     this->_name = model->get_friendly_name();
     this->reuse_io_tensors = false;
+    LinuxPerf::Init();
 
     // Map data object onto producer node
     std::map<std::shared_ptr<ov::Node>, NodePtr> op2node;
@@ -1340,6 +1342,7 @@ public:
 template<typename UpdateStrategy>
 void Graph::InferDynamic(SyncInferRequest* request, UpdateStrategy&& update) {
     size_t inferCounter = 0;
+    auto perf = LinuxPerf::Profile(std::string("Graph::InferDynamic_#"), infer_count);
     for (auto stopIndx : m_executableSyncNodesInds) {
         update(stopIndx);
 
@@ -1347,7 +1350,7 @@ void Graph::InferDynamic(SyncInferRequest* request, UpdateStrategy&& update) {
             auto& node = m_executableGraphNodes[inferCounter];
             VERBOSE(node, getConfig().debugCaps.verbose);
             PERF(node, getConfig().collectPerfCounters);
-
+            auto perf1 = LinuxPerf::Profile(node->getTypeStr());
             if (request)
                 request->throw_if_canceled();
             try {

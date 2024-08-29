@@ -335,7 +335,7 @@ DnnlMatMulPrimitive::DnnlMatMulPrimitive(const Key& key,
       m_prim(primitive(m_primDesc)) {}
 
 void DnnlMatMulPrimitive::execute(const dnnl_primitive_args& primArgs) const {
-    std::cout << "Executing MM primitive" << "\n";
+    // std::cout << "Executing MM primitive" << "\n";
     m_prim.execute(m_stream, primArgs);
 }
 
