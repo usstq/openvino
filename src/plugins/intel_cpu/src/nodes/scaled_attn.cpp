@@ -981,7 +981,6 @@ struct ScaledDotProductAttention::MHAExecutor : public ScaledDotProductAttention
         k_input.reset(inputs[1]);
         v_input.reset(inputs[2]);
         kv_cache.reset(inputs[3]);
-        // TODO: add support
         beam_table.reset(inputs[4]);
         attn_mask.reset(inputs[5]);
         cos_tab.reset(inputs[6]);
@@ -991,7 +990,6 @@ struct ScaledDotProductAttention::MHAExecutor : public ScaledDotProductAttention
         L1 = q_input.size(1);
         S = kv_cache.size(4);
         L0 = attn_mask.size(1) - L1;
-        // Hk = kv_cache.size(2);
         H = config.config_mha.n_head;
         auto layer_id = config.config_mha.layer_id;
 
@@ -1011,6 +1009,18 @@ struct ScaledDotProductAttention::MHAExecutor : public ScaledDotProductAttention
         attn_mask = attn_mask.reshape({B, 1, 1, L0 + L1});
         present_key = kv_cache.slice(0, 2 * layer_id, 2 * layer_id).slice(2, 0, L0 + L1);
         present_value = kv_cache.slice(0, 2 * layer_id + 1, 2 * layer_id + 1).slice(2, 0, L0 + L1);
+        auto B_max = present_key.size(0);
+        if (B != B_max) {
+            OPENVINO_ASSERT(B_max % B == 0, "max batch must be multiple of current batch");
+            auto Hk = kv_cache.size(2);
+            auto max_kv_len = kv_cache.size(3);
+            // [B, Hk, max_kv_len, S]
+            auto key = present_key.reshape({B, B_max / B, Hk, max_kv_len, S});
+            present_key.m_strides[0] = key.m_strides[0];
+            present_value.m_strides[0] = key.m_strides[0];
+            present_key.m_dims[0] = key.m_dims[0];
+            present_value.m_dims[0] = key.m_dims[0];
+        }
 
         // rope & concat
         rope_concat(q_input, k_input, v_input, cos_tab, sin_tab, present_key, present_value, config.config_mha.rotary_dims, L0);
