@@ -727,7 +727,11 @@ inline void attn_softmax_kernel(float* a,
     // exp sum
     exp_reduce_sum(a, max, len, sum);
     // divide sum
-    float scalar = 1.0f / sum;
+    float scalar;
+    if (std::abs(sum) > 1e-20)
+        scalar = 1.0f / sum;
+    else
+        scalar = std::numeric_limits<float>::max();
     if (dst_precision == ov::element::f32) {
         multiply_scalar(a, static_cast<float*>(a_dst), scalar, len);
         // apply causual mask to final result instead of attn_score
