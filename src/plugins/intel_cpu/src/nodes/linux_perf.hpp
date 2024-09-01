@@ -32,6 +32,7 @@ inline int perf_event_open(struct perf_event_attr *attr, pid_t pid, int cpu, int
 #include <set>
 #include <iomanip>
 #include <functional>
+#include <limits>
 
 namespace LinuxPerf {
 
@@ -216,7 +217,7 @@ struct PerfRawConfig {
                         }
                     }
                     if (items[0] == "dump")
-                        dump = -1; // no limit to number of dumps
+                        dump = std::numeric_limits<int64_t>::max(); // no limit to number of dumps
                 }
             }
 
@@ -242,7 +243,9 @@ struct PerfRawConfig {
     bool dump_on_cpu(int cpu) {
         if (dump == 0)
             return false;
-        return CPU_ISSET(cpu, &cpu_mask);
+        if (CPU_COUNT(&cpu_mask))
+            return CPU_ISSET(cpu, &cpu_mask);
+        return true;
     }
 
     int64_t dump = 0;
@@ -286,7 +289,7 @@ struct PerfEventCtxSwitch : public IPerfEventDumper {
 
             long number_of_processors = sysconf(_SC_NPROCESSORS_ONLN);
             printf(LINUX_PERF_"sizeof(cpu_set_t):%lu: _SC_NPROCESSORS_ONLN=%ld CPU_COUNT=%d\n", sizeof(cpu_set_t), number_of_processors, CPU_COUNT(&mask));
-            if (CPU_COUNT(&mask) > number_of_processors) {
+            if (CPU_COUNT(&mask) >= number_of_processors) {
                 printf(LINUX_PERF_" no affinity is set, will not enable PerfEventCtxSwitch\n");
                 is_enabled = false;
                 return;
@@ -396,7 +399,7 @@ struct PerfEventCtxSwitch : public IPerfEventDumper {
             auto cpu_id = d.cpu;
 
             fw << "{\"ph\": \"X\", \"name\": \"" << d.tid << "\", \"cat\":\"" << cat << "\","
-                << "\"pid\": " << pid << ", \"tid\": \"CPU" << std::setfill('0') << std::setw(3) << cpu_id <<  "\","
+                << "\"pid\": " << pid << ", \"tid\": \"CPU" << cpu_id <<  "\","
                 << "\"ts\": " << std::setprecision (15) << start << ", \"dur\": " << duration << "},\n";
         }
     }
@@ -549,7 +552,7 @@ struct PerfEventGroup : public IPerfEventDumper {
         uint64_t pmc_index = 0;
         perf_event_mmap_page* pmeta = nullptr;
         std::string name = "?";
-        char format[16];
+        char format[32];
     };
     std::vector<event> events;
 
@@ -577,9 +580,45 @@ struct PerfEventGroup : public IPerfEventDumper {
         uint64_t tsc_end;
         std::string title;
         const char * cat;
-        uint32_t id;
+        int32_t id;
         static const int data_size = 16; // 4(fixed) + 8(PMU) + 4(software)
         uint64_t data[data_size] = {0};
+        // f/i/u/p
+        char extra_data_type[data_size] = {0};
+        union {
+            double f;
+            int64_t i;
+            void * p;
+        } extra_data[data_size];
+
+        template<typename T>
+        char get_extra_type(T t) {
+            if (std::is_pointer<T>::value) return 'p';
+            if (std::is_floating_point<T>::value) return 'f';
+            if (std::is_integral<T>::value) return 'i';
+            return '\0';
+        }
+        template<typename T>
+        void set_extra_data(int i, T* t) { extra_data[i].p = t; }
+        void set_extra_data(int i, float t) { extra_data[i].f = t; }
+        void set_extra_data(int i, double t) { extra_data[i].f = t; }
+        template<typename T>
+        void set_extra_data(int i, T t) {
+            static_assert(std::is_integral<T>::value);
+            extra_data[i].i = t;
+        }
+
+        template <typename ... Values>
+        void set_extra_data(Values... vals) {
+            static_assert(data_size >= sizeof...(vals));
+            int j = 0;
+            int unused1[] = { 0, (set_extra_data(j++, vals), 0)... };
+            (void)unused1;
+            j = 0;
+            int unused2[] = { 0, (extra_data_type[j++] = get_extra_type(vals), 0)... };
+            (void)unused2;
+            extra_data_type[j] = '\0';
+        }
 
         ProfileData(const std::string& title) : title(title) {
             start();
@@ -616,9 +655,22 @@ struct PerfEventGroup : public IPerfEventDumper {
             auto start = tsc.tsc_to_usec(d.tsc_start);
             //auto end = tsc.tsc_to_usec(d.tsc_end);
 
-            fw << "{\"ph\": \"X\", \"name\": \"" << title << "\", \"cat\":\"" << cat << "\","
-                << "\"pid\": " << my_pid << ", \"tid\": " << my_tid << ","
-                << "\"ts\": " << std::setprecision (15) << start << ", \"dur\": " << duration << ",";
+            if (d.id < 0) {
+                // async events
+                // {"cat": "foo", "name": "async_read2", "pid": 4092243, "id": 4092246, "ph": "b", "ts": 23819.718},
+                fw << "{\"ph\": \"b\", \"name\": \"" << d.title << "\", \"cat\":\"" << cat << "\","
+                    << "\"pid\": " << my_pid << ", \"id\": " << (-d.id) << ","
+                    << "\"ts\": " << std::setprecision (15) << start << "},";
+
+                fw << "{\"ph\": \"e\", \"name\": \"" << d.title << "\", \"cat\":\"" << cat << "\","
+                    << "\"pid\": " << my_pid << ", \"id\": " << (-d.id) << ","
+                    << "\"ts\": " << std::setprecision (15) << tsc.tsc_to_usec(d.tsc_end) << ",";
+            } else {
+                fw << "{\"ph\": \"X\", \"name\": \"" << title << "\", \"cat\":\"" << cat << "\","
+                    << "\"pid\": " << my_pid << ", \"tid\": " << my_tid << ","
+                    << "\"ts\": " << std::setprecision (15) << start << ", \"dur\": " << duration << ",";
+            }
+
             fw << "\"args\":{";
             {
                 std::stringstream ss;
@@ -638,11 +690,24 @@ struct PerfEventGroup : public IPerfEventDumper {
                         ss << "\"CPI\":" << static_cast<double>(d.data[hw_cpu_cycles_evid])/d.data[hw_instructions_evid] << ",";
                     }
                 }
-                ss.imbue(std::locale(""));
+                auto prev_locale = ss.imbue(std::locale(""));
                 const char * sep = "";
                 for(size_t i = 0; i < events.size() && i < d.data_size; i++) {
                     ss << sep << "\"" << events[i].name << "\":\"" << d.data[i] << "\"";
                     sep = ",";
+                }
+                ss.imbue(prev_locale);
+                if (d.extra_data_type[0] != 0) {
+                    sep = "";
+                    ss << ",\"Extra Data\":[";
+                    for(size_t i = 0; i < d.data_size && (d.extra_data_type[i] != 0); i++) {
+                        if (d.extra_data_type[i] == 'f') ss << sep << d.extra_data[i].f;
+                        else if (d.extra_data_type[i] == 'i') ss << sep << d.extra_data[i].i;
+                        else if (d.extra_data_type[i] == 'p') ss << sep << "\"" << d.extra_data[i].p << "\"";
+                        else ss << sep << "\"?\"";
+                        sep = ",";
+                    }
+                    ss << "]";
                 }
                 fw << ss.str();
             }
@@ -686,7 +751,7 @@ struct PerfEventGroup : public IPerfEventDumper {
                 add_raw(tc.config);
             }
             events.back().name = tc.name;
-            sprintf(events.back().format, "%%%lulu, ", strlen(tc.name));
+            snprintf(events.back().format, sizeof(events.back().format), "%%%lulu, ", strlen(tc.name));
         }
 
         // env var defined raw events
@@ -893,48 +958,68 @@ struct PerfEventGroup : public IPerfEventDumper {
     }
 
     template<class FN>
-    std::vector<uint64_t> rdpmc(FN fn, std::string name = {}, int64_t loop_cnt = 0, std::function<void(uint64_t, uint64_t*)> addinfo = {}) {
+    std::vector<uint64_t> rdpmc(FN fn, std::string name = {}, int64_t loop_cnt = 0, std::function<void(uint64_t, uint64_t*, char*&)> addinfo = {}) {
         int cnt = events.size();
         std::vector<uint64_t> pmc(cnt, 0);
 
-        for(int i = 0; i < cnt; i++) {
-            if (events[i].pmc_index)
-                pmc[i] = _rdpmc(events[i].pmc_index - 1);
-            else
-                pmc[i] = 0;
+        bool use_pmc = (num_events_no_pmc == 0);
+        if (use_pmc) {
+            for(int i = 0; i < cnt; i++) {
+                if (events[i].pmc_index)
+                    pmc[i] = _rdpmc(events[i].pmc_index - 1);
+                else
+                    pmc[i] = 0;
+            }
+        } else {
+            read();
+            for(int i = 0; i < cnt; i++) {
+                pmc[i] = values[i];
+            }
         }
+
         auto tsc0 = __rdtsc();
         fn();
         auto tsc1 = __rdtsc();
-        for(int i = 0; i < cnt; i++) {
-            if (events[i].pmc_index)
-                pmc[i] = (_rdpmc(events[i].pmc_index - 1) - pmc[i]) & pmc_mask;
-            else
-                pmc[i] = 0;
+
+        if (use_pmc) {
+            for(int i = 0; i < cnt; i++) {
+                if (events[i].pmc_index)
+                    pmc[i] = (_rdpmc(events[i].pmc_index - 1) - pmc[i]) & pmc_mask;
+                else
+                    pmc[i] = 0;
+            }
+        } else {
+            read();
+            for(int i = 0; i < cnt; i++) {
+                pmc[i] -= values[i];
+            }
         }
 
         if (!name.empty()) {
-            printf("\e[33m");
+            char log_buff[1024];
+            char * log = log_buff;
+            log += sprintf(log, "\e[33m");
             for(int i = 0; i < cnt; i++) {
-                printf(events[i].format, pmc[i]);
+                log += sprintf(log, events[i].format, pmc[i]);
             }
             auto duration_ns = tsc2nano(tsc1 - tsc0);
             
-            printf("\e[0m [%16s] %.3f us", name.c_str(), duration_ns/1e3);
+            log += sprintf(log, "\e[0m [%16s] %.3f us", name.c_str(), duration_ns/1e3);
             if (hw_cpu_cycles_evid >= 0) {
-                printf(" CPU:%.2f(GHz)", 1.0 * pmc[hw_cpu_cycles_evid] / duration_ns);
+                log += sprintf(log, " CPU:%.2f(GHz)", 1.0 * pmc[hw_cpu_cycles_evid] / duration_ns);
                 if (hw_instructions_evid >= 0) {
-                    printf(" CPI:%.2f", 1.0 * pmc[hw_cpu_cycles_evid] / pmc[hw_instructions_evid]);
+                    log += sprintf(log, " CPI:%.2f", 1.0 * pmc[hw_cpu_cycles_evid] / pmc[hw_instructions_evid]);
                 }
                 if (loop_cnt > 0) {
                     // cycles per kernel (or per-iteration)
-                    printf(" CPK:%.1fx%d", 1.0 * pmc[hw_cpu_cycles_evid] / loop_cnt, loop_cnt);
+                    log += sprintf(log, " CPK:%.1fx%d", 1.0 * pmc[hw_cpu_cycles_evid] / loop_cnt, loop_cnt);
                 }
             }
             if (addinfo) {
-                addinfo(duration_ns, &pmc[0]);
+                addinfo(duration_ns, &pmc[0], log);
             }
-            printf("\n");
+            log += sprintf(log, "\n");
+            printf(log_buff);
         }
         return pmc;
     }
@@ -983,8 +1068,9 @@ struct PerfEventGroup : public IPerfEventDumper {
     struct ProfileScope {
         PerfEventGroup* pevg = nullptr;
         ProfileData* pd = nullptr;
+        bool do_unlock = false;
         ProfileScope() = default;
-        ProfileScope(PerfEventGroup* pevg, ProfileData* pd) : pevg(pevg), pd(pd) {}
+        ProfileScope(PerfEventGroup* pevg, ProfileData* pd, bool do_unlock = false) : pevg(pevg), pd(pd), do_unlock(do_unlock) {}
 
         // Move only
         ProfileScope(const ProfileScope&) = delete;
@@ -1009,6 +1095,9 @@ struct PerfEventGroup : public IPerfEventDumper {
         }
 
         uint64_t* finish() {
+            if (do_unlock) {
+                PerfEventGroup::get_sampling_lock() --;
+            }
             if (!pevg || !pd)
                 return nullptr;
 
@@ -1035,8 +1124,10 @@ struct PerfEventGroup : public IPerfEventDumper {
     };
 
     ProfileData* _profile(const std::string& title, int id = 0) {
+        if (get_sampling_lock().load() != 0)
+            return nullptr;
         if (dump_limit == 0)
-            return {};
+            return nullptr;
         dump_limit --;
 
         PerfEventCtxSwitch::get().updateRingBuffer();
@@ -1061,25 +1152,62 @@ struct PerfEventGroup : public IPerfEventDumper {
         return pd;
     }
 
-    ProfileScope Profile(const std::string& title, int id = 0) {
-        return {this, _profile(title, id)};
+    static PerfEventGroup& get() {
+        thread_local PerfEventGroup pevg({
+            {PERF_TYPE_HARDWARE, PERF_COUNT_HW_CPU_CYCLES, "HW_CPU_CYCLES"},
+            {PERF_TYPE_HARDWARE, PERF_COUNT_HW_INSTRUCTIONS, "HW_INSTRUCTIONS"},
+            {PERF_TYPE_HARDWARE, PERF_COUNT_HW_CACHE_MISSES, "HW_CACHE_MISSES"},
+            //{PERF_TYPE_HARDWARE, PERF_COUNT_HW_REF_CPU_CYCLES, "HW_REF_CPU_CYCLES"},
+            {PERF_TYPE_SOFTWARE, PERF_COUNT_SW_CONTEXT_SWITCHES, "SW_CONTEXT_SWITCHES"},
+            {PERF_TYPE_SOFTWARE, PERF_COUNT_SW_TASK_CLOCK, "SW_TASK_CLOCK"},
+            {PERF_TYPE_SOFTWARE, PERF_COUNT_SW_PAGE_FAULTS, "SW_PAGE_FAULTS"},
+
+            // XSNP_NONE                : ... were hits in L3 without snoops required                (data is not owned by any other core's local cache)
+            // XSNP_FWD   /XSNP_HITM    : ... were HitM responses from shared L3                     (data was exclusivly/dirty owned by another core's local cache)
+            // XSNP_NO_FWD/XSNP_HIT     : ... were L3 and cross-core snoop hits in on-pkg core cache (data was shared/clean in another core's local cache)
+
+            {PERF_TYPE_RAW, X86_RAW_EVENT(0xd2, 0x01, 0x00), "XSNP_MISS"},
+            {PERF_TYPE_RAW, X86_RAW_EVENT(0xd2, 0x02, 0x00), "XSNP_NO_FWD"},
+            {PERF_TYPE_RAW, X86_RAW_EVENT(0xd2, 0x04, 0x00), "XSNP_FWD"},
+            {PERF_TYPE_RAW, X86_RAW_EVENT(0xd2, 0x08, 0x00), "XSNP_NONE"},              
+        });
+        return pevg;
+    }
+
+    // this lock is global, affect all threads
+    static std::atomic_int& get_sampling_lock() {
+        static std::atomic_int sampling_lock{0};
+        return sampling_lock;
     }
 };
 
 using ProfileScope = PerfEventGroup::ProfileScope;
 
 // pwe-thread event group with default events pre-selected
-inline ProfileScope Profile(const std::string& title, int id = 0) {
-    thread_local PerfEventGroup pevg({
-        {PERF_TYPE_HARDWARE, PERF_COUNT_HW_CPU_CYCLES, "HW_CPU_CYCLES"},
-        {PERF_TYPE_HARDWARE, PERF_COUNT_HW_INSTRUCTIONS, "HW_INSTRUCTIONS"},
-        {PERF_TYPE_HARDWARE, PERF_COUNT_HW_CACHE_MISSES, "HW_CACHE_MISSES"},
-        //{PERF_TYPE_HARDWARE, PERF_COUNT_HW_REF_CPU_CYCLES, "HW_REF_CPU_CYCLES"},
-        {PERF_TYPE_SOFTWARE, PERF_COUNT_SW_CONTEXT_SWITCHES, "SW_CONTEXT_SWITCHES"},
-        {PERF_TYPE_SOFTWARE, PERF_COUNT_SW_TASK_CLOCK, "SW_TASK_CLOCK"},
-        {PERF_TYPE_SOFTWARE, PERF_COUNT_SW_PAGE_FAULTS, "SW_PAGE_FAULTS"}
-    });
-    return {&pevg, pevg._profile(title, id)};
+template <typename ... Args>
+ProfileScope Profile(const std::string& title, int id = 0, Args&&... args) {
+    auto& pevg = PerfEventGroup::get();
+    auto* pd = pevg._profile(title, id);
+    if (pd) {
+        pd->set_extra_data(std::forward<Args>(args)...);
+    }
+    return {&pevg, pd};
+}
+
+// overload accept sampling_probability, which can be used to disable profile in scope 
+template <typename ... Args>
+ProfileScope Profile(float sampling_probability, const std::string& title, int id = 0, Args&&... args) {
+    auto& pevg = PerfEventGroup::get();
+    auto* pd = pevg._profile(title, id);
+    if (pd) {
+        pd->set_extra_data(std::forward<Args>(args)...);
+    }
+
+    bool disable_profile = ((std::rand() % 1000)*0.001f >= sampling_probability);
+    if (disable_profile) {
+        PerfEventGroup::get_sampling_lock() ++;
+    }
+    return {&pevg, pd, disable_profile};
 }
 
 inline int Init() {
@@ -1092,34 +1220,3 @@ inline int Init() {
 }
 
 } // namespace LinuxPerf
-
-
-
-#if 0
-
-#ifdef IMPLEMENT
-extern "C" void* profile_start() {
-    thread_local PerfEventGroup pevg({
-        {PERF_TYPE_HARDWARE, PERF_COUNT_HW_CPU_CYCLES, "HW_CPU_CYCLES"},
-        {PERF_TYPE_HARDWARE, PERF_COUNT_HW_INSTRUCTIONS, "HW_INSTRUCTIONS"},
-        {PERF_TYPE_HARDWARE, PERF_COUNT_HW_CACHE_MISSES, "HW_CACHE_MISSES"},
-        //{PERF_TYPE_HARDWARE, PERF_COUNT_HW_REF_CPU_CYCLES, "HW_REF_CPU_CYCLES"},
-        {PERF_TYPE_SOFTWARE, PERF_COUNT_SW_CONTEXT_SWITCHES, "SW_CONTEXT_SWITCHES"},
-        {PERF_TYPE_SOFTWARE, PERF_COUNT_SW_TASK_CLOCK, "SW_TASK_CLOCK"},
-        {PERF_TYPE_SOFTWARE, PERF_COUNT_SW_PAGE_FAULTS, "SW_PAGE_FAULTS"}
-    });
-    return pevg.start_profile(title, id);
-}
-
-#else
-
-// weak symbol as a stub/proxy, LD_PRELOAD
-extern "C" void* profile_start() __attribute__ ((weak)) {
-    return nullptr;
-}
-extern "C" void profile_finish(void* p) __attribute__ ((weak)) {
-}
-
-extern "C" void profile_finish(void* p) __attribute__ ((weak)) {
-#endif
-#endif

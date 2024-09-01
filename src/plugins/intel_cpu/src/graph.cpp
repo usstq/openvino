@@ -1342,7 +1342,7 @@ public:
 template<typename UpdateStrategy>
 void Graph::InferDynamic(SyncInferRequest* request, UpdateStrategy&& update) {
     size_t inferCounter = 0;
-    auto perf = LinuxPerf::Profile(std::string("Graph::InferDynamic_#"), infer_count);
+    auto perf = LinuxPerf::Profile(std::string("Graph::InferDynamic_#"));
     for (auto stopIndx : m_executableSyncNodesInds) {
         update(stopIndx);
 

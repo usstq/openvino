@@ -966,7 +966,7 @@ struct ScaledDotProductAttention::MHAExecutor : public ScaledDotProductAttention
         PlainTensor q_input;                        // fx[B, L1, H * S]
         PlainTensor k_input;
         PlainTensor v_input;
-        PlainTensor kv_cache;                       // [2 * layer_num, B, Hk, max_kv_len, S]
+        PlainTensor kv_cache;                       // [2 * layer_num, max_kv_len, B, Hk, S]
         PlainTensor present_key, present_value;     // [B, Hk, max_kv_len, S]
         PlainTensor beam_table;                     // i32[B, max_kv_len]
         PlainTensor attn_mask;                      // fx[B, L0 + L1]
@@ -1007,20 +1007,26 @@ struct ScaledDotProductAttention::MHAExecutor : public ScaledDotProductAttention
         k_input = k_input.reshape({B, L1, H, S}).permute({0, 2, 1, 3});
         v_input = v_input.reshape({B, L1, H, S}).permute({0, 2, 1, 3});
         attn_mask = attn_mask.reshape({B, 1, 1, L0 + L1});
-        present_key = kv_cache.slice(0, 2 * layer_id, 2 * layer_id).slice(2, 0, L0 + L1);
-        present_value = kv_cache.slice(0, 2 * layer_id + 1, 2 * layer_id + 1).slice(2, 0, L0 + L1);
-        auto B_max = present_key.size(0);
+
+        // [2 * layer_num, max_kv_len, B_max, Hk, S] => [L0+L1, B_max, Hk, S]
+        present_key = kv_cache.slice(0, 2 * layer_id, 2 * layer_id).slice(0, 0, L0 + L1);
+        present_value = kv_cache.slice(0, 2 * layer_id + 1, 2 * layer_id + 1).slice(0, 0, L0 + L1);
+        auto B_max = present_key.size(1);
         if (B != B_max) {
             OPENVINO_ASSERT(B_max % B == 0, "max batch must be multiple of current batch");
-            auto Hk = kv_cache.size(2);
-            auto max_kv_len = kv_cache.size(3);
-            // [B, Hk, max_kv_len, S]
-            auto key = present_key.reshape({B, B_max / B, Hk, max_kv_len, S});
-            present_key.m_strides[0] = key.m_strides[0];
-            present_value.m_strides[0] = key.m_strides[0];
-            present_key.m_dims[0] = key.m_dims[0];
-            present_value.m_dims[0] = key.m_dims[0];
+            auto num_beams = B_max / B;
+            // [L, B_Max(B*num_beams), H, S]
+            // make (num_beams - 1) batch item as padding
+            present_key.m_dims[1] /= num_beams;     // = B_max/num_beams
+            present_key.m_strides[1] *= num_beams;
+
+            present_value.m_dims[1] /= num_beams;
+            present_value.m_strides[1] *= num_beams;
         }
+
+        // L,B,H,S => B,H,L,S
+        present_key = present_key.permute({1,2,0,3});
+        present_value = present_value.permute({1,2,0,3});
 
         // rope & concat
         rope_concat(q_input, k_input, v_input, cos_tab, sin_tab, present_key, present_value, config.config_mha.rotary_dims, L0);
