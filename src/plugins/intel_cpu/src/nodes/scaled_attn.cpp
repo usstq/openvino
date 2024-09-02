@@ -968,6 +968,7 @@ struct ScaledDotProductAttention::MHAExecutor : public ScaledDotProductAttention
         PlainTensor v_input;
         PlainTensor kv_cache;                       // [2 * layer_num, max_kv_len, B, Hk, S]
         PlainTensor present_key, present_value;     // [B, Hk, max_kv_len, S]
+        PlainTensor beam_input;
         PlainTensor beam_table;                     // i32[B, max_kv_len]
         PlainTensor attn_mask;                      // fx[B, L0 + L1]
         PlainTensor cos_tab;                        // f32[max_kv_len, rotary_dims]
@@ -981,7 +982,7 @@ struct ScaledDotProductAttention::MHAExecutor : public ScaledDotProductAttention
         k_input.reset(inputs[1]);
         v_input.reset(inputs[2]);
         kv_cache.reset(inputs[3]);
-        beam_table.reset(inputs[4]);
+        beam_input.reset(inputs[4]);
         attn_mask.reset(inputs[5]);
         cos_tab.reset(inputs[6]);
         sin_tab.reset(inputs[7]);
@@ -997,8 +998,9 @@ struct ScaledDotProductAttention::MHAExecutor : public ScaledDotProductAttention
         k_input.assert_dims({B, L1, H * S});
         v_input.assert_dims({B, L1, H * S});
         //kv_cache.assert_dims({0, 0, Hk, 0, S}, true);
-        // if (beam_table)
-        //     beam_table.assert_dims({B, 0}, true);
+        // greedy-search will not use beam input
+        if (beam_input.m_dims[0])
+            beam_table = beam_input;
         attn_mask.assert_dims({B, L0 + L1});
         cos_tab.assert_dims({0, static_cast<size_t>(config.config_mha.rotary_dims)}, true);
         sin_tab.assert_dims({0, static_cast<size_t>(config.config_mha.rotary_dims)}, true);
