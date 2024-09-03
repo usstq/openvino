@@ -7,6 +7,7 @@
 #include "shape_inference/shape_inference_cpu.hpp"
 #include "shape_inference/shape_inference_ngraph.hpp"
 #include "transformations/cpu_opset/common/op/sdpa.hpp"
+#include "openvino/op/mha.hpp"
 #include "utils.hpp"
 
 namespace ov {
@@ -55,11 +56,12 @@ private:
 
 class MultiHeadAttentionShapeInfer : public ShapeInferEmptyPads {
 public:
-    MultiHeadAttentionShapeInfer() {}
+    MultiHeadAttentionShapeInfer(size_t hidden_size) : m_hidden_size(hidden_size) {}
 
     IShapeInfer::Result infer(const std::vector<std::reference_wrapper<const VectorDims>>& input_shapes,
                               const std::unordered_map<size_t, MemoryPtr>& data_dependency) override {
-        const auto& query_dims = input_shapes.front().get();
+        auto query_dims = input_shapes[5].get();
+        query_dims.back() = m_hidden_size;
 
         return {{query_dims}, ShapeInferStatus::success};
     }
@@ -67,13 +69,15 @@ public:
     port_mask_t get_port_mask() const override {
         return EMPTY_PORT_MASK;
     }
+private:
+    size_t m_hidden_size;
 };
 
 ShapeInferPtr SDPAShapeInferFactory::makeShapeInfer() const {
-    if (m_op->get_type_name() == std::string("MultiHeadAttention")) {
-        return std::make_shared<MultiHeadAttentionShapeInfer>();
-    }
-    if (auto sdpa = std::dynamic_pointer_cast<const ScaledDotProductAttentionWithKVCache>(m_op)) {
+    if (auto mha = std::dynamic_pointer_cast<const op::v15::MultiHeadAttention>(m_op)) {
+        const auto& config = mha->get_config();
+        return std::make_shared<MultiHeadAttentionShapeInfer>(static_cast<size_t>(config.n_hidden));
+    } else if (auto sdpa = std::dynamic_pointer_cast<const ScaledDotProductAttentionWithKVCache>(m_op)) {
         const auto& config = sdpa->get_config();
         if (config.output_BLHxS == false)
             return std::make_shared<SDPAShapeInfer>(config);

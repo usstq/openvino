@@ -978,14 +978,14 @@ struct ScaledDotProductAttention::MHAExecutor : public ScaledDotProductAttention
         size_t B, L1, L0, S, H;
 
         // init
-        q_input.reset(inputs[0]);
-        k_input.reset(inputs[1]);
-        v_input.reset(inputs[2]);
-        kv_cache.reset(inputs[3]);
-        beam_input.reset(inputs[4]);
-        attn_mask.reset(inputs[5]);
-        cos_tab.reset(inputs[6]);
-        sin_tab.reset(inputs[7]);
+        kv_cache.reset(inputs[0]);
+        beam_input.reset(inputs[1]);
+        attn_mask.reset(inputs[2]);
+        cos_tab.reset(inputs[3]);
+        sin_tab.reset(inputs[4]);
+        q_input.reset(inputs[5]);
+        k_input.reset(inputs[6]);
+        v_input.reset(inputs[7]);
 
         B = q_input.size(0);
         L1 = q_input.size(1);
@@ -1209,17 +1209,18 @@ void ScaledDotProductAttention::initSupportedPrimitiveDescriptors() {
     auto rtPrecision = getRuntimePrecision();
     NodeConfig config;
     auto& creatorsMap = BlockedDescCreator::getCommonCreators();
-    config.inConfs.resize(getOriginalInputsNumber());
+    auto input_num = getOriginalInputsNumber(); 
+    config.inConfs.resize(input_num);
     config.outConfs.resize(getOriginalOutputsNumber());
-    // q, k, v
-    config.inConfs[0].setMemDesc(creatorsMap.at(LayoutType::ncsp)->createSharedDesc(
-        rtPrecision, getInputShapeAtPort(0)));
-    config.inConfs[1].setMemDesc(creatorsMap.at(LayoutType::ncsp)->createSharedDesc(
-        rtPrecision, getInputShapeAtPort(1)));
-    config.inConfs[2].setMemDesc(creatorsMap.at(LayoutType::ncsp)->createSharedDesc(
-        rtPrecision, getInputShapeAtPort(2)));
     if (!m_config.mha_valid) {
-        auto orginSDPInputNumber = getOriginalInputsNumber() - (m_config.config.fuse_concat ? 3 : 0);
+        // q, k, v
+        config.inConfs[0].setMemDesc(creatorsMap.at(LayoutType::ncsp)->createSharedDesc(
+            rtPrecision, getInputShapeAtPort(0)));
+        config.inConfs[1].setMemDesc(creatorsMap.at(LayoutType::ncsp)->createSharedDesc(
+            rtPrecision, getInputShapeAtPort(1)));
+        config.inConfs[2].setMemDesc(creatorsMap.at(LayoutType::ncsp)->createSharedDesc(
+            rtPrecision, getInputShapeAtPort(2)));
+        auto orginSDPInputNumber = input_num - (m_config.config.fuse_concat ? 3 : 0);
 
         auto nextPortIdx = 3;
         if (orginSDPInputNumber > 3) {
@@ -1267,20 +1268,34 @@ void ScaledDotProductAttention::initSupportedPrimitiveDescriptors() {
         }
     } else {
         // kvcache
-        config.inConfs[3].setMemDesc(creatorsMap.at(LayoutType::ncsp)->createSharedDesc(
-            getOriginalInputPrecisionAtPort(3), getInputShapeAtPort(3)));
+        config.inConfs[0].setMemDesc(creatorsMap.at(LayoutType::ncsp)->createSharedDesc(
+            getOriginalInputPrecisionAtPort(0), getInputShapeAtPort(0)));
         // beam table
-        config.inConfs[4].setMemDesc(creatorsMap.at(LayoutType::ncsp)->createSharedDesc(
-            ov::element::i32, getInputShapeAtPort(4)));
+        config.inConfs[1].setMemDesc(creatorsMap.at(LayoutType::ncsp)->createSharedDesc(
+            ov::element::i32, getInputShapeAtPort(1)));
         // attn_mask
-        config.inConfs[5].setMemDesc(creatorsMap.at(LayoutType::ncsp)->createSharedDesc(
-            rtPrecision, getInputShapeAtPort(5)));
+        config.inConfs[2].setMemDesc(creatorsMap.at(LayoutType::ncsp)->createSharedDesc(
+            rtPrecision, getInputShapeAtPort(2)));
         // cos_tab
-        config.inConfs[6].setMemDesc(creatorsMap.at(LayoutType::ncsp)->createSharedDesc(
-            ov::element::f32, getInputShapeAtPort(6)));
+        config.inConfs[3].setMemDesc(creatorsMap.at(LayoutType::ncsp)->createSharedDesc(
+            ov::element::f32, getInputShapeAtPort(3)));
         // sin_tab
-        config.inConfs[7].setMemDesc(creatorsMap.at(LayoutType::ncsp)->createSharedDesc(
-            ov::element::f32, getInputShapeAtPort(7)));
+        config.inConfs[4].setMemDesc(creatorsMap.at(LayoutType::ncsp)->createSharedDesc(
+            ov::element::f32, getInputShapeAtPort(4)));
+        if (input_num == 5) {
+            // qkv
+            config.inConfs[5].setMemDesc(creatorsMap.at(LayoutType::ncsp)->createSharedDesc(
+                rtPrecision, getInputShapeAtPort(5)));
+        } else {
+            OPENVINO_ASSERT(input_num == 8, "input number should be 8 for MultiHeadAttention");
+            // q, k, v
+            config.inConfs[5].setMemDesc(creatorsMap.at(LayoutType::ncsp)->createSharedDesc(
+                rtPrecision, getInputShapeAtPort(5)));
+            config.inConfs[6].setMemDesc(creatorsMap.at(LayoutType::ncsp)->createSharedDesc(
+                rtPrecision, getInputShapeAtPort(6)));
+            config.inConfs[7].setMemDesc(creatorsMap.at(LayoutType::ncsp)->createSharedDesc(
+                rtPrecision, getInputShapeAtPort(7)));
+        }
     }
     config.outConfs[0].setMemDesc(creatorsMap.at(LayoutType::ncsp)->createSharedDesc(
         rtPrecision, getOutputShapeAtPort(0)));
@@ -1947,7 +1962,7 @@ ov::element::Type ScaledDotProductAttention::getKVCachePrecision() {
 }
 
 ov::element::Type ScaledDotProductAttention::getRuntimePrecision() const {
-    auto rtPrecision = getOriginalInputPrecisionAtPort(0);
+    auto rtPrecision = getOriginalInputPrecisionAtPort(m_config.mha_valid ? 5 : 0);
     // bf16 should be enabled only when platform supports
     if (rtPrecision == ov::element::bf16 && ov::with_cpu_x86_bfloat16()) {
         rtPrecision = ov::element::bf16;

@@ -24,7 +24,9 @@ public:
     }
     // pastkv may have zero dimension
     bool isExecutable() const override {
-        return !isInputTensorAtPortEmpty(0) && !isInputTensorAtPortEmpty(1) && !isInputTensorAtPortEmpty(2);
+        if (!m_config.mha_valid)
+            return !isInputTensorAtPortEmpty(0) && !isInputTensorAtPortEmpty(1) && !isInputTensorAtPortEmpty(2);
+        return true;
     }
     bool needPrepareParams() const override {
         return false;
