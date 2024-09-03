@@ -975,7 +975,7 @@ struct ScaledDotProductAttention::MHAExecutor : public ScaledDotProductAttention
         PlainTensor sin_tab;                        // f32[max_kv_len, rotary_dims]
         PlainTensor output_emb(output);         // fx[B, L1, H * S]
         float scale_input = 0.0f;
-        size_t B, L1, L0, S, H;
+        size_t B, L1, L0, S, H, Hk;
 
         // init
         kv_cache.reset(inputs[0]);
@@ -983,20 +983,31 @@ struct ScaledDotProductAttention::MHAExecutor : public ScaledDotProductAttention
         attn_mask.reset(inputs[2]);
         cos_tab.reset(inputs[3]);
         sin_tab.reset(inputs[4]);
-        q_input.reset(inputs[5]);
-        k_input.reset(inputs[6]);
-        v_input.reset(inputs[7]);
+        S = kv_cache.size(4);
+        H = config.config_mha.n_head;
+        Hk = config.config_mha.num_kv_heads;
+        if (Hk == 0)
+            Hk = H;
+        if (inputs.size() == 6) {
+            PlainTensor qkv;
+            qkv.reset(inputs[5]);
+            q_input = qkv.slice(2, 0, H * S);
+            k_input = qkv.slice(2, H * S, (H + Hk) * S);
+            v_input = qkv.slice(2, (H + Hk) * S, (H + 2 * Hk) * S);
+        } else {
+            q_input.reset(inputs[5]);
+            k_input.reset(inputs[6]);
+            v_input.reset(inputs[7]);
+        }
 
         B = q_input.size(0);
         L1 = q_input.size(1);
-        S = kv_cache.size(4);
         L0 = attn_mask.size(1) - L1;
-        H = config.config_mha.n_head;
         auto layer_id = config.config_mha.layer_id;
 
         q_input.assert_dims({B, L1, H * S});
-        k_input.assert_dims({B, L1, H * S});
-        v_input.assert_dims({B, L1, H * S});
+        k_input.assert_dims({B, L1, Hk * S});
+        v_input.assert_dims({B, L1, Hk * S});
         //kv_cache.assert_dims({0, 0, Hk, 0, S}, true);
         // greedy-search will not use beam input
         if (beam_input.m_dims[0])
@@ -1005,9 +1016,20 @@ struct ScaledDotProductAttention::MHAExecutor : public ScaledDotProductAttention
         cos_tab.assert_dims({0, static_cast<size_t>(config.config_mha.rotary_dims)}, true);
         sin_tab.assert_dims({0, static_cast<size_t>(config.config_mha.rotary_dims)}, true);
         output_emb.assert_dims({B, L1, H * S});
-        q_input = q_input.reshape({B, L1, H, S}).permute({0, 2, 1, 3});
-        k_input = k_input.reshape({B, L1, H, S}).permute({0, 2, 1, 3});
-        v_input = v_input.reshape({B, L1, H, S}).permute({0, 2, 1, 3});
+        if (inputs.size() == 6) {
+            size_t strides[4] = {q_input.m_strides[0], q_input.m_strides[1], S, 1};
+            PlainTensor q_tmp, k_tmp, v_tmp;
+            q_tmp.resize({B, L1, H, S}, q_input.ptr<T>(), strides);
+            q_input = q_tmp.permute({0, 2, 1, 3});
+            k_tmp.resize({B, L1, Hk, S}, k_input.ptr<T>(), strides);
+            k_input = k_tmp.permute({0, 2, 1, 3});
+            v_tmp.resize({B, L1, Hk, S}, v_input.ptr<T>(), strides);
+            v_input = v_tmp.permute({0, 2, 1, 3});
+        } else {
+            q_input = q_input.reshape({B, L1, H, S}).permute({0, 2, 1, 3});
+            k_input = k_input.reshape({B, L1, Hk, S}).permute({0, 2, 1, 3});
+            v_input = v_input.reshape({B, L1, Hk, S}).permute({0, 2, 1, 3});
+        }
         attn_mask = attn_mask.reshape({B, 1, 1, L0 + L1});
 
         // [2 * layer_num, max_kv_len, B_max, Hk, S] => [L0+L1, B_max, Hk, S]
@@ -1282,7 +1304,7 @@ void ScaledDotProductAttention::initSupportedPrimitiveDescriptors() {
         // sin_tab
         config.inConfs[4].setMemDesc(creatorsMap.at(LayoutType::ncsp)->createSharedDesc(
             ov::element::f32, getInputShapeAtPort(4)));
-        if (input_num == 5) {
+        if (input_num == 6) {
             // qkv
             config.inConfs[5].setMemDesc(creatorsMap.at(LayoutType::ncsp)->createSharedDesc(
                 rtPrecision, getInputShapeAtPort(5)));
