@@ -18,10 +18,12 @@ struct jit_rms_compile_params {
     size_t data_size;
     float eps;
     size_t scale_size;
+    bool has_add;
 };
 
 struct jit_rms_call_args {
-    const uint8_t* src;
+    const uint8_t* src0;
+    const uint8_t* src1;
     const float* scale;
     uint8_t* dst;
 };
@@ -65,11 +67,13 @@ private:
     const Vmm vmm_sum2 = Vmm(4);
     const Vmm vmm_sum3 = Vmm(5);
     const Vmm vmm_dst = Vmm(6);
+    const Vmm vmm_src1 = Vmm(8);
     const Xbyak::Reg64 reg_src = r8;
     const Xbyak::Reg64 reg_src_org = r13;
     const Xbyak::Reg64 reg_scale = r10;
     const Xbyak::Reg64 reg_size = r11;
     const Xbyak::Reg64 reg_dst = r12;
+    const Xbyak::Reg64 reg_src1 = r14;
     const Xbyak::Reg64 reg_tmp = rdx;
 
     std::unordered_map<size_t, std::unique_ptr<jit_emitter>> emitters;

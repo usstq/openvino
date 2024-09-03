@@ -14,6 +14,7 @@
 #include "ov_ops/rotary_positional_embeddings.hpp"
 #include "ov_ops/type_relaxed.hpp"
 #include "snippets/op/subgraph.hpp"
+#include "transformations/cpu_opset/common/op/add_rms.hpp"
 #include "transformations/cpu_opset/common/op/causal_mask_preprocess.hpp"
 #include "transformations/cpu_opset/common/op/fully_connected.hpp"
 #include "transformations/cpu_opset/common/op/leaky_relu.hpp"
@@ -92,7 +93,8 @@ private:
     OP_EXTENSION_X64(ov::intel_cpu::StoreConvertSaturation)                 \
     OP_EXTENSION_X64(ov::intel_cpu::StoreConvertTruncation)                 \
     OP_EXTENSION_X64(ov::intel_cpu::BrgemmCPU)                              \
-    OP_EXTENSION_X64(ov::intel_cpu::BrgemmCopyB)
+    OP_EXTENSION_X64(ov::intel_cpu::BrgemmCopyB)                            \
+    OP_EXTENSION_X64(ov::intel_cpu::AddRMSNode)
 
 #define TYPE_RELAXED_EXTENSIONS                                         \
     TYPE_RELAXED_OP_EXTENSION(ov::op::v1::Add)                          \

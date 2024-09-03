@@ -110,9 +110,11 @@ void jit_rms_kernel<isa>::reduce_vmm_to_scalar(
 template <cpu_isa_t isa>
 void jit_rms_kernel<isa>::generate() {
     this->preamble();
-    mov(reg_src, ptr[abi_param1 + GET_OFF(src)]);
+    mov(reg_src, ptr[abi_param1 + GET_OFF(src0)]);
     mov(reg_scale, ptr[abi_param1 + GET_OFF(scale)]);
     mov(reg_dst, ptr[abi_param1 + GET_OFF(dst)]);
+    if (m_jcp.has_add)
+        mov(reg_src1, ptr[abi_param1 + GET_OFF(src1)]);
     uni_vpxor(vmm_sum0, vmm_sum0, vmm_sum0);
     uni_vpxor(vmm_sum1, vmm_sum1, vmm_sum1);
     uni_vpxor(vmm_sum2, vmm_sum2, vmm_sum2);
@@ -127,27 +129,63 @@ void jit_rms_kernel<isa>::generate() {
     L(loop_4reg);
     {
         load(vmm_src, reg_src, m_jcp.src_prc, vec_size, false);
+        if (m_jcp.has_add) {
+            load(vmm_src1, reg_src1, m_jcp.src_prc, vec_size, false);
+            vaddps(vmm_src, vmm_src, vmm_src1);
+            store(reg_src, vmm_src, m_jcp.dst_prc, vec_size);
+        }
         vfmadd231ps(vmm_sum0, vmm_src, vmm_src);
         load(vmm_src, reg_src, m_jcp.src_prc, vec_size, false, vec_size * m_jcp.src_prc.size() * 1);
+        if (m_jcp.has_add) {
+            load(vmm_src1, reg_src1, m_jcp.src_prc, vec_size, false, vec_size * m_jcp.src_prc.size() * 1);
+            vaddps(vmm_src, vmm_src, vmm_src1);
+            store(reg_src, vmm_src, m_jcp.dst_prc, vec_size, vec_size * m_jcp.dst_prc.size() * 1);
+        }
         vfmadd231ps(vmm_sum1, vmm_src, vmm_src);
         load(vmm_src, reg_src, m_jcp.src_prc, vec_size, false, vec_size * m_jcp.src_prc.size() * 2);
+        if (m_jcp.has_add) {
+            load(vmm_src1, reg_src1, m_jcp.src_prc, vec_size, false, vec_size * m_jcp.src_prc.size() * 2);
+            vaddps(vmm_src, vmm_src, vmm_src1);
+            store(reg_src, vmm_src, m_jcp.dst_prc, vec_size, vec_size * m_jcp.dst_prc.size() * 2);
+        }
         vfmadd231ps(vmm_sum2, vmm_src, vmm_src);
         load(vmm_src, reg_src, m_jcp.src_prc, vec_size, false, vec_size * m_jcp.src_prc.size() * 3);
+        if (m_jcp.has_add) {
+            load(vmm_src1, reg_src1, m_jcp.src_prc, vec_size, false, vec_size * m_jcp.src_prc.size() * 3);
+            vaddps(vmm_src, vmm_src, vmm_src1);
+            store(reg_src, vmm_src, m_jcp.dst_prc, vec_size, vec_size * m_jcp.dst_prc.size() * 3);
+        }
         vfmadd231ps(vmm_sum3, vmm_src, vmm_src);
 
         add(reg_src, vec_size * m_jcp.src_prc.size() * 4);
+        if (m_jcp.has_add) {
+            add(reg_src1, vec_size * m_jcp.src_prc.size() * 4);
+        }
         dec(reg_size);
         jnz(loop_4reg);
     }
     // 1 ~ 3 vmm
     for (size_t i = m_jcp.data_size / (vec_size * 4) * 4; i < m_jcp.data_size / vec_size; i++) {
         load(vmm_src, reg_src, m_jcp.src_prc, vec_size, false);
+        if (m_jcp.has_add) {
+            load(vmm_src1, reg_src1, m_jcp.src_prc, vec_size, false);
+            vaddps(vmm_src, vmm_src, vmm_src1);
+            store(reg_src, vmm_src, m_jcp.dst_prc, vec_size);
+        }
         vfmadd231ps(vmm_sum0, vmm_src, vmm_src);
         add(reg_src, vec_size * m_jcp.src_prc.size());
+        if (m_jcp.has_add) {
+            add(reg_src1, vec_size * m_jcp.src_prc.size());
+        }
     }
     // tail
     if (m_jcp.data_size % vec_size) {
         load(vmm_src, reg_src, m_jcp.src_prc, m_jcp.data_size % vec_size, false);
+        if (m_jcp.has_add) {
+            load(vmm_src1, reg_src1, m_jcp.src_prc, m_jcp.data_size % vec_size, false);
+            vaddps(vmm_src, vmm_src, vmm_src1);
+            store(reg_src, vmm_src, m_jcp.dst_prc, m_jcp.data_size % vec_size);
+        }
         vfmadd231ps(vmm_sum0, vmm_src, vmm_src);
     }
     vaddps(vmm_sum0, vmm_sum0, vmm_sum1);

@@ -253,6 +253,7 @@ static const TypeToNameMap& get_type_to_name_tbl() {
         {"QKVProjection", Type::QKVProjection},
         {"RMS", Type::RMS},
         {"MultiHeadAttention", Type::ScaledDotProductAttention},
+        {"AddRMS", Type::RMS},
     };
     return type_to_name_tbl;
 }

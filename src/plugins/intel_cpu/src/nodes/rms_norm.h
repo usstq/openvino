@@ -41,6 +41,7 @@ private:
     friend struct RMSNormKey;
 
     float m_eps = 0.0f;
+    bool m_has_add = false;
 };
 
 }  // namespace node

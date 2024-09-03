@@ -130,6 +130,7 @@
 #include "transformations/cpu_opset/arm/pass/convert_reduce_multi_axis.hpp"
 #include "transformations/cpu_opset/arm/pass/mish_decomposition.hpp"
 #include "transformations/cpu_opset/arm/pass/convert_reduce_no_keep_dims.hpp"
+#include "transformations/cpu_opset/common/pass/add_rms_fusion.hpp"
 #include "transformations/cpu_opset/common/pass/decompose_integer_divide.hpp"
 #include "transformations/cpu_opset/common/pass/decompose_rms_norm.hpp"
 #include "transformations/cpu_opset/common/pass/convert_fq_rnn_to_quantized_rnn.hpp"
@@ -860,6 +861,7 @@ void Transformations::PostLpt() {
             return node::RMSNorm::isSupportedOperation(node, errorMsg);
         },
         ov::intel_cpu::DecomposeRMSNorm);
+    CPU_REGISTER_PASS_X64(postLPTPassManager, AddRMSFusion);
 
     // markup Rope Input when BF16/F16 inference.
     if (one_of(inferencePrecision, ov::element::bf16, ov::element::f16))
