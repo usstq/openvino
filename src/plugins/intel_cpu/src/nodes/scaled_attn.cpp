@@ -976,6 +976,7 @@ struct ScaledDotProductAttention::MHAExecutor : public ScaledDotProductAttention
         PlainTensor output_emb(output);         // fx[B, L1, H * S]
         float scale_input = 0.0f;
         size_t B, L1, L0, S, H, Hk;
+        bool is_greedy;
 
         // init
         kv_cache.reset(inputs[0]);
@@ -1010,8 +1011,10 @@ struct ScaledDotProductAttention::MHAExecutor : public ScaledDotProductAttention
         v_input.assert_dims({B, L1, Hk * S});
         //kv_cache.assert_dims({0, 0, Hk, 0, S}, true);
         // greedy-search will not use beam input
-        if (beam_input.m_dims[0])
+        is_greedy = beam_input.m_dims[0] == 0;
+        if (!is_greedy)
             beam_table = beam_input;
+
         attn_mask.assert_dims({B, L0 + L1});
         cos_tab.assert_dims({0, static_cast<size_t>(config.config_mha.rotary_dims)}, true);
         sin_tab.assert_dims({0, static_cast<size_t>(config.config_mha.rotary_dims)}, true);
@@ -1032,25 +1035,35 @@ struct ScaledDotProductAttention::MHAExecutor : public ScaledDotProductAttention
         }
         attn_mask = attn_mask.reshape({B, 1, 1, L0 + L1});
 
-        // [2 * layer_num, max_kv_len, B_max, Hk, S] => [L0+L1, B_max, Hk, S]
-        present_key = kv_cache.slice(0, 2 * layer_id, 2 * layer_id).slice(0, 0, L0 + L1);
-        present_value = kv_cache.slice(0, 2 * layer_id + 1, 2 * layer_id + 1).slice(0, 0, L0 + L1);
-        auto B_max = present_key.size(1);
-        if (B != B_max) {
-            OPENVINO_ASSERT(B_max % B == 0, "max batch must be multiple of current batch");
-            auto num_beams = B_max / B;
-            // [L, B_Max(B*num_beams), H, S]
-            // make (num_beams - 1) batch item as padding
-            present_key.m_dims[1] /= num_beams;     // = B_max/num_beams
-            present_key.m_strides[1] *= num_beams;
+        present_key = kv_cache.slice(0, 2 * layer_id, 2 * layer_id);
+        present_value = kv_cache.slice(0, 2 * layer_id + 1, 2 * layer_id + 1);
+        if (is_greedy) {
+            auto max_kv_len = kv_cache.size(1);
+            PlainTensor k_tmp, v_tmp;
+            k_tmp.resize({B, Hk, max_kv_len, S}, present_key.ptr<T>());
+            v_tmp.resize({B, Hk, max_kv_len, S}, present_value.ptr<T>());
+            present_key = k_tmp.slice(2, 0, L0 + L1);
+            present_value = v_tmp.slice(2, 0, L0 + L1);
+        } else {
+            // [2 * layer_num, max_kv_len, B_max, Hk, S] => [L0+L1, B_max, Hk, S]
+            present_key = present_key.slice(0, 0, L0 + L1);
+            present_value = present_value.slice(0, 0, L0 + L1);
+            auto B_max = present_key.size(1);
+            if (B != B_max) {
+                OPENVINO_ASSERT(B_max % B == 0, "max batch must be multiple of current batch");
+                auto num_beams = B_max / B;
+                // [L, B_Max(B*num_beams), H, S]
+                // make (num_beams - 1) batch item as padding
+                present_key.m_dims[1] /= num_beams;     // = B_max/num_beams
+                present_key.m_strides[1] *= num_beams;
 
-            present_value.m_dims[1] /= num_beams;
-            present_value.m_strides[1] *= num_beams;
+                present_value.m_dims[1] /= num_beams;
+                present_value.m_strides[1] *= num_beams;
+            }
+            // L,B,H,S => B,H,L,S
+            present_key = present_key.permute({1,2,0,3});
+            present_value = present_value.permute({1,2,0,3});
         }
-
-        // L,B,H,S => B,H,L,S
-        present_key = present_key.permute({1,2,0,3});
-        present_value = present_value.permute({1,2,0,3});
 
         // rope & concat
         rope_concat(q_input, k_input, v_input, cos_tab, sin_tab, present_key, present_value, config.config_mha.rotary_dims, L0);
