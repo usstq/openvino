@@ -914,21 +914,24 @@ static void mha_single_token_kernel(const ov::intel_cpu::PlainTensor& query,
         auto prof = LinuxPerf::Profile("WVA");
 
         if (1) {
-            buf_attn_score.resize<float>({static_cast<size_t>(nthr), q_len, h_group_num * h_each_group_len, S});
+            auto batch_per_thr = (B + nthr - 1)/nthr;
+            buf_attn_score.resize<float>({static_cast<size_t>(nthr), batch_per_thr, q_len, h_group_num * h_each_group_len, S});
+
             parallel_nt_static(nthr, [&](const size_t ithr, const size_t nthr) {
                 size_t b0{0}, b1{0};
                 splitter(B, nthr, ithr, b0, b1);
 
-                memset(buf_attn_score.ptr<float>(ithr), 0, q_len * h_group_num * h_each_group_len * S * sizeof(float));
+                memset(buf_attn_score.ptr<float>(ithr), 0, (b1 - b0) * q_len * h_group_num * h_each_group_len * S * sizeof(float));
                 for (size_t pv = 0; pv < kv_len; pv++) {
                     for (size_t b = b0; b < b1; b++) {
+                        // potentially reuse same b_kv (from prompts)
                         auto b_kv = beams ? beams.ptr<int32_t>(b)[pv] : b;
-                        for(size_t h_group = 0; h_group < h_group_num; h_group ++) {
-                            auto* v = present_value.ptr<T2>(b_kv, h_group, pv);
-                            auto p = past_v_scale_zp.ptr<float>(pv, b_kv, h_group);
-                            for (size_t pq = 0; pq < q_len; pq++) {
+                        for (size_t pq = 0; pq < q_len; pq++) {
+                            for(size_t h_group = 0; h_group < h_group_num; h_group ++) {
+                                auto* v = present_value.ptr<T2>(b_kv, h_group, pv);
+                                auto p = past_v_scale_zp.ptr<float>(pv, b_kv, h_group);
                                 for (size_t h = h_group * h_each_group_len; h < (h_group + 1) * h_each_group_len; h++) {
-                                    attn_acc_value(buf_attn_score.ptr<float>(ithr, pq, h),
+                                    attn_acc_value(buf_attn_score.ptr<float>(ithr, b-b0, pq, h),
                                                     buf_attn_w.ptr<float>(b, h, pq)[pv],
                                                     v,
                                                     S,
@@ -942,12 +945,9 @@ static void mha_single_token_kernel(const ov::intel_cpu::PlainTensor& query,
                 // convert to dst
                 for (size_t b = b0; b < b1; b++) {
                     for (size_t pq = 0; pq < q_len; pq++) {
-                        for(size_t h_group = 0; h_group < h_group_num; h_group ++) {
-                            for (size_t h = h_group * h_each_group_len; h < (h_group + 1) * h_each_group_len;
-                                    h++) {
-                                auto* dst = has_out_transpose ? output_emb.ptr<T>(b, pq, h * S) : output_emb.ptr<T>(b, h, pq);
-                                cvt_copy(dst, buf_attn_score.ptr<float>(ithr, pq, h), S);
-                            }
+                        for(size_t h = 0; h < H; h ++) {
+                            auto* dst = has_out_transpose ? output_emb.ptr<T>(b, pq, h * S) : output_emb.ptr<T>(b, h, pq);
+                            cvt_copy(dst, buf_attn_score.ptr<float>(ithr, b-b0, pq, h), S);
                         }
                     }
                 }
