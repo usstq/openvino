@@ -1183,6 +1183,7 @@ struct PerfEventGroup : public IPerfEventDumper {
 
 using ProfileScope = PerfEventGroup::ProfileScope;
 
+#if 1
 // pwe-thread event group with default events pre-selected
 template <typename ... Args>
 ProfileScope Profile(const std::string& title, int id = 0, Args&&... args) {
@@ -1218,5 +1219,24 @@ inline int Init() {
     auto dummy = Profile("start");
     return 0;
 }
+
+#else
+
+template <typename ... Args>
+int Profile(const std::string& title, int id = 0, Args&&... args) {
+    return 0;
+}
+
+// overload accept sampling_probability, which can be used to disable profile in scope 
+template <typename ... Args>
+int Profile(float sampling_probability, const std::string& title, int id = 0, Args&&... args) {
+    return 0;
+}
+
+inline int Init() {
+    return 0;
+}
+
+#endif
 
 } // namespace LinuxPerf
