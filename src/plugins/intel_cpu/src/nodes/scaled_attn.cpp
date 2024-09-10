@@ -125,6 +125,55 @@ static void execJitKernel(const std::shared_ptr<kernel::JitKernelBase>& ker, con
 #endif // OPENVINO_ARCH_X86_64
 }
 
+template<typename T>
+struct RoPEKernel {
+    operator bool() const {
+        return m_jit != nullptr;
+    }
+    // type: 0-chatglm, 1-llama2
+    void init(size_t rotary_dims, int type) {
+        m_rotary_dims = rotary_dims;
+        m_type = type;
+
+        jit_rotary_compile_params jcp;
+        jcp.src_prc = precision_of<T>::value;
+        jcp.dst_prc = precision_of<T>::value;
+        jcp.rotary_ndims = rotary_dims;
+        if (type == 1) {
+            jcp.interleave = false;
+        } else {
+            OPENVINO_ASSERT(type == 0);
+            jcp.interleave = true;
+            jcp.mix_cos_sin = false;
+        }
+        m_jit = createJitKernel(jcp);
+    }
+    void exec(const T* src, T* dst, const float* cos, const float* sin) {
+        if (m_jit) {
+            execJitKernel(m_jit, src, dst, cos, sin);
+        } else {
+            if (m_type == 1) {
+                auto half_rotary_dims = m_rotary_dims / 2;
+                for (size_t i = 0; i < half_rotary_dims; i++) {
+                    auto src0 = src[i];
+                    auto src1 = src[i + half_rotary_dims];
+                    dst[i] = cos[i] * src0 - sin[i] * src1;
+                    dst[i + half_rotary_dims] = cos[i + half_rotary_dims] * src1 + sin[i + half_rotary_dims] * src0;
+                }
+            } else {
+                for (size_t i = 0, j = 0; i < m_rotary_dims; i += 2, j++) {
+                    float s0 = src[i], s1 = src[i + 1];
+                    dst[i] = cos[j] * s0 - sin[j] * s1;
+                    dst[i + 1] = cos[j] * s1 + sin[j] * s0;
+                }
+            }
+        }
+    }
+    std::shared_ptr<kernel::JitKernelBase> m_jit;
+    size_t m_rotary_dims;
+    int m_type;
+};
+
 // default implementation: reference
 template <ScaledDotProductAttention::KernelTypes KType, typename T>
 struct MHAKernel {
@@ -899,6 +948,7 @@ struct ScaledDotProductAttention::MHAExecutor : public ScaledDotProductAttention
     GraphContext::CPtr context;
     PlainTensor attn_buf;          // f32[[B|1],[H|1], L1|1, L0+L1]
     std::shared_ptr<kernel::JitKernelBase> m_rotaryKernel;
+    RoPEKernel<T> m_rope;
 
     MHAKernel<KT_ONEDNN, T> kernel;
     MHASingleToken kernel_single_token;
@@ -906,59 +956,89 @@ struct ScaledDotProductAttention::MHAExecutor : public ScaledDotProductAttention
     MHAExecutor(GraphContext::CPtr ctx) : context(ctx), kernel(context) {}
 
     void rope_concat(const PlainTensor& q_input, const PlainTensor& k_input, const PlainTensor& v_input,
-        PlainTensor& cos_tab, PlainTensor& sin_tab, PlainTensor& present_key, PlainTensor& present_value, size_t rotary_dims, size_t kv_pos) {
-        if (!m_rotaryKernel) {
-            jit_rotary_compile_params jcp;
-            jcp.src_prc = precision_of<T>::value;
-            jcp.dst_prc = precision_of<T>::value;
-            jcp.rotary_ndims = rotary_dims;
-            jcp.interleave = false;
-            m_rotaryKernel = createJitKernel(jcp);
+        PlainTensor& cos_tab, PlainTensor& sin_tab, PlainTensor& present_key, PlainTensor& present_value, size_t rotary_dims, size_t kv_pos, int rope_type) {
+        if (!m_rope) {
+            m_rope.init(rotary_dims, rope_type);
         }
 
-        auto batch_size = k_input.size(0);
-        auto head_cnt = k_input.size(1);
-        auto seq_len = k_input.size(2);
-        auto feature_size = k_input.size(3);
+        auto B = k_input.size(0);
+        auto H = q_input.size(1);
+        auto Hk = k_input.size(1);
+        auto L1 = k_input.size(2);
+        auto S = k_input.size(3);
         auto kvcache_precision = present_key.get_precision();
 
-        // TODO: support chatglm ... pattern
-        parallel_for3d(batch_size, head_cnt, seq_len, [&](size_t b, size_t h, size_t p) {
-            auto cos_pos = p + kv_pos;
-            auto* q = q_input.ptr<T>(b, h, p);
-            auto* k = k_input.ptr<T>(b, h, p);
-            auto* v = v_input.ptr<T>(b, h, p);
-            auto* cos = cos_tab.ptr<float>(cos_pos, 0);
-            auto* sin = sin_tab.ptr<float>(cos_pos, 0);
+        if (H == Hk) {
+            parallel_for3d(B, Hk, L1, [&](size_t b, size_t hk, size_t p) {
+                auto cos_pos = p + kv_pos;
+                auto* q = q_input.ptr<T>(b, hk, p);
+                auto* k = k_input.ptr<T>(b, hk, p);
+                auto* v = v_input.ptr<T>(b, hk, p);
+                auto* cos = cos_tab.ptr<float>(cos_pos, 0);
+                auto* sin = sin_tab.ptr<float>(cos_pos, 0);
 
-            if (m_rotaryKernel) {
-                execJitKernel(m_rotaryKernel, q, q, cos, sin);
-                execJitKernel(m_rotaryKernel, k, k, cos, sin);
-            } else {
-                auto half_rotary_dims = rotary_dims / 2;
-                for (size_t i = 0; i < half_rotary_dims; i++) {
-                    auto src0 = q[i];
-                    auto src1 = q[i + half_rotary_dims];
-                    q[i] = cos[i] * src0 - sin[i] * src1;
-                    q[i + half_rotary_dims] = cos[i + half_rotary_dims] * src1 + sin[i + half_rotary_dims] * src0;
+                m_rope.exec(q, q, cos, sin);
+                m_rope.exec(k, k, cos, sin);
+
+                if (kvcache_precision == ov::element::u8) {
+                    auto* k_cache = reinterpret_cast<float*>(present_key.ptr<uint8_t>(b, hk, p + kv_pos));
+                    attn_quant_u8(k, present_key.ptr<uint8_t>(b, hk, p + kv_pos) + 8, S, k_cache[0], k_cache[1], k_input.get_precision());
+                    auto* v_cache = reinterpret_cast<float*>(present_value.ptr<uint8_t>(b, hk, p + kv_pos));
+                    attn_quant_u8(v, present_value.ptr<uint8_t>(b, hk, p + kv_pos) + 8, S, v_cache[0], v_cache[1], k_input.get_precision());
+                } else {
+                    attn_memcpy2d_kernel(k, present_key.ptr_v(b, hk, p + kv_pos), k_input.get_precision(), kvcache_precision, 0, 0, S, 1);
+                    attn_memcpy2d_kernel(v, present_value.ptr_v(b, hk, p + kv_pos), k_input.get_precision(), kvcache_precision, 0, 0, S, 1);
                 }
-                for (size_t i = 0; i < half_rotary_dims; i++) {
-                    auto src0 = k[i];
-                    auto src1 = k[i + half_rotary_dims];
-                    k[i] = cos[i] * src0 - sin[i] * src1;
-                    k[i + half_rotary_dims] = cos[i + half_rotary_dims] * src1 + sin[i + half_rotary_dims] * src0;
+            });
+        } else {
+            parallel_nt_static(0, [&](const size_t ithr, const size_t nthr) {
+                // k rope + copy, v copy
+                size_t start{0}, end{0};
+                splitter(B * Hk * L1, nthr, ithr, start, end);
+                size_t b, hk, p;
+                if (start < end) {
+                    parallel_it_init(start, b, B, hk, Hk, p, L1);
+                    for (size_t iwork = start; iwork < end; ++iwork) {
+                        auto cos_pos = p + kv_pos;
+                        auto* k = k_input.ptr<T>(b, hk, p);
+                        auto* v = v_input.ptr<T>(b, hk, p);
+                        auto* cos = cos_tab.ptr<float>(cos_pos, 0);
+                        auto* sin = sin_tab.ptr<float>(cos_pos, 0);
+
+                        m_rope.exec(k, k, cos, sin);
+
+                        if (kvcache_precision == ov::element::u8) {
+                            auto* k_cache = reinterpret_cast<float*>(present_key.ptr<uint8_t>(b, hk, p + kv_pos));
+                            attn_quant_u8(k, present_key.ptr<uint8_t>(b, hk, p + kv_pos) + 8, S, k_cache[0], k_cache[1], k_input.get_precision());
+                            auto* v_cache = reinterpret_cast<float*>(present_value.ptr<uint8_t>(b, hk, p + kv_pos));
+                            attn_quant_u8(v, present_value.ptr<uint8_t>(b, hk, p + kv_pos) + 8, S, v_cache[0], v_cache[1], k_input.get_precision());
+                        } else {
+                            attn_memcpy2d_kernel(k, present_key.ptr_v(b, hk, p + kv_pos), k_input.get_precision(), kvcache_precision, 0, 0, S, 1);
+                            attn_memcpy2d_kernel(v, present_value.ptr_v(b, hk, p + kv_pos), k_input.get_precision(), kvcache_precision, 0, 0, S, 1);
+                        }
+
+                        parallel_it_step(b, B, hk, Hk, p, L1);
+                    }
                 }
-            }
-            if (kvcache_precision == ov::element::u8) {
-                auto* k_cache = reinterpret_cast<float*>(present_key.ptr<uint8_t>(b, h, p + kv_pos));
-                attn_quant_u8(k, present_key.ptr<uint8_t>(b, h, p + kv_pos) + 8, feature_size, k_cache[0], k_cache[1], k_input.get_precision());
-                auto* v_cache = reinterpret_cast<float*>(present_value.ptr<uint8_t>(b, h, p + kv_pos));
-                attn_quant_u8(v, present_value.ptr<uint8_t>(b, h, p + kv_pos) + 8, feature_size, v_cache[0], v_cache[1], k_input.get_precision());
-            } else {
-                attn_memcpy2d_kernel(k, present_key.ptr_v(b, h, p + kv_pos), k_input.get_precision(), kvcache_precision, 0, 0, feature_size, 1);
-                attn_memcpy2d_kernel(v, present_value.ptr_v(b, h, p + kv_pos), k_input.get_precision(), kvcache_precision, 0, 0, feature_size, 1);
-            }
-        });
+
+                // q rope
+                splitter(B * H * L1, nthr, ithr, start, end);
+                size_t h;
+                if (start < end) {
+                    parallel_it_init(start, b, B, h, H, p, L1);
+                    for (size_t iwork = start; iwork < end; ++iwork) {
+                        auto cos_pos = p + kv_pos;
+                        auto* q = q_input.ptr<T>(b, h, p);
+                        auto* cos = cos_tab.ptr<float>(cos_pos, 0);
+                        auto* sin = sin_tab.ptr<float>(cos_pos, 0);
+
+                        m_rope.exec(q, q, cos, sin);
+
+                        parallel_it_step(b, B, h, H, p, L1);
+                    }
+                }
+            });
+        }
     }
 
     void execute(dnnl::stream strm, const Config& config, const std::vector<MemoryPtr>& inputs, const MemoryPtr output,
@@ -1066,7 +1146,7 @@ struct ScaledDotProductAttention::MHAExecutor : public ScaledDotProductAttention
         }
 
         // rope & concat
-        rope_concat(q_input, k_input, v_input, cos_tab, sin_tab, present_key, present_value, config.config_mha.rotary_dims, L0);
+        rope_concat(q_input, k_input, v_input, cos_tab, sin_tab, present_key, present_value, config.config_mha.rotary_dims, L0, config.config_mha.rope_type);
 
         // attention
         if (L1 > 1) {
