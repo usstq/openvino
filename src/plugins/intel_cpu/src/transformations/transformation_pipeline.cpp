@@ -654,6 +654,15 @@ void Transformations::PreLpt(const std::vector<ov::element::Type>& defaultPrecis
     CPU_ENABLE_PASS_COMMON(manager, ov::pass::ConvertGather1ToGather7);
     CPU_ENABLE_PASS_COMMON(manager, ov::pass::ConvertDetectionOutput1ToDetectionOutput8);
     CPU_ENABLE_PASS_COMMON(manager, ov::pass::ConvertROIAlign3To9);
+    CPU_REGISTER_PASS_X64(manager, ov::pass::RMSFusion, false);
+    CPU_REGISTER_PASS_X64(manager, ov::intel_cpu::DecomposeRMSNorm);
+    CPU_SET_CALLBACK_X64(manager,
+        [](const std::shared_ptr<const ov::Node>& node) -> bool {
+            std::string errorMsg;
+            return node::RMSNorm::isSupportedOperation(node, errorMsg);
+        },
+        ov::intel_cpu::DecomposeRMSNorm);
+    CPU_REGISTER_PASS_X64(manager, AddRMSFusion);
 
     if (useLpt) {
         CPU_LPT_SCOPE(LowPrecisionTransformations_Part3);
@@ -853,15 +862,6 @@ void Transformations::PostLpt() {
 
     CPU_REGISTER_PASS_COMMON(postLPTPassManager, ov::pass::transpose_sinking::TSShapeOfForward);
     CPU_REGISTER_PASS_COMMON(postLPTPassManager, StatefulSDPAFusion);
-    CPU_REGISTER_PASS_X64(postLPTPassManager, ov::pass::RMSFusion, false);
-    CPU_REGISTER_PASS_X64(postLPTPassManager, ov::intel_cpu::DecomposeRMSNorm);
-    CPU_SET_CALLBACK_X64(postLPTPassManager,
-        [](const std::shared_ptr<const ov::Node>& node) -> bool {
-            std::string errorMsg;
-            return node::RMSNorm::isSupportedOperation(node, errorMsg);
-        },
-        ov::intel_cpu::DecomposeRMSNorm);
-    CPU_REGISTER_PASS_X64(postLPTPassManager, AddRMSFusion);
 
     // markup Rope Input when BF16/F16 inference.
     if (one_of(inferencePrecision, ov::element::bf16, ov::element::f16))
