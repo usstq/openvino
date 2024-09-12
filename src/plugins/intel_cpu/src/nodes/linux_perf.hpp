@@ -609,7 +609,7 @@ struct PerfEventGroup : public IPerfEventDumper {
         }
 
         template <typename ... Values>
-        void set_extra_data(Values... vals) {
+        void set_all_extra_data(Values... vals) {
             static_assert(data_size >= sizeof...(vals));
             int j = 0;
             int unused1[] = { 0, (set_extra_data(j++, vals), 0)... };
@@ -1190,7 +1190,7 @@ ProfileScope Profile(const std::string& title, int id = 0, Args&&... args) {
     auto& pevg = PerfEventGroup::get();
     auto* pd = pevg._profile(title, id);
     if (pd) {
-        pd->set_extra_data(std::forward<Args>(args)...);
+        pd->set_all_extra_data(std::forward<Args>(args)...);
     }
     return {&pevg, pd};
 }
@@ -1201,7 +1201,7 @@ ProfileScope Profile(float sampling_probability, const std::string& title, int i
     auto& pevg = PerfEventGroup::get();
     auto* pd = pevg._profile(title, id);
     if (pd) {
-        pd->set_extra_data(std::forward<Args>(args)...);
+        pd->set_all_extra_data(std::forward<Args>(args)...);
     }
 
     bool disable_profile = ((std::rand() % 1000)*0.001f >= sampling_probability);
