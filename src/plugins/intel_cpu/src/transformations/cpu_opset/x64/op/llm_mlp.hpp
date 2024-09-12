@@ -20,6 +20,9 @@ public:
 
     struct Config {
         ACT_FN act;
+        bool quantized;
+        int hidden_size;
+        int up_size;
     };
 
     // args:
