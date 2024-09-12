@@ -910,7 +910,7 @@ static void mha_single_token_kernel(const ov::intel_cpu::PlainTensor& query,
 
     // attn_w * V
     // Fast Path if there are enough works for each thread
-    if (B >= static_cast<size_t>(nthr)) {
+    if (B >= 2 * static_cast<size_t>(nthr)) {
         auto prof = LinuxPerf::Profile("WVA");
 
         if (1) {
