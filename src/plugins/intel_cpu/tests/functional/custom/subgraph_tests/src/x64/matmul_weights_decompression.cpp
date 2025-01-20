@@ -47,7 +47,7 @@ const std::vector<MatMulDecompressionShapeParams> input_shapes_amx = {
     {{{}, {{3, 339, 577}}}, {577, 335}},
     {{{}, {{1, 1, 256}}}, {256, 128}, 64ul},
 };
-const std::vector<fusingSpecificParams> fusing_params{emptyFusingSpec, fusingBias};
+const std::vector<fusingSpecificParams> fusing_params{emptyFusingSpec, fusingBias, fusingRelu, fusingGelu, fusingSwish};
 
 INSTANTIATE_TEST_SUITE_P(smoke_MatMulCompressedWeights_basic,
                          MatmulWeightsDecompression,
@@ -240,6 +240,34 @@ INSTANTIATE_TEST_SUITE_P(smoke_MatMulCompressedWeights_sym_non_default_dyn_quant
                                             ::testing::Values(false),
                                             ::testing::ValuesIn(filter_additional_config_dyn_quant()),
                                             ::testing::ValuesIn(fusing_params),
+                                            ::testing::Values(true)),
+                         MatmulWeightsDecompression::getTestCaseName);
+
+const std::vector<MatMulDecompressionShapeParams> input_shapes_basic_dyn_quantXXX = {
+    {{{}, {{1, 1, 64}}}, {64, 64}, 64lu},
+};
+
+const std::vector<fusingSpecificParams> fusing_paramsXXX{emptyFusingSpec, fusingSwish};
+
+const std::vector<ov::test::ElementType> sym_weights_precisions_dyn_quantXXX = {ov::element::i8};
+std::vector<ov::AnyMap> filter_additional_config_dyn_quantXXX() {
+    std::vector<ov::AnyMap> additional_config = {
+        {{ov::hint::dynamic_quantization_group_size(64)}},
+    };
+    return additional_config;
+}
+
+INSTANTIATE_TEST_SUITE_P(smoke_MatMulCompressedWeightsXXX,
+                         MatmulWeightsDecompression,
+                         ::testing::Combine(::testing::ValuesIn(input_shapes_basic_dyn_quantXXX),
+                                            ::testing::ValuesIn(sym_weights_precisions_dyn_quantXXX),
+                                            ::testing::ValuesIn(decompression_precisions),
+                                            ::testing::Values(ov::element::undefined),
+                                            ::testing::Values(true),
+                                            ::testing::Values(DecompressionSubtractType::empty),
+                                            ::testing::Values(false),
+                                            ::testing::ValuesIn(filter_additional_config_dyn_quantXXX()),
+                                            ::testing::ValuesIn(fusing_paramsXXX),
                                             ::testing::Values(true)),
                          MatmulWeightsDecompression::getTestCaseName);
 

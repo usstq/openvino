@@ -47,7 +47,8 @@ std::string MatmulWeightsDecompression::getTestCaseName(testing::TestParamInfo<M
         result << configEntry.first << ", " << configEntry.second.as<std::string>() << "_";
     }
     result << ")";
-    result << CpuTestWithFusing::getTestCaseName(fusing_params);
+    result << CpuTestWithFusing::getTestCaseName(fusing_params) << "_";
+    result << obj.index;
 
     return result.str();
 }
