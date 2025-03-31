@@ -156,6 +156,8 @@ void NonZero::executeSpecified() {
         VectorDims newDims{inRank, totalNonZeroCount};
         redefineOutputMemory({newDims});
     }
+    // std::cout << "non-zeros: [" << totalNonZeroCount << "]" << getOriginalLayers() << "\n";
+
     auto* dst = dstMemPtr->getDataAs<int>();
     if (totalNonZeroCount == 0) {
         _isOutputEmptyTensor = true;

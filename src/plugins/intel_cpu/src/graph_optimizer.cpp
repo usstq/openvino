@@ -2716,7 +2716,9 @@ void GraphOptimizer::markEmptyTensorFastForward(Graph& graph) {
                 // mark all zero-propagte OP as can be skipped if parent produces empty-tensor
                 std::cout << "MMMMMMMMMMMMMMMMM markEmptyTensorFastForward MMMMMMMMMMMMMMMMM\n";
                 for(auto& n : nodes_e) {
-                    n->p_emptyProducer = parent;
+                    if (n != parent) {
+                        n->p_emptyProducer = parent;
+                    }
                 }
             }
         }
