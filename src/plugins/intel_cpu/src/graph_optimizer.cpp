@@ -210,6 +210,7 @@ void GraphOptimizer::ApplyImplSpecificGraphOptimizations(Graph& graph) {
     MergeReorderAndTranspose(graph);
     graph.RemoveDroppedNodes();
 
+    markEmptyTensorFastForward(graph);
     graph.RemoveDroppedEdges();
 }
 
@@ -2575,6 +2576,151 @@ bool GraphOptimizer::checkAscendingFinalOrder(const VectorDims& transposeOrder,
     }
 
     return true;
+}
+
+
+void GraphOptimizer::markEmptyTensorFastForward(Graph& graph) {
+    auto& graphNodes = graph.GetNodes();
+    int SKIP_CNT = std::getenv("SKIP_CNT") ? std::atoi(std::getenv("SKIP_CNT")) : 0;
+    for (const auto& parent : graphNodes) {
+        if (parent->getType() != Type::NonZero) {
+            continue;
+        }
+        // suppose parent returns empty-tensor at runtime,
+        // find all children that can be skipped.
+        std::cout << ">>>>>>: " << parent->getOriginalLayers() << "\n";
+
+        std::list<NodePtr> nodes_to_visit = {parent};
+        std::list<NodePtr> nodes_e = {};
+        std::list<NodePtr> nodes_ne = {};
+
+        auto node_in_list = [](const NodePtr& node, const std::list<NodePtr>& list) {
+            return std::find(list.begin(), list.end(), node) != list.end();
+        };
+
+        std::map<NodePtr, int> nodes_ne_zmask;
+
+        while(nodes_to_visit.size()) {
+            auto cur_node = nodes_to_visit.front();
+            nodes_to_visit.pop_front();
+
+            std::cout << "=========== cur_node " << cur_node->getOriginalLayers() << "\n";
+
+            auto w_edges = cur_node->getChildEdges();
+            for(auto& w : w_edges) {
+                auto edge = w.lock();
+                if (!edge) {
+                    continue;
+                }
+                auto child = edge->getChild();
+                auto out_num = edge->getOutputNum();
+
+                if (node_in_list(child, nodes_e)) {
+                    // this child has been determined to propagate zero-tensor
+                    continue;
+                }
+
+                bool propagate_zero_tensor = false;
+                if (child->getType() == Type::Split && out_num == 0) {
+                    propagate_zero_tensor = true;
+                }
+                if (child->getType() == Type::Eltwise && out_num == 0) {
+                    propagate_zero_tensor = true;
+                }
+                if (child->getType() == Type::Reshape && out_num == 0) {
+                    propagate_zero_tensor = true;
+                }
+                if (child->getType() == Type::Gather && out_num == 1) {
+                    propagate_zero_tensor = true;
+                }
+                if (child->getType() == Type::FullyConnected && out_num == 0) {
+                    propagate_zero_tensor = true;
+                }
+                if (child->getType() == Type::Reorder && out_num == 0) {
+                    propagate_zero_tensor = true;
+                }
+
+                std::cout << "    =>[" << out_num << "] " << propagate_zero_tensor << " : " <<  child->getTypeStr() << " : " << *edge->getChild() << "\n";
+
+                if (propagate_zero_tensor) {
+                    nodes_e.push_back(child);
+                    nodes_to_visit.push_back(child);
+                    
+                    nodes_ne.remove(child);
+                } else {
+                    if (!node_in_list(child, nodes_ne)) {
+                        nodes_ne.push_back(child);
+                    }
+                    // which input is zero-tensor ?
+                    int zero_input_mask = (1 << out_num);
+                    if (nodes_ne_zmask.count(child) == 0) {
+                        nodes_ne_zmask[child] = zero_input_mask;
+                    } else {
+                        nodes_ne_zmask[child] |= zero_input_mask;
+                    }
+                }
+            }
+        }
+
+        // empty tensor OP's other inputs, also no need to calculate?
+        nodes_to_visit.clear();
+        std::copy(nodes_e.begin(), nodes_e.end(), std::back_inserter(nodes_to_visit));
+        while(nodes_to_visit.size()) {
+            auto node = nodes_to_visit.front();
+            nodes_to_visit.pop_front();
+            auto w_edges = node->getParentEdges();
+            for(auto& w : w_edges) {
+                auto edge = w.lock();
+                if (!edge) {
+                    continue;
+                }
+                auto other_parent = edge->getParent();
+                if (node_in_list(other_parent, nodes_e)) {
+                    continue;
+                }
+
+                // all children of this parents are empty skippable
+                bool is_also_skippable = true;
+                auto w_edges2 = other_parent->getChildEdges();
+                for(auto& w : w_edges2) {
+                    auto edge2 = w.lock();
+                    if (!edge2) {
+                        is_also_skippable = false;
+                        break;
+                    }
+                    auto other_child = edge2->getChild();
+                    if (!node_in_list(other_child, nodes_e)) {
+                        is_also_skippable = false;
+                        break;
+                    }
+                }
+
+                if (is_also_skippable) {
+                    nodes_e.push_back(other_parent);
+                    nodes_to_visit.push_back(other_parent);
+                }
+            }
+        }
+
+        //
+        std::cout << "}}}}}}   " << nodes_e.size() << " + " << nodes_ne.size() << "\n";
+
+        for(auto& n : nodes_ne) {
+            std::cout << "     empty-mask: " << nodes_ne_zmask[n] << " : " << *n << "\n";
+        }
+
+        if (nodes_ne.size() == 1) {
+            auto nz = nodes_ne.front();
+            auto empty_mask = nodes_ne_zmask[nz];
+            if ((nz->getType() == Type::ScatterElementsUpdate) && (empty_mask & 6)) {
+                // mark all zero-propagte OP as can be skipped if parent produces empty-tensor
+                std::cout << "MMMMMMMMMMMMMMMMM markEmptyTensorFastForward MMMMMMMMMMMMMMMMM\n";
+                for(auto& n : nodes_e) {
+                    n->p_emptyProducer = parent;
+                }
+            }
+        }
+    }
 }
 
 void GraphOptimizer::mergeTransposeReshapeReorder(Graph& graph,

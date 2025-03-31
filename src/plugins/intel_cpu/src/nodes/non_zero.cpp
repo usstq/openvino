@@ -158,8 +158,11 @@ void NonZero::executeSpecified() {
     }
     auto* dst = dstMemPtr->getDataAs<int>();
     if (totalNonZeroCount == 0) {
+        _isOutputEmptyTensor = true;
         return;
     }
+
+    _isOutputEmptyTensor = false;
 
     std::vector<int> srcDims(inRank);
     std::transform(inShape.getDims().begin(), inShape.getDims().end(), srcDims.begin(), [](size_t x) {

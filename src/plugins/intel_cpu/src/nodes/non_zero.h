@@ -41,6 +41,10 @@ public:
         return true;
     }
 
+    bool isOutputEmptyTensor() const override {
+        return _isOutputEmptyTensor;
+    }
+
 private:
     int threadsCount = 1;
     template <typename inputType>
@@ -49,6 +53,8 @@ private:
     struct NonZeroExecute;
     template <typename T>
     std::vector<size_t> getNonZeroElementsCount(const T* arg, const Shape& arg_shape);
+
+    bool _isOutputEmptyTensor;
 };
 
 }  // namespace node

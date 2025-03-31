@@ -758,6 +758,9 @@ void Node::updateShapes() {
                     getTypeStr(),
                     " with name: ",
                     getName());
+    if (is_skippable) {
+        return;
+    }
     try {
         if (needShapeInfer()) {
             auto result = shapeInfer();
@@ -797,6 +800,9 @@ void Node::updateDynamicParams() {
                     getTypeStr(),
                     " with name: ",
                     getName());
+    if (is_skippable) {
+        return;
+    }
     try {
         if (isExecutable()) {
             if (needPrepareParams()) {

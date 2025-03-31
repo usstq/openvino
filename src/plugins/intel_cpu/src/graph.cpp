@@ -53,6 +53,8 @@
 #include "utils/precision_support.h"
 #include "utils/verbose.h"
 
+#include "/mnt/disk1/tingqian/aboutSHW/include/linux_perf.hpp"
+
 #if (OV_THREAD == OV_THREAD_TBB || OV_THREAD == OV_THREAD_TBB_AUTO)
 #    include <tbb/task.h>
 #endif
@@ -1608,11 +1610,30 @@ template <typename UpdateStrategy>
 void Graph::InferDynamic(SyncInferRequest* request, int numaId, UpdateStrategy&& update) {
     size_t inferCounter = 0;
     for (auto stopIndx : m_executableSyncNodesInds) {
-        update(stopIndx);
-
+        for (auto i = inferCounter; i < stopIndx; ++i) {
+            auto& node = m_executableGraphNodes[i];
+            node->checkSkippable();
+        }
+        {
+            auto prof = LinuxPerf::Profile("update", stopIndx);
+            update(stopIndx);
+        }
+        auto prof = LinuxPerf::Profile("InferDynamic", stopIndx);
         for (; inferCounter < stopIndx; ++inferCounter) {
             auto& node = m_executableGraphNodes[inferCounter];
+            VectorDims dims0;
+            if (node->getParentEdges().size()) {
+                dims0 = node->getParentEdgeAt(0)->getMemory().getShape().getStaticDims();
+            }
+            std::string name = node->getTypeStr();
+            if (node->is_skippable) {
+                name = "SKIP";
+            }
+            auto prof = LinuxPerf::Profile(name, node->getOriginalLayers(), node->is_skippable, inferCounter, dims0);
 
+            if (node->is_skippable) {
+                continue;
+            }
             ExecuteNodeWithCatch(node, request, numaId);
         }
     }

@@ -90,6 +90,8 @@ private:
                                       const NodePtr& reshapeNode,
                                       const NodePtr& reorderNode,
                                       const bool reverseOrder);
+
+    void markEmptyTensorFastForward(Graph& graph);
 };
 
 }  // namespace intel_cpu

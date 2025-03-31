@@ -1054,6 +1054,8 @@ void Transformations::PostLpt() {
         CPU_REGISTER_PASS_COMMON(postLPTPassManager, ov::pass::MarkFloatingPointRange);
     }
 
+    CPU_REGISTER_PASS_X64(postLPTPassManager, ov::pass::PrintModel, "qwen3.cpp");
+
     // Should be before Snippets pipeline because Ngram pattern contains eltwise nodes that can be tokenized by
     // Snippets.
     auto symbolic_pipeline = CPU_REGISTER_PASS_COMMON(postLPTPassManager, ov::pass::SymbolicOptimizations, false);

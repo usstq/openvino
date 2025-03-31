@@ -178,6 +178,28 @@ public:
 
     using AttrPtr = std::shared_ptr<dnnl::primitive_attr>;
 
+    virtual bool isOutputEmptyTensor() const {
+        return false;
+    }
+
+    NodePtr p_emptyProducer = nullptr;
+    bool is_last_time_empty = false;
+    bool is_skippable = false;
+
+    void checkSkippable() {
+        is_skippable = false;
+        if (p_emptyProducer) {
+            if (p_emptyProducer->isOutputEmptyTensor()) {
+                if (is_last_time_empty) {
+                    is_skippable = true;
+                }
+                is_last_time_empty = true;
+                return;
+            }
+        }
+        is_last_time_empty = false;
+    }
+
 public:
     template <typename T, int N>
     struct Tag {};
