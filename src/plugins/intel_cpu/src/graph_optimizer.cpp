@@ -2578,10 +2578,23 @@ bool GraphOptimizer::checkAscendingFinalOrder(const VectorDims& transposeOrder,
     return true;
 }
 
+template <class F>
+void for_all_child(const NodePtr& node, const F& f) {
+    const auto& w_edges = node->getChildEdges();
+    for(auto& w : w_edges) {
+        auto edge = w.lock();
+        if (!edge) {
+            continue;
+        }
+        auto child = edge->getChild();
+        auto out_num = edge->getOutputNum();
+        f(child, out_num);
+    }
+}
 
 void GraphOptimizer::markEmptyTensorFastForward(Graph& graph) {
     auto& graphNodes = graph.GetNodes();
-    int SKIP_CNT = std::getenv("SKIP_CNT") ? std::atoi(std::getenv("SKIP_CNT")) : 0;
+
     for (const auto& parent : graphNodes) {
         if (parent->getType() != Type::NonZero) {
             continue;
@@ -2606,63 +2619,53 @@ void GraphOptimizer::markEmptyTensorFastForward(Graph& graph) {
 
             std::cout << "=========== cur_node " << cur_node->getOriginalLayers() << "\n";
 
-            auto w_edges = cur_node->getChildEdges();
-            for(auto& w : w_edges) {
-                auto edge = w.lock();
-                if (!edge) {
-                    continue;
-                }
-                auto child = edge->getChild();
-                auto out_num = edge->getOutputNum();
-
+            for_all_child(cur_node, [&](const NodePtr& child, int to_port) {
                 if (node_in_list(child, nodes_e)) {
-                    // this child has been determined to propagate zero-tensor
-                    continue;
+                    return;
                 }
 
                 bool propagate_zero_tensor = false;
-                if (child->getType() == Type::Split && out_num == 0) {
+                if (child->getType() == Type::Split && to_port == 0) {
                     propagate_zero_tensor = true;
                 }
-                if (child->getType() == Type::Eltwise && out_num == 0) {
+                if (child->getType() == Type::Eltwise && to_port == 0) {
                     propagate_zero_tensor = true;
                 }
-                if (child->getType() == Type::Reshape && out_num == 0) {
+                if (child->getType() == Type::Reshape && to_port == 0) {
                     propagate_zero_tensor = true;
                 }
-                if (child->getType() == Type::Gather && out_num == 1) {
+                if (child->getType() == Type::Gather && to_port == 1) {
                     propagate_zero_tensor = true;
                 }
-                if (child->getType() == Type::FullyConnected && out_num == 0) {
+                if (child->getType() == Type::FullyConnected && to_port == 0) {
                     propagate_zero_tensor = true;
                 }
-                if (child->getType() == Type::Reorder && out_num == 0) {
+                if (child->getType() == Type::Reorder && to_port == 0) {
                     propagate_zero_tensor = true;
                 }
 
-                std::cout << "    =>[" << out_num << "] " << propagate_zero_tensor << " : " <<  child->getTypeStr() << " : " << *edge->getChild() << "\n";
+                std::cout << "    =>[" << to_port << "] " << propagate_zero_tensor << " : " <<  child->getTypeStr() << " : " << *child << "\n";
 
                 if (propagate_zero_tensor) {
                     nodes_e.push_back(child);
                     nodes_to_visit.push_back(child);
-                    
                     nodes_ne.remove(child);
                 } else {
                     if (!node_in_list(child, nodes_ne)) {
                         nodes_ne.push_back(child);
                     }
                     // which input is zero-tensor ?
-                    int zero_input_mask = (1 << out_num);
+                    int zero_input_mask = (1 << to_port);
                     if (nodes_ne_zmask.count(child) == 0) {
                         nodes_ne_zmask[child] = zero_input_mask;
                     } else {
                         nodes_ne_zmask[child] |= zero_input_mask;
                     }
                 }
-            }
+            });
         }
 
-        // empty tensor OP's other inputs, also no need to calculate?
+        // propagate back the empty fastforward subset
         nodes_to_visit.clear();
         std::copy(nodes_e.begin(), nodes_e.end(), std::back_inserter(nodes_to_visit));
         while(nodes_to_visit.size()) {
@@ -2675,29 +2678,30 @@ void GraphOptimizer::markEmptyTensorFastForward(Graph& graph) {
                     continue;
                 }
                 auto other_parent = edge->getParent();
+                if (other_parent == parent) {
+                    continue;
+                }
                 if (node_in_list(other_parent, nodes_e)) {
                     continue;
                 }
 
                 // all children of this parents are empty skippable
                 bool is_also_skippable = true;
-                auto w_edges2 = other_parent->getChildEdges();
-                for(auto& w : w_edges2) {
-                    auto edge2 = w.lock();
-                    if (!edge2) {
+                NodePtr non_skippable_child;
+                for_all_child(other_parent, [&](const NodePtr& child, int to_port) {
+                    if (!node_in_list(child, nodes_e)) {
                         is_also_skippable = false;
-                        break;
+                        non_skippable_child = child;
                     }
-                    auto other_child = edge2->getChild();
-                    if (!node_in_list(other_child, nodes_e)) {
-                        is_also_skippable = false;
-                        break;
-                    }
-                }
+                });
 
                 if (is_also_skippable) {
                     nodes_e.push_back(other_parent);
                     nodes_to_visit.push_back(other_parent);
+                }
+                std::cout << is_also_skippable << " ::::::::: " << *other_parent << "\n";
+                if (non_skippable_child) {
+                    std::cout << "              " << *non_skippable_child << "\n";
                 }
             }
         }

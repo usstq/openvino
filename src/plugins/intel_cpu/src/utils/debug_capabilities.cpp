@@ -537,6 +537,8 @@ std::ostream& operator<<(std::ostream& os, const PrintableModel& model) {
                 os << printable(constop->get_vector<uint8_t>());
             } else {
                 auto sz = shape_size(constop->get_shape());
+                os << "...";
+                /*
                 if (sz < 9) {
                     sep = "";
                     for (const auto& v : constop->get_value_strings()) {
@@ -545,7 +547,7 @@ std::ostream& operator<<(std::ostream& os, const PrintableModel& model) {
                     }
                 } else {
                     os << "...";
-                }
+                }*/
             }
         }
 

@@ -1354,7 +1354,7 @@ public:
     explicit UpdateNodesSeq(std::vector<NodePtr>& executableGraphNodes)
         : m_executableGraphNodes(executableGraphNodes) {}
 
-    void operator()(size_t stopIndx) {
+    void operator()(size_t stopIndx, bool skip_all) {
         for (; prepareCounter < stopIndx; ++prepareCounter) {
             const auto& node = m_executableGraphNodes[prepareCounter];
             if (node->isDynamicNode()) {
@@ -1450,7 +1450,13 @@ class UpdateNodes : public UpdateNodesBase {
 public:
     using UpdateNodesBase::UpdateNodesBase;
 
-    void operator()(size_t stopIndx) {
+    void operator()(size_t stopIndx, bool skip_all = false) {
+        if (skip_all) {
+            m_prepareCounter.store(stopIndx, std::memory_order_relaxed);
+            m_completion.store(true, std::memory_order_release);
+            return;
+        }
+
         m_completion.store(false);
         auto startCounter = m_prepareCounter.load();
         tbb::detail::d1::wait_context wait_ctx(2);
@@ -1610,17 +1616,27 @@ template <typename UpdateStrategy>
 void Graph::InferDynamic(SyncInferRequest* request, int numaId, UpdateStrategy&& update) {
     size_t inferCounter = 0;
     for (auto stopIndx : m_executableSyncNodesInds) {
+        bool skip_all = true;
         for (auto i = inferCounter; i < stopIndx; ++i) {
             auto& node = m_executableGraphNodes[i];
             node->checkSkippable();
+            if (!node->is_skippable) {
+                skip_all = false;
+            }
         }
-        {
-            auto prof = LinuxPerf::Profile("update", stopIndx);
-            update(stopIndx);
+        update(stopIndx, skip_all);
+        if (skip_all) {
+            inferCounter = stopIndx;
+            continue;
         }
+
         auto prof = LinuxPerf::Profile("InferDynamic", stopIndx);
         for (; inferCounter < stopIndx; ++inferCounter) {
             auto& node = m_executableGraphNodes[inferCounter];
+            if (node->is_skippable) {
+                continue;
+            }
+
             VectorDims dims0;
             if (node->getParentEdges().size()) {
                 dims0 = node->getParentEdgeAt(0)->getMemory().getShape().getStaticDims();
@@ -1631,9 +1647,6 @@ void Graph::InferDynamic(SyncInferRequest* request, int numaId, UpdateStrategy&&
             }
             auto prof = LinuxPerf::Profile(name, node->getOriginalLayers(), node->is_skippable, inferCounter, dims0);
 
-            if (node->is_skippable) {
-                continue;
-            }
             ExecuteNodeWithCatch(node, request, numaId);
         }
     }
