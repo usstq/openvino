@@ -10,8 +10,7 @@
 
 #    include "openvino/core/parallel.hpp"
 
-namespace ov {
-namespace intel_cpu {
+namespace ov::intel_cpu {
 
 enum class WeightCompressionType { FP16 = 0, INT8, INT4 };
 
@@ -28,16 +27,16 @@ static std::shared_ptr<SIMDJit> jit_compile_gemmRegBlk(int rows, int cols, int p
         return vregs_C[row * cols + col];
     };
     auto vmmB = [&](int col) {
-        if (is_preload_b)
+        if (is_preload_b) {
             return vregs_B[col];
-        else
-            return vregs_B[0];
+        }
+        return vregs_B[0];
     };
     auto vmmA = [&](int row) {
-        if (is_preload_b)
+        if (is_preload_b) {
             return vregs_A[0];
-        else
-            return vregs_A[row];
+        }
+        return vregs_A[row];
     };
 
     // load all arguments into register
@@ -60,11 +59,12 @@ static std::shared_ptr<SIMDJit> jit_compile_gemmRegBlk(int rows, int cols, int p
         accumulate == 0,
         [&] {
             // initilaize C to zero
-            for (int r = 0; r < rows; r++)
+            for (int r = 0; r < rows; r++) {
                 for (int c = 0; c < cols; c++) {
                     auto ymm = vmmC(r, c);
                     jit->vxorps(ymm, ymm, ymm);
                 }
+            }
         },
         [&] {
             // load subC[m_rows, m_cols]
@@ -113,37 +113,44 @@ static std::shared_ptr<SIMDJit> jit_compile_gemmRegBlk(int rows, int cols, int p
     jit->do_while_(K > 0, [&]() {
         if (is_preload_b) {
             // preload B regs
-            for (int c = 0; c < cols; c++)
+            for (int c = 0; c < cols; c++) {
                 jit->simd_loadu_ps(vmmB(c), jit->ptr[B_ptr + c * simd_width_bytes]);
+            }
 
-            if (prefetch_B_adv > 0)
+            if (prefetch_B_adv > 0) {
                 jit->prefetcht0(jit->ptr[B_ptr + prefetch_B_adv]);
+            }
 
             B_ptr = B_ptr + B_stride;
             for (int r = 0; r < rows; r++) {
                 loadA(r);
-                for (int c = 0; c < cols; c++)
+                for (int c = 0; c < cols; c++) {
                     jit->simd_fmadd_ps(vmmC(r, c), vmmA(r), vmmB(c));
+                }
             }
 
             A_ptr = A_ptr + 4;
-            if (rows > 3)
+            if (rows > 3) {
                 A_ptr3 = A_ptr3 + 4;
+            }
         } else {
             // preload A regs
-            for (int r = 0; r < rows; r++)
+            for (int r = 0; r < rows; r++) {
                 loadA(r);
+            }
 
             for (int c = 0; c < cols; c++) {
                 jit->simd_loadu_ps(vmmB(c), jit->ptr[B_ptr + c * simd_width_bytes]);
-                for (int r = 0; r < rows; r++)
+                for (int r = 0; r < rows; r++) {
                     jit->simd_fmadd_ps(vmmC(r, c), vmmA(r), vmmB(c));
+                }
             }
 
             B_ptr = B_ptr + B_stride;
             A_ptr = A_ptr + 4;
-            if (rows > 3)
+            if (rows > 3) {
                 A_ptr3 = A_ptr3 + 4;
+            }
         }
         K--;
     });
@@ -514,8 +521,9 @@ static std::shared_ptr<SIMDJit> jit_compile_repack_2xsimdw(WeightCompressionType
     auto vtemp0 = jit->get_vreg();
     auto vtemp1 = jit->get_vreg();
 
-    if (wtype == WeightCompressionType::INT4)
+    if (wtype == WeightCompressionType::INT4) {
         jit->simd_set1_epi32(vmask_u4, 0xF);
+    }
 
     if (wtype == WeightCompressionType::INT8 || wtype == WeightCompressionType::INT4) {
         jit->simd_loadu_ps(vscale0, jit->ptr[scales + 0 * simd_width * sizeof(float)]);
@@ -651,8 +659,9 @@ void ActSparseFcKernel::gemm6x2_Mx2(const float* pA,
     for (m = 0; m + 6 <= M; m += 6, pA += 6 * A_stride, pC += 6 * C_stride) {
         (*gemm6x2[0])(pA, A_stride, pB, B_stride, pC, C_stride, bK, is_accumulate_C);
     }
-    if (m < M)
+    if (m < M) {
         (*gemm6x2[M - m])(pA, A_stride, pB, B_stride, pC, C_stride, bK, is_accumulate_C);
+    }
 }
 
 void ActSparseFcKernel::MM_ComputeBounded_reuseA_f16(const float* A,
@@ -665,7 +674,7 @@ void ActSparseFcKernel::MM_ComputeBounded_reuseA_f16(const float* A,
                                                      int n1) {
     constexpr int BK = 54;
     const auto SIMDW = SIMDJit::vmm_width<float>();
-    float* scratch = scratch_alloc<float>(BK * (SIMDW * 2) + OC);
+    auto scratch = scratch_alloc<float>(BK * (SIMDW * 2) + OC);
 
     int K = IC;
     int64_t A_stride = IC;
@@ -698,7 +707,7 @@ void ActSparseFcKernel::MM_ComputeBounded_reuseA_i8(const float* A,
                                                     int64_t n1) {
     constexpr int BK = 54;
     const auto SIMDW = SIMDJit::vmm_width<float>();
-    float* scratch = scratch_alloc<float>(BK * (SIMDW * 2) + OC);
+    auto scratch = scratch_alloc<float>(BK * (SIMDW * 2) + OC);
 
     int K = IC;
     auto A_stride = IC;
@@ -742,7 +751,7 @@ void ActSparseFcKernel::MM_ComputeBounded_reuseB_i8(const float* A,
     constexpr int BK = 512;
     constexpr int BN = 512;
     auto bN_SIMDWx3 = BN / (SIMDW * 3) * (SIMDW * 3);
-    float* scratch = scratch_alloc<float>(BN * BK + BN);
+    auto scratch = scratch_alloc<float>(BN * BK + BN);
     float* repacked_B_n24 = scratch;
     float* repacked_B_n8 = repacked_B_n24 + bN_SIMDWx3 * BK;
     float* zero_points = repacked_B_n8 + SIMDW * 3 * BK;
@@ -778,21 +787,25 @@ void ActSparseFcKernel::MM_ComputeBounded_reuseB_i8(const float* A,
             for (m = 0; m + 4 <= M; m += 4, pA += 4 * A_stride, pC += 4 * C_stride) {
                 auto* pB = repacked_B_n24;
                 int n = 0;
-                for (; n + SIMDW * 3 <= bN; n += SIMDW * 3, pB += SIMDW * 3 * bK)
+                for (; n + SIMDW * 3 <= bN; n += SIMDW * 3, pB += SIMDW * 3 * bK) {
                     (*gemm4x3[0])(pA, A_stride, pB, SIMDW * 3, pC + n, C_stride, bK, is_accumulate_C);
+                }
                 pB = repacked_B_n8;
-                for (; n < bN; n += SIMDW, pB += SIMDW * bK)
+                for (; n < bN; n += SIMDW, pB += SIMDW * bK) {
                     (*gemm4x1[0])(pA, A_stride, pB, SIMDW, pC + n, C_stride, bK, is_accumulate_C);
+                }
             }
             // M tails
             if (m < M) {
                 auto* pB = repacked_B_n24;
                 int n = 0;
-                for (; n + SIMDW * 3 <= bN; n += SIMDW * 3, pB += SIMDW * 3 * bK)
+                for (; n + SIMDW * 3 <= bN; n += SIMDW * 3, pB += SIMDW * 3 * bK) {
                     (*gemm4x3[M - m])(pA, A_stride, pB, SIMDW * 3, pC + n, C_stride, bK, is_accumulate_C);
+                }
                 pB = repacked_B_n8;
-                for (; n < bN; n += SIMDW, pB += SIMDW * bK)
+                for (; n < bN; n += SIMDW, pB += SIMDW * bK) {
                     (*gemm4x1[M - m])(pA, A_stride, pB, SIMDW, pC + n, C_stride, bK, is_accumulate_C);
+                }
             }
         }
     }
@@ -811,7 +824,7 @@ void ActSparseFcKernel::MM_ComputeBounded_reuseA_i4(const float* A,
                                                     int icgs) {
     int BK = icgs;
     const auto SIMDW = SIMDJit::vmm_width<float>();
-    float* scratch = scratch_alloc<float>(BK * (SIMDW * 2) + OC);
+    auto scratch = scratch_alloc<float>(BK * (SIMDW * 2) + OC);
 
     int K = IC;
     auto A_stride = IC;
@@ -893,8 +906,9 @@ void ActSparseFcKernel::reduce_outputs(float* dst0, float* src0, int num_copies,
         ov::splitter(OC / simd_width, nthr, ithr, oc0, oc1);
         oc0 *= simd_width;
         oc1 *= simd_width;
-        if (oc1 > OC)
+        if (oc1 > OC) {
             oc1 = OC;
+        }
 
         (*m_reduce_outputs_kernel)(dst0 + oc0, src0 + oc0, num_copies, oc1 - oc0, OC);
     });
@@ -909,7 +923,7 @@ ActSparseFcKernel::ActSparseFcKernel(DnnlScratchPadPtr scrach_pad,
       m_is_int4(is_int4),
       m_with_zp(with_zero_points),
       m_ic_group_size(ic_group_size),
-      m_scrach_pad(scrach_pad) {
+      m_scrach_pad(std::move(scrach_pad)) {
     gemm6x2[0] = jit_compile_gemmRegBlk(6, 2);
     gemm6x2[1] = jit_compile_gemmRegBlk(1, 2);
     gemm6x2[2] = jit_compile_gemmRegBlk(2, 2);
@@ -929,7 +943,7 @@ ActSparseFcKernel::ActSparseFcKernel(DnnlScratchPadPtr scrach_pad,
 
     m_reduce_outputs_kernel = jit_compile_reduce_outputs();
 
-    if (m_is_quantized)
+    if (m_is_quantized) {
         if (m_is_int4) {
             m_accumulate_kernel = jit_compile_accumulate_weight_i4(m_with_zp);
             m_decompzp_kernel = get_decompress_zp_u4();
@@ -940,7 +954,7 @@ ActSparseFcKernel::ActSparseFcKernel(DnnlScratchPadPtr scrach_pad,
             m_repack_3xsimdw_i8_kernel = jit_compile_repack_3xsimdw_1xsimdw(m_with_zp);
             m_repack_2xsimdw_kernel = jit_compile_repack_2xsimdw(WeightCompressionType::INT8, m_with_zp);
         }
-    else {
+    } else {
         m_accumulate_kernel = jit_compile_accumulate_weight(WeightCompressionType::FP16);
         m_repack_2xsimdw_kernel = jit_compile_repack_2xsimdw(WeightCompressionType::FP16);
         m_decompzp_kernel = nullptr;
@@ -968,10 +982,11 @@ void ActSparseFcKernel::operator()(const float* input,
     m_scratch_base = m_scratch_mem->getDataAs<uint8_t>();
 
     WeightCompressionType wtype;
-    if (m_is_quantized)
+    if (m_is_quantized) {
         wtype = (m_is_int4 ? WeightCompressionType::INT4 : WeightCompressionType::INT8);
-    else
+    } else {
         wtype = WeightCompressionType::FP16;
+    }
 
     if (M > 1) {
         const auto SIMDW = SIMDJit::vmm_width<float>();
@@ -1108,8 +1123,9 @@ void ActSparseFcKernel::operator()(const float* input,
 
                 // entering a new group, decompress zero-points
                 if (last_gid != gid) {
-                    if (zp)
+                    if (zp) {
                         (*m_decompzp_kernel)(zp + gid * (OC / 2), zpbuff.data(), OC);
+                    }
                     last_gid = gid;
                 }
 
@@ -1124,7 +1140,6 @@ void ActSparseFcKernel::operator()(const float* input,
     reduce_outputs(output, m_output_temp.data(), nthr_max, OC);
 }
 
-}  // namespace intel_cpu
-}  // namespace ov
+}  // namespace ov::intel_cpu
 
 #endif  // OPENVINO_ARCH_X86_64

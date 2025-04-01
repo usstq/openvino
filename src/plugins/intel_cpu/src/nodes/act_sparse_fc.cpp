@@ -26,7 +26,7 @@ namespace ov {
 namespace intel_cpu {
 namespace node {
 
-void ActSparseFC::execute(dnnl::stream strm) {
+void ActSparseFC::execute(const dnnl::stream& strm) {
     MAYBE_UNUSED(strm);
     if (m_executor) {
         const auto* input = getSrcDataAtPortAs<float>(0);
@@ -42,7 +42,7 @@ void ActSparseFC::execute(dnnl::stream strm) {
     }
 }
 
-ActSparseFC::ActSparseFC(const std::shared_ptr<ov::Node>& op, const GraphContext::CPtr context)
+ActSparseFC::ActSparseFC(const std::shared_ptr<ov::Node>& op, const GraphContext::CPtr& context)
     : Node(op, context, NgraphShapeInferFactory(op)) {
     std::string errorMessage;
 
@@ -59,7 +59,7 @@ struct ActSparseFCKey {
     bool with_zero_point;
     int ic_q_group_size;
 
-    size_t hash() const {
+    [[nodiscard]] size_t hash() const {
         using namespace dnnl::impl::primitive_hashing;
         size_t seed = 0;
         seed = hash_combine(seed, is_quantized);
@@ -99,8 +99,9 @@ void ActSparseFC::createPrimitive() {
     auto result = cache->getOrCreate(key, buildExecutor);
     m_executor = result.first;
 
-    if (!m_executor)
+    if (!m_executor) {
         OPENVINO_THROW("Failed to create executor for node ", getName(), ".");
+    }
 
     // reorder weights
     const auto& engine = getEngine();
@@ -160,10 +161,12 @@ void ActSparseFC::createPrimitive() {
 
     if (!m_config.is_int4) {
         // int8 is perOC, no need for reorder
-        if (m_config.is_quantized)
+        if (m_config.is_quantized) {
             m_scales = getSrcMemoryAtPort(2);
-        if (m_config.with_zero_point)
+        }
+        if (m_config.with_zero_point) {
             m_zp = getSrcMemoryAtPort(3);
+        }
     }
 
     auto weightCache = context->getWeightsCache();
@@ -171,25 +174,30 @@ void ActSparseFC::createPrimitive() {
         const auto string_hash = getOriginalLayers() + std::to_string(m_config.is_int4);
         m_weight = *weightCache->findOrCreate(string_hash + "_weight", create_weight);
         if (m_config.is_int4) {
-            if (m_config.with_zero_point)
+            if (m_config.with_zero_point) {
                 m_zp = *weightCache->findOrCreate(string_hash + "_zp_i4", create_zp_i4);
-            if (m_config.is_quantized)
+            }
+            if (m_config.is_quantized) {
                 m_scales = *weightCache->findOrCreate(string_hash + "_scales_i4", create_scales_i4);
+            }
         }
     } else {
         m_weight = create_weight();
         if (m_config.is_int4) {
-            if (m_config.with_zero_point)
+            if (m_config.with_zero_point) {
                 m_zp = create_zp_i4();
-            if (m_config.is_quantized)
+            }
+            if (m_config.is_quantized) {
                 m_scales = create_scales_i4();
+            }
         }
     }
 }
 
 void ActSparseFC::initSupportedPrimitiveDescriptors() {
-    if (!supportedPrimitiveDescriptors.empty())
+    if (!supportedPrimitiveDescriptors.empty()) {
         return;
+    }
 
     // auto rtPrecision = getOriginalInputPrecisionAtPort(0);
     // OPENVINO_ASSERT(rtPrecision == ov::element::f32, "Unexpected rtPrecision:", rtPrecision);
@@ -206,12 +214,13 @@ void ActSparseFC::initSupportedPrimitiveDescriptors() {
                                -1);  // weight
     if (m_config.is_quantized) {
         inPortConfigs.emplace_back(LayoutType::ncsp, ov::element::f32, getInputShapeAtPort(2), false, -1);  // scales
-        if (m_config.with_zero_point)
+        if (m_config.with_zero_point) {
             inPortConfigs.emplace_back(LayoutType::ncsp,
                                        getOriginalInputPrecisionAtPort(3),
                                        getInputShapeAtPort(3),
                                        false,
                                        -1);  // zero-pt
+        }
     }
 
     outPortConfigs.emplace_back(LayoutType::ncsp, rtPrecision, getOutputShapeAtPort(0), false, -1);

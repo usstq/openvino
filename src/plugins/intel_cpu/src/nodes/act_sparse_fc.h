@@ -44,7 +44,7 @@ namespace node {
 
 class ActSparseFC : public Node {
 public:
-    ActSparseFC(const std::shared_ptr<ov::Node>& op, const GraphContext::CPtr context);
+    ActSparseFC(const std::shared_ptr<ov::Node>& op, const GraphContext::CPtr& context);
 
     void getSupportedDescriptors() override {}
     bool created() const override {
@@ -54,12 +54,15 @@ public:
         return false;  // this is a shape-agnostic kernel
     }
     void createPrimitive() override;
-    void executeDynamicImpl(dnnl::stream strm) override {
+
+    void initSupportedPrimitiveDescriptors() override;
+    void execute(const dnnl::stream& strm) override;
+    static bool isSupportedOperation(const std::shared_ptr<const ov::Node>& op, std::string& errorMessage) noexcept;
+
+protected:
+    void executeDynamicImpl(const dnnl::stream& strm) override {
         execute(strm);
     }
-    void initSupportedPrimitiveDescriptors() override;
-    void execute(dnnl::stream strm) override;
-    static bool isSupportedOperation(const std::shared_ptr<const ov::Node>& op, std::string& errorMessage) noexcept;
 
 private:
     std::shared_ptr<ov::intel_cpu::ActSparseFcKernel> m_executor;

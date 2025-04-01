@@ -134,8 +134,9 @@ ov::intel_cpu::ActivationSparsityFusion::ActivationSparsityFusion() {
             config.is_quantized = false;
             config.with_zero_point = false;
             auto const_weight = ov::as_type_ptr<opset1::Constant>(new_args[1].get_node_shared_ptr());
-            if (!const_weight)
+            if (!const_weight) {
                 return false;
+            }
             const auto& w_shape = const_weight->get_shape();
             config.oc = w_shape[0];
             config.ic = w_shape[1];
@@ -152,8 +153,9 @@ ov::intel_cpu::ActivationSparsityFusion::ActivationSparsityFusion() {
             }
 
             auto const_weight = ov::as_type_ptr<opset1::Constant>(new_args[1].get_node_shared_ptr());
-            if (!const_weight)
+            if (!const_weight) {
                 return false;
+            }
             const auto& w_shape = const_weight->get_shape();
             config.oc = w_shape[0];
             config.ic = w_shape[1];
@@ -170,8 +172,9 @@ ov::intel_cpu::ActivationSparsityFusion::ActivationSparsityFusion() {
             }
 
             auto const_weight = ov::as_type_ptr<opset1::Constant>(new_args[1].get_node_shared_ptr());
-            if (!const_weight)
+            if (!const_weight) {
                 return false;
+            }
 
             const auto& w_shape = const_weight->get_shape();
             config.oc = w_shape[0];
@@ -183,16 +186,18 @@ ov::intel_cpu::ActivationSparsityFusion::ActivationSparsityFusion() {
         }
 
         auto const_thr = ov::as_type_ptr<opset1::Constant>(pattern_map.at(sparsity_threshold).get_node_shared_ptr());
-        if (!const_thr)
+        if (!const_thr) {
             return false;
+        }
 
         auto thr = const_thr->get_vector<float>();
-        if (thr.size() != 1)
+        if (thr.size() != 1) {
             return false;
+        }
 
         config.threshold = thr[0];
 
-        auto old_node = root;
+        const auto & old_node = root;
         auto new_node = std::make_shared<ActSparseFCNode>(new_args, config);
         new_node->set_friendly_name(old_node->get_friendly_name());
 
@@ -202,9 +207,10 @@ ov::intel_cpu::ActivationSparsityFusion::ActivationSparsityFusion() {
         }
 
 #ifdef CPU_DEBUG_CAPS
-        if (std::getenv("NO_SPARSE"))
+        if (std::getenv("NO_SPARSE")) {
             return false;
-        std::cout << __func__ << ":" << m.get_match_root() << std::endl;
+        }
+        std::cout << __func__ << ":" << m.get_match_root() << "\n";
 #endif
         ov::replace_node(old_node, new_node);
         return false;

@@ -5,8 +5,7 @@
 #include "act_sparse_fc.hpp"
 
 #include "transformations/itt.hpp"
-namespace ov {
-namespace intel_cpu {
+namespace ov::intel_cpu {
 
 bool ActSparseFCNode::visit_attributes(ov::AttributeVisitor& visitor) {
     INTERNAL_OP_SCOPE(ActSparseFCNode_visit_attributes);
@@ -42,5 +41,4 @@ std::shared_ptr<Node> ActSparseFCNode::clone_with_new_inputs(const ov::OutputVec
     check_new_args_count(this, new_args);
     return std::make_shared<ActSparseFCNode>(new_args, m_config);
 }
-}  // namespace intel_cpu
-}  // namespace ov
+}  // namespace ov::intel_cpu
