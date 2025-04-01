@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2024 Intel Corporation
+// Copyright (C) 2018-2025 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -28,15 +28,10 @@ CPU::CPU() {
 
     auto get_info_linux = [&](int mode) {
         int cpu_index = 0;
-        int cache_index = 0;
-        int cache_files = 3;
+        int file_index = 0;
+        int max_files = 3;
 
         std::string one_info;
-
-        std::vector<std::string> file_name = {"/topology/core_cpus_list",
-                                              "/topology/physical_package_id",
-                                              "/cpufreq/cpuinfo_max_freq"};
-        int num_of_files = file_name.size();
 
         std::string::size_type pos = 0;
         std::string::size_type endpos = 0;
@@ -61,7 +56,7 @@ CPU::CPU() {
             core_1 = std::stoi(sub_str);
             sub_str = possible_info.substr(endpos + 1);
             core_2 = std::stoi(sub_str);
-            system_info_table.resize(core_2 + 1, std::vector<std::string>(cache_files, ""));
+            system_info_table.resize(core_2 + 1, std::vector<std::string>(max_files, ""));
         } else {
             return -1;
         }
@@ -85,12 +80,12 @@ CPU::CPU() {
 
                 for (cpu_index = core_1; cpu_index <= core_2; cpu_index++) {
                     if (mode == cache_info_mode) {
-                        for (int n = 0; n < cache_files; n++) {
-                            cache_index = (n == 0) ? n : n + 1;
+                        for (int n = 0; n < max_files; n++) {
+                            file_index = (n == 0) ? n : n + 1;
                             one_info.clear();
 
                             std::ifstream cache_file("/sys/devices/system/cpu/cpu" + std::to_string(cpu_index) +
-                                                     "/cache/index" + std::to_string(cache_index) + "/shared_cpu_list");
+                                                     "/cache/index" + std::to_string(file_index) + "/shared_cpu_list");
                             if (cache_file.is_open()) {
                                 std::getline(cache_file, one_info);
                             } else {
@@ -102,7 +97,11 @@ CPU::CPU() {
                             system_info_table[cpu_index][n] = std::move(one_info);
                         }
                     } else {
-                        for (int n = 0; n < num_of_files; n++) {
+                        std::vector<std::string> file_name = {"/topology/core_cpus_list",
+                                                              "/topology/physical_package_id",
+                                                              "/cpufreq/cpuinfo_max_freq"};
+
+                        for (int n = 0; n < max_files; n++) {
                             one_info.clear();
 
                             std::ifstream cache_file("/sys/devices/system/cpu/cpu" + std::to_string(cpu_index) +
@@ -141,7 +140,9 @@ CPU::CPU() {
             }
             std::string cache_info;
             std::getline(cache_file, cache_info);
-            node_info_table.emplace_back(std::move(cache_info));
+            if (cache_info.size() > 0) {
+                node_info_table.emplace_back(std::move(cache_info));
+            }
             node_index++;
         }
     };
@@ -222,11 +223,18 @@ CPU::CPU() {
         } else {
             _processors = valid_cpu_mapping_table.size();
             _cpu_mapping_table.swap(valid_cpu_mapping_table);
-            update_valid_processor_linux(std::move(phy_core_list),
-                                         _numa_nodes,
-                                         _cores,
-                                         _proc_type_table,
-                                         _cpu_mapping_table);
+            int cur_numa_nodes = _numa_nodes;
+            int cur_cores = _cores;
+            {
+                std::lock_guard<std::mutex> lock{_cpu_mutex};
+                update_valid_processor_linux(std::move(phy_core_list),
+                                             cur_numa_nodes,
+                                             cur_cores,
+                                             _proc_type_table,
+                                             _cpu_mapping_table);
+            }
+            _cores = cur_cores;
+            _numa_nodes = cur_numa_nodes;
             return 0;
         }
     };
@@ -235,7 +243,7 @@ CPU::CPU() {
 
     if (!get_info_linux(cache_info_mode)) {
         parse_cache_info_linux(system_info_table,
-                               node_info_table,
+                               std::move(node_info_table),
                                _processors,
                                _numa_nodes,
                                _sockets,
@@ -249,7 +257,7 @@ CPU::CPU() {
          (_proc_type_table[0][ALL_PROC] != _proc_type_table[0][EFFICIENT_CORE_PROC]))) {
         if (!get_info_linux(freq_info_mode)) {
             parse_freq_info_linux(system_info_table,
-                                  node_info_table,
+                                  std::move(node_info_table),
                                   _processors,
                                   _numa_nodes,
                                   _sockets,
@@ -313,11 +321,6 @@ CPU::CPU() {
     if (check_valid_cpu() < 0) {
         OPENVINO_THROW("CPU affinity check failed. No CPU is eligible to run inference.");
     };
-
-    if (_proc_type_table.size() > 1) {
-        int cur_processor_id = sched_getcpu();
-        sort_table_by_cpu_id(cur_processor_id, _proc_type_table, _cpu_mapping_table);
-    }
 
     _org_proc_type_table = _proc_type_table;
 
@@ -510,8 +513,7 @@ void parse_cache_info_linux(const std::vector<std::vector<std::string>> system_i
         if ((system_info_table[n][2].size() > 0) || (system_info_table[n][1].size() > 0)) {
             info_index = system_info_table[n][2].size() > 0 ? 2 : 1;
             if (-1 == _cpu_mapping_table[n][CPU_MAP_SOCKET_ID]) {
-                std::string::size_type pos = 0;
-                std::string::size_type endpos = 0;
+                std::string::size_type pos = 0, endpos = 0, endpos1 = 0;
                 std::string sub_str;
 
                 int core_1;
@@ -525,7 +527,10 @@ void parse_cache_info_linux(const std::vector<std::vector<std::string>> system_i
                 }
 
                 while (1) {
-                    if ((endpos = system_info_table[n][info_index].find('-', pos)) != std::string::npos) {
+                    endpos = system_info_table[n][info_index].find('-', pos);
+                    endpos1 = system_info_table[n][info_index].find(',', pos);
+
+                    if (endpos < endpos1) {
                         sub_str = system_info_table[n][info_index].substr(pos, endpos - pos);
                         core_1 = std::stoi(sub_str);
                         sub_str = system_info_table[n][info_index].substr(endpos + 1);
@@ -543,8 +548,8 @@ void parse_cache_info_linux(const std::vector<std::vector<std::string>> system_i
                                 return;
                             };
                         }
-                    } else if (pos != std::string::npos) {
-                        sub_str = system_info_table[n][info_index].substr(pos);
+                    } else {
+                        sub_str = system_info_table[n][info_index].substr(pos, endpos1 - pos);
                         core_1 = std::stoi(sub_str);
                         _cpu_mapping_table[core_1][CPU_MAP_SOCKET_ID] = _sockets;
                         _cpu_mapping_table[core_1][CPU_MAP_NUMA_NODE_ID] =
@@ -553,11 +558,10 @@ void parse_cache_info_linux(const std::vector<std::vector<std::string>> system_i
                         if (_processors == 0) {
                             return;
                         };
-                        endpos = pos;
                     }
 
-                    if ((pos = system_info_table[n][2].find(',', endpos)) != std::string::npos) {
-                        pos++;
+                    if (endpos1 != std::string::npos) {
+                        pos = endpos1 + 1;
                     } else {
                         break;
                     }

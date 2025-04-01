@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2024 Intel Corporation
+// Copyright (C) 2018-2025 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -199,6 +199,55 @@ struct NUM_STREAMS final : OptionBase<NUM_STREAMS, ov::streams::Num> {
 };
 
 //
+// WEIGHTS_PATH
+//
+struct WEIGHTS_PATH final : OptionBase<WEIGHTS_PATH, std::string> {
+    static std::string_view key() {
+        return ov::weights_path.name();
+    }
+
+    static constexpr std::string_view getTypeName() {
+        return "std::string";
+    }
+
+    static std::string defaultValue() {
+        return "";
+    }
+
+    static OptionMode mode() {
+        return OptionMode::RunTime;
+    }
+};
+
+//
+// MODEL_PTR
+//
+struct MODEL_PTR final : OptionBase<MODEL_PTR, std::shared_ptr<const ov::Model>> {
+    static std::string_view key() {
+        return ov::hint::model.name();
+    }
+
+    static constexpr std::string_view getTypeName() {
+        return "std::shared_ptr<ov::Model>";
+    }
+
+    static std::shared_ptr<const ov::Model> defaultValue() {
+        return nullptr;
+    }
+
+    static std::shared_ptr<const ov::Model> parse(std::string_view) {
+        return nullptr;
+    }
+    static std::string toString(const std::shared_ptr<const ov::Model>& m) {
+        return "";
+    }
+
+    static OptionMode mode() {
+        return OptionMode::RunTime;
+    }
+};
+
+//
 // ENABLE_CPU_PINNING
 //
 struct ENABLE_CPU_PINNING final : OptionBase<ENABLE_CPU_PINNING, bool> {
@@ -282,6 +331,26 @@ struct RUN_INFERENCES_SEQUENTIALLY final : OptionBase<RUN_INFERENCES_SEQUENTIALL
     static bool defaultValue() {
         return false;
     }
+
+    static OptionMode mode() {
+        return OptionMode::RunTime;
+    }
+};
+
+struct DISABLE_VERSION_CHECK final : OptionBase<DISABLE_VERSION_CHECK, bool> {
+    static std::string_view key() {
+        return ov::intel_npu::disable_version_check.name();
+    }
+
+    static bool defaultValue() {
+        return false;
+    }
+
+#ifdef NPU_PLUGIN_DEVELOPER_BUILD
+    static std::string_view envVar() {
+        return "OV_NPU_DISABLE_VERSION_CHECK";
+    }
+#endif
 
     static OptionMode mode() {
         return OptionMode::RunTime;

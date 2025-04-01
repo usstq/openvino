@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2022 Intel Corporation
+// Copyright (C) 2018-2025 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -6,9 +6,7 @@
 
 #include "openvino/pass/graph_rewrite.hpp"
 
-namespace ov {
-namespace intel_cpu {
-namespace pass {
+namespace ov::intel_cpu::pass {
 
 /**
  * @interface BrgemmToBrgemmCPU
@@ -34,10 +32,8 @@ namespace pass {
  */
 class BrgemmToBrgemmCPU : public ov::pass::MatcherPass {
 public:
-    OPENVINO_RTTI("BrgemmToBrgemmCPU", "0");
+    OPENVINO_MATCHER_PASS_RTTI("BrgemmToBrgemmCPU");
     BrgemmToBrgemmCPU();
 };
 
-}  // namespace pass
-}  // namespace intel_cpu
-}  // namespace ov
+}  // namespace ov::intel_cpu::pass

@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2024 Intel Corporation
+// Copyright (C) 2018-2025 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -50,7 +50,7 @@ struct ProfilingQuery {
           _index(index) {}
     ProfilingQuery(const ProfilingQuery&) = delete;
     ProfilingQuery& operator=(const ProfilingQuery&) = delete;
-    void create(const ze_graph_profiling_pool_handle_t& profiling_pool);
+    void create(const std::shared_ptr<ProfilingPool>& profiling_pool);
     ze_graph_profiling_query_handle_t getHandle() const {
         return _handle;
     }
@@ -66,6 +66,8 @@ private:
 
     std::shared_ptr<ZeroInitStructsHolder> _init_structs;
     const uint32_t _index;
+
+    std::shared_ptr<ProfilingPool> _profiling_pool = nullptr;
 
     ze_graph_profiling_query_handle_t _handle = nullptr;
 };

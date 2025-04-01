@@ -160,7 +160,8 @@ DQMatMulCWi::DQMatMulCWi(Context::Ref ctx) {
         auto qcoeff_shape = matched_node_qcoeff->output(0).get_shape();
 
         if ((ov::element::i4 == matched_qweight->get_element_type() ||
-             ov::element::i8 == matched_qweight->get_element_type()) &&
+             ov::element::i8 == matched_qweight->get_element_type() ||
+             ov::element::nf4 == matched_qweight->get_element_type()) &&
             (ov::op::util::is_parameter(matched_node_qcoeff) || ov::op::util::is_constant(matched_node_qcoeff)) &&
             qcoeff_shape[1] == 1 && !matched_matmul->get_transpose_a() && matched_matmul->get_transpose_b()) {
             auto matched_node_cvtw = node_to_output.at(qcvtw).get_node_shared_ptr();
@@ -1550,7 +1551,7 @@ SliceLastMatmulTranspose::SliceLastMatmulTranspose() {
 
 SliceLastMatmulMultiply::SliceLastMatmulMultiply() {
     auto matmul = opp::wrap_type<ov::op::v0::MatMul>({opp::any_input(), opp::any_input()});
-    auto div = opp::wrap_type<ov::op::v1::Divide>({matmul, opp::any_input()});
+    auto div = opp::wrap_type<ov::op::v1::Multiply, ov::op::v1::Divide>({matmul, opp::any_input()});
     auto tanh = opp::wrap_type<ov::op::v0::Tanh>({div});
     auto multiply = opp::wrap_type<ov::op::v1::Multiply>({tanh, opp::any_input()});
     auto res = opp::wrap_type<ov::op::v0::Result>({multiply});
