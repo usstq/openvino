@@ -262,6 +262,7 @@ void dump_cpp_style(std::ostream& os, const std::shared_ptr<ov::Model>& model) {
     // collect all scalar & short 1D vectors for literal-style display
     std::map<std::shared_ptr<ov::Node>, std::string> literal_consts;
     for (auto op : f.get_ordered_ops()) {
+        break;
         if (auto constop = ov::as_type_ptr<op::v0::Constant>(op)) {
             // only i32/f32 type const literal can be parsed by C++ compiler
             if (constop->get_output_element_type(0) != ov::element::i32 &&
@@ -330,7 +331,7 @@ void dump_cpp_style(std::ostream& os, const std::shared_ptr<ov::Model>& model) {
 
         if (auto constop = ov::as_type_ptr<op::v0::Constant>(op)) {
             os << "auto " << name << " = makeConst(" << to_code(op->get_output_element_type(0)) << ", "
-               << to_code(op->get_output_shape(0)) << ", " << to_code(constop, true) << ");" << std::endl;
+               << to_code(op->get_output_shape(0)) << ", " << to_code(constop, true) << ");   // " << reinterpret_cast<const void*>(op.get()) << std::endl;
         } else {
             os << "auto " << name << " = makeOP<" << type << ">({";
             // input args
